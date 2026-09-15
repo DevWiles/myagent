@@ -1,7 +1,5 @@
 package dev.wiles.myagent;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
@@ -15,6 +13,7 @@ import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
 import dev.wiles.myagent.cli.MarkdownRenderer;
 import dev.wiles.myagent.cli.OutputDetail;
+import dev.wiles.myagent.cli.ToolSummary;
 import dev.wiles.myagent.cli.StatusLine;
 import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
@@ -28,6 +27,7 @@ import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 交互式命令行外壳：读输入、交给 Agent、把事件画到屏幕上。
@@ -39,8 +39,6 @@ public final class Repl {
     private static final int COLLAPSED_OUTPUT_LINES = 1;
     /** /verbose 打开后显示这么多行。完整内容无论如何都会原样发给模型。 */
     private static final int VERBOSE_OUTPUT_LINES = 20;
-
-    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static final List<String> SLASH_COMMANDS =
             List.of("/help", "/clear", "/tools", "/history", "/quiet", "/verbose",
@@ -73,6 +71,17 @@ public final class Repl {
      * 一直攒到这一轮结束还没有工具调用，那就是最终答案，打出来。
      */
     private final StringBuilder quietBuffer = new StringBuilder();
+
+    /**
+     * 当前这组工具调用在屏幕上占了几行，以及都调了些什么。
+     *
+     * 跑的时候细节要显示——用户得知道它在干嘛；跑完之后这些细节就没用了，
+     * 留着只会把结论挤出屏幕。所以等模型重新开口（或这一轮结束）时，
+     * 把这几行擦掉，换成一句「读取 3 个文件 · 执行 1 条命令」。
+     */
+    private int toolGroupLines;
+    private final Map<String, Integer> toolGroupCounts = ToolSummary.newCounter();
+    private boolean toolGroupHasFailure;
 
     /** 本轮统计，跑完在输入框上方汇报一行。 */
     private long runStartedAt;
@@ -188,6 +197,7 @@ public final class Repl {
         } finally {
             status.stop();          // 无论如何都不能把转圈留在屏幕上
             flushText();
+            collapseToolGroup();
             flushQuietBuffer();     // 中途被打断时也不能把答案吞掉
             printRunSummary();
         }
@@ -214,20 +224,6 @@ public final class Repl {
         System.out.println("\n" + Ansi.dim(sb.toString()));
     }
 
-    /** 从参数 JSON 里挑出最能说明问题的那个值，精简模式下只显示它。 */
-    private static String keyArgument(String argumentsJson) {
-        try {
-            JsonNode args = JSON.readTree(argumentsJson);
-            for (String field : new String[]{"path", "command", "dirs", "files"}) {
-                if (args.hasNonNull(field)) {
-                    return oneLine(args.get(field).asText(args.get(field).toString()), 80);
-                }
-            }
-        } catch (Exception ignored) {
-            // 解析不了就退回原样
-        }
-        return oneLine(argumentsJson, 80);
-    }
 
     private void loop() {
         int consecutiveInterrupts = 0;
@@ -289,6 +285,7 @@ public final class Repl {
         status.stop();
 
         if (event instanceof AgentEvent.TextDelta d) {
+            collapseToolGroup();        // 模型又开口了，先把上一组工具收起来
             if (detail == OutputDetail.QUIET) {
                 quietBuffer.append(d.text());       // 先攒着，还不知道是不是最终答案
             } else {
@@ -312,8 +309,14 @@ public final class Repl {
                 // 既然来了工具调用，说明刚才攒的那段只是过程说明，不是答案
                 quietBuffer.setLength(0);
             } else {
-                System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
-                        + Ansi.dim(oneLine(t.arguments(), 100)));
+                if (toolGroupLines == 0) {
+                    toolPrintln("");    // 一组工具开始前空一行
+                }
+                // 减去 "⏺ " 和工具名的占位，保证整行不会折行
+                int room = width - 4 - Ansi.displayWidth(t.tool());
+                toolPrintln(Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
+                        + Ansi.dim(oneLine(t.arguments(), Math.max(20, room))));
+                toolGroupCounts.merge(t.tool(), 1, Integer::sum);
             }
             status.start("执行 " + t.tool() + "…");
 
@@ -321,15 +324,18 @@ public final class Repl {
             renderToolOutput(t);
 
         } else if (event instanceof AgentEvent.Done d) {
+            collapseToolGroup();
             flushQuietBuffer();
 
         } else if (event instanceof AgentEvent.Compacted c) {
+            collapseToolGroup();
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
             System.out.println("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
                     + c.tokensAfter() + " tokens"
                     + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
         } else if (event instanceof AgentEvent.Failed f) {
+            collapseToolGroup();
             flushQuietBuffer();
             System.out.println(Ansi.red("⚠ " + f.reason()));
         }
@@ -390,26 +396,86 @@ public final class Repl {
             }
             // 失败是必须让人看见的，否则用户完全不知道出了什么事
             System.out.println(Ansi.red("⏺ " + event.tool() + " ✗ ")
-                    + Ansi.dim(oneLine(event.output(), 120)));
+                    + Ansi.dim(oneLine(event.output(), Math.max(20, width - 8))));
             return;
+        }
+        if (!event.ok()) {
+            toolGroupHasFailure = true;   // 出过错的这一组不收起来，得让人看见
         }
         String mark = event.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
         String[] lines = event.output().split("\n");
         int limit = detail == OutputDetail.VERBOSE ? VERBOSE_OUTPUT_LINES : COLLAPSED_OUTPUT_LINES;
 
         for (int i = 0; i < Math.min(lines.length, limit); i++) {
-            System.out.println((i == 0 ? mark : "    ") + Ansi.dim(oneLine(lines[i], 160)));
+            toolPrintln((i == 0 ? mark : "    ")
+                    + Ansi.dim(oneLine(lines[i], Math.max(20, width - 6))));
         }
         int hidden = lines.length - limit;
         if (hidden > 0) {
-            System.out.println(Ansi.dim("    … 另有 " + hidden + " 行"
+            toolPrintln(Ansi.dim("    … 另有 " + hidden + " 行"
                     + (detail == OutputDetail.VERBOSE ? "" : "（/verbose 展开）")));
         }
     }
 
-    private static String oneLine(String text, int max) {
+    /** 打印属于当前工具组的一行，记着行数好在收起时擦掉。 */
+    private void toolPrintln(String text) {
+        System.out.println(text);
+        toolGroupLines++;
+    }
+
+    /**
+     * 把这一组工具调用的细节从屏幕上擦掉，换成一行概括。
+     *
+     * 三种情况不收：非交互终端（擦除靠 ANSI 光标控制，管道里只会留下乱码）、
+     * 组里有失败（错误必须留在屏幕上）、以及 /verbose（用户明确要看细节，
+     * 而且那时候行数可能超出一屏，擦除也不可靠）。
+     */
+    private void collapseToolGroup() {
+        if (toolGroupLines == 0) {
+            return;
+        }
+        if (!rawMode || toolGroupHasFailure || detail == OutputDetail.VERBOSE) {
+            resetToolGroup();
+            return;
+        }
+        StringBuilder erase = new StringBuilder();
+        for (int i = 0; i < toolGroupLines; i++) {
+            erase.append(Ansi.up(1)).append(Ansi.clearLine());
+        }
+        System.out.print(erase);
+        System.out.println(Ansi.green("⏺ ") + Ansi.dim(ToolSummary.describe(toolGroupCounts)));
+        resetToolGroup();
+    }
+
+    private void resetToolGroup() {
+        toolGroupLines = 0;
+        toolGroupHasFailure = false;
+        toolGroupCounts.clear();
+    }
+
+    /**
+     * 压成一行并截断到指定列数。
+     *
+     * 必须按<b>显示列数</b>截而不是字符数：一个汉字占两列，按字符数截出来的行
+     * 仍可能超出终端宽度、被终端自动折行。而折行会让一行变成两行，
+     * 收起工具组时按行数擦除就会多擦一行，把上面的正文吃掉。
+     */
+    private static String oneLine(String text, int maxColumns) {
         String flat = text.replace('\n', ' ').replace('\r', ' ').trim();
-        return flat.length() <= max ? flat : flat.substring(0, max) + "…";
+        if (Ansi.displayWidth(flat) <= maxColumns) {
+            return flat;
+        }
+        StringBuilder kept = new StringBuilder();
+        int used = 0;
+        for (char c : flat.toCharArray()) {
+            int columns = Ansi.charWidth(c);
+            if (used + columns > maxColumns - 1) {
+                break;
+            }
+            kept.append(c);
+            used += columns;
+        }
+        return kept + "…";
     }
 
     private boolean handleSlashCommand(String line) {
@@ -438,7 +504,8 @@ public final class Repl {
                 agent.history().forEach(m -> System.out.println(
                         "  " + Ansi.cyan("[" + m.role() + "]") + " "
                                 + (m.hasToolCalls() ? "调用 " + m.toolCallsOrEmpty().size() + " 个工具 " : "")
-                                + Ansi.dim(oneLine(m.content() == null ? "" : m.content(), 80))));
+                                + Ansi.dim(oneLine(m.content() == null ? "" : m.content(),
+                                        Math.max(20, width - 20)))));
                 return true;
             }
             case "/verbose" -> {
