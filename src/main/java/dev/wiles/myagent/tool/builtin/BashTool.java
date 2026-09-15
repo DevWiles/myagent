@@ -10,16 +10,21 @@ import java.io.InputStream;
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import dev.wiles.myagent.tool.Args;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.CommandGuard;
+import dev.wiles.myagent.tool.safety.CommandRisk;
 
 /**
  * 执行 shell 命令。**五个工具里威力最大、也最危险的一个。**
  *
  * 危险在于它绕过了 Workspace 沙箱：cat ../../../etc/passwd 照样能跑。
- * 换句话说，一旦开放这个工具，前面辛苦做的路径校验就只剩「防手滑」的作用了。
- * 真正的防线得靠人工确认（后面单独做一步），这一版先只做三件保命的事：
- * 限定工作目录、超时、输出截断。
+ * 一旦开放这个工具，前面辛苦做的路径校验就只剩「防手滑」的作用了。
  *
- * 【待你实现】测试见 BashToolTest。这个最难，实现步骤写得最细。
+ * 所以这里叠了四层防护，层层都不完美，合起来才够用：
+ *   1. 限定工作目录、超时、输出截断 —— 防手滑和防失控
+ *   2. CommandGuard 静态评估 —— 挡住明显危险（但挡不住蓄意绕过）
+ *   3. ApprovalPolicy 人工确认 —— 真正的防线，重要动作总有人过目
+ *   4. 被拦下来时返回 error 而不是抛异常 —— 模型看得懂，会换个做法
  */
 public final class BashTool implements Tool {
 
@@ -30,9 +35,18 @@ public final class BashTool implements Tool {
     private static final int MAX_OUTPUT_CHARS = 30_000;
 
     private final Workspace workspace;
+    private final CommandGuard guard;
+    private final ApprovalPolicy approval;
 
+    /** 不指定审批策略时一律拒绝：非交互环境没人能点头，默认就该是最安全的那档。 */
     public BashTool(Workspace workspace) {
+        this(workspace, new CommandGuard(), ApprovalPolicy.denyAll());
+    }
+
+    public BashTool(Workspace workspace, CommandGuard guard, ApprovalPolicy approval) {
         this.workspace = workspace;
+        this.guard = guard;
+        this.approval = approval;
     }
 
     @Override
@@ -44,7 +58,10 @@ public final class BashTool implements Tool {
     public String description() {
         return "在工作区根目录下执行一条 shell 命令，返回标准输出和标准错误的合并结果。"
                 + "适合运行构建、测试、git 等命令。"
-                + "不要用它来读写文件（请用 read_file / write_file），也不要执行需要交互输入的命令。";
+                + "禁止用它查看目录或读写文件——列目录必须用 list_dir，读文件必须用 read_file，"
+                + "写文件必须用 write_file。"
+                + "不要执行需要交互输入的命令。"
+                + "删除文件、访问网络、安装依赖等操作会先征求用户同意，可能被拒绝。";
     }
 
     @Override
@@ -72,6 +89,17 @@ public final class BashTool implements Tool {
         String command = Args.requireString(args, "command");
         int timeout = Math.max(1, Math.min(MAX_TIMEOUT_SECONDS,
                 Args.optInt(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)));
+
+        // 先过安全闸：被拦下来要把理由讲清楚，模型才能换个做法而不是原样重试
+        CommandRisk risk = guard.assess(command);
+        if (risk.isForbidden()) {
+            return ToolResult.error("这条命令被安全策略拒绝执行。原因: " + risk.reason()
+                    + "。请改用其它方式完成目标，不要重试同样的命令。");
+        }
+        if (risk.needsApproval() && !approval.approve("执行命令", command, risk.reason())) {
+            return ToolResult.error("用户拒绝执行这条命令（" + risk.reason() + "）。"
+                    + "请换一种做法，或者先向用户说明为什么需要它。");
+        }
 
         Process process;
         try {

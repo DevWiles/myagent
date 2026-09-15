@@ -29,6 +29,10 @@ public final class Repl {
     /** 工具输出在终端里最多显示几行，完整内容仍然会完整发给模型。 */
     private static final int OUTPUT_PREVIEW_LINES = 6;
 
+    /** 和 TerminalApproval 共用一个 reader：各建各的会各自缓冲 System.in，输入会丢。 */
+    private final BufferedReader in =
+            new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+
     private final Config config;
     private final Workspace workspace;
     private final ToolRegistry tools;
@@ -37,7 +41,7 @@ public final class Repl {
     public Repl() {
         this.config = Config.load();
         this.workspace = Workspace.ofCurrentDir();
-        this.tools = BuiltinTools.createDefault(workspace);
+        this.tools = BuiltinTools.createDefault(workspace, new TerminalApproval(in));
 
         if (config.hasApiKey()) {
             LlmClient client = new DeepSeekClient(config);
@@ -50,9 +54,7 @@ public final class Repl {
 
     public void run() {
         printBanner();
-        try (BufferedReader in = new BufferedReader(
-                new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
-
+        try {
             while (true) {
                 System.out.print(PROMPT);
                 System.out.flush();

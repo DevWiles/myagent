@@ -1,0 +1,240 @@
+package dev.wiles.myagent.tool.safety;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+/**
+ * shell 命令风险评估。
+ *
+ * <h3>先说清楚它做不到什么</h3>
+ * shell 太灵活，静态检查**不可能**做到万无一失。
+ * {@code eval $(echo cm0gLXJmIC8K | base64 -d)} 这种就绕过去了，
+ * 变量拼接、别名、脚本文件同理。所以这个类的定位是
+ * <b>挡住明显危险和手滑，不是对抗蓄意攻击</b>。
+ * 真正的防线是后面那道人工确认——重要动作总有人过目。
+ *
+ * <h3>三档判定</h3>
+ * <ul>
+ *   <li>{@link RiskLevel#FORBIDDEN} 直接拒绝，用户同意也不执行：删根目录、提权、
+ *       格式化、关机、读私钥、管道到 shell</li>
+ *   <li>{@link RiskLevel#NEEDS_APPROVAL} 要人点头：删改文件、联网、装包、改权限</li>
+ *   <li>{@link RiskLevel#SAFE} 直接放行：只读查看、编译测试等</li>
+ * </ul>
+ * <b>未知命令一律归入 NEEDS_APPROVAL</b>——白名单没列到的东西，宁可多问一句。
+ *
+ * <h3>为什么要按分隔符拆开逐段检查</h3>
+ * {@code ls && rm -rf ~} 只看第一个词是 ls 就放行，等于没防。
+ * 所以 {@code ; && || |} 和子命令 {@code $() ``} 都要当作分界，每一段单独判，取最严的那档。
+ */
+public final class CommandGuard {
+
+    /** 无论如何都不执行。 */
+    private static final Set<String> FORBIDDEN_COMMANDS = Set.of(
+            "sudo", "su", "doas",                                   // 提权
+            "mkfs", "fdisk", "diskutil", "parted", "shred", "srm",   // 抹盘
+            "shutdown", "reboot", "halt", "poweroff", "init",        // 关机
+            "launchctl", "systemctl", "service", "crontab",          // 系统服务与定时任务
+            "useradd", "userdel", "usermod", "passwd", "visudo", "chpasswd");
+
+    /** 要人点头才执行。 */
+    private static final Set<String> APPROVAL_COMMANDS = Set.of(
+            "rm", "rmdir", "mv", "dd", "truncate", "tee", "ln",       // 能毁掉已有文件
+            "chmod", "chown", "chgrp",                                // 改权限
+            "curl", "wget", "nc", "ncat", "telnet", "ssh", "scp",     // 出网
+            "sftp", "rsync", "ftp",
+            "kill", "killall", "pkill",                               // 动别的进程
+            "npm", "pnpm", "yarn", "pip", "pip3", "brew",             // 装包会执行第三方脚本
+            "apt", "apt-get", "yum", "dnf", "gem", "composer",
+            "docker", "podman", "kubectl",                            // 容器与集群
+            "eval", "exec", "source", "xargs",                        // 能把任意字符串变成命令
+            "osascript", "open", "defaults");
+
+    /** 只读或影响限于工作区，直接放行。 */
+    private static final Set<String> SAFE_COMMANDS = Set.of(
+            "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag",
+            "find", "fd", "wc", "echo", "printf", "pwd", "cd", "which", "whereis",
+            "type", "file", "stat", "du", "df", "tree", "realpath", "readlink",
+            "diff", "sort", "uniq", "cut", "tr", "jq", "basename", "dirname",
+            "date", "sleep", "true", "false", "test", "env", "uname", "whoami",
+            "hostname", "seq", "yes", "touch", "mkdir", "cp", "awk", "sed",
+            "java", "javac", "jar", "mvn", "gradle", "node", "npx", "deno",
+            "python", "python3", "go", "rustc", "cargo", "make", "cmake", "dotnet");
+
+    /** 带后缀的变体也算，比如 mkfs.ext4、mkfs.xfs。 */
+    private static final Set<String> FORBIDDEN_PREFIXES = Set.of("mkfs", "newfs");
+
+    /** 包管理器里这些子命令只是跑脚本或查信息，不装东西。 */
+    private static final Set<String> PACKAGE_MANAGERS = Set.of("npm", "pnpm", "yarn");
+    private static final Set<String> SAFE_PACKAGE_SUBCOMMANDS = Set.of(
+            "test", "run", "start", "ls", "list", "outdated", "view", "why", "version");
+
+    /** git 的只读子命令。 */
+    private static final Set<String> SAFE_GIT_SUBCOMMANDS = Set.of(
+            "status", "log", "diff", "show", "branch", "ls-files", "rev-parse",
+            "describe", "blame", "shortlog", "reflog", "cat-file", "remote");
+
+    /** 出现这些片段就认定在碰凭据，一律拒绝——agent 没有任何理由读它们。 */
+    private static final List<String> SECRET_PATHS = List.of(
+            "/.ssh", "id_rsa", "id_ed25519", "id_dsa", "/.aws", "/.gnupg",
+            "/.kube/config", "/etc/shadow", "/etc/sudoers", "/etc/passwd",
+            ".pem", ".p12", "keychain");
+
+    /** 系统目录，配合写操作就是 FORBIDDEN。 */
+    private static final List<String> SYSTEM_PATHS = List.of(
+            "/etc/", "/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/boot/", "/var/");
+
+    /** 能改文件的命令，用来判断上面那些系统路径是被读还是被写。 */
+    private static final Set<String> WRITE_COMMANDS = Set.of(
+            "rm", "rmdir", "mv", "cp", "dd", "tee", "truncate", "ln",
+            "chmod", "chown", "chgrp", "touch", "mkdir");
+
+    /** 在原始命令上整体匹配的致命模式——拆段之后就看不出来了，所以必须先查。 */
+    private static final List<Pattern> FATAL_PATTERNS = List.of(
+            Pattern.compile(":\\s*\\(\\s*\\)\\s*\\{.*\\|.*&"),               // fork bomb
+            Pattern.compile("\\|\\s*(sudo\\s+)?(sh|bash|zsh|python\\d?)\\b"), // curl … | sh
+            Pattern.compile(">\\s*/dev/(sd|disk|nvme|hd)"),                   // 直接写裸设备
+            Pattern.compile("\\bof=/dev/"),                                   // dd of=/dev/…
+            Pattern.compile("\\brm\\s+(-\\S+\\s+)*[~/]\\s*$"),                // rm … / 或 rm … ~
+            Pattern.compile("\\brm\\s+(-\\S+\\s+)*/\\s+"),
+            Pattern.compile("\\b(mv|cp)\\s+\\S+\\s+/dev/null\\b"));           // 把文件搬进黑洞
+
+    /** rm 带这些参数时特别危险。 */
+    private static final Pattern RM_RECURSIVE = Pattern.compile("\\brm\\s+(-\\S*[rR]\\S*\\s+)");
+    /** 会就地改文件的 sed。 */
+    private static final Pattern SED_IN_PLACE = Pattern.compile("\\bsed\\s+(-\\S+\\s+)*-i\\b|\\bsed\\s+-\\S*i");
+
+    public CommandRisk assess(String command) {
+        if (command == null || command.isBlank()) {
+            return CommandRisk.forbidden("命令为空");
+        }
+        String lower = command.toLowerCase(Locale.ROOT);
+
+        // ---- 1. 整体致命模式：拆段后就看不出来了，必须先查 ----
+        for (Pattern p : FATAL_PATTERNS) {
+            if (p.matcher(lower).find()) {
+                return CommandRisk.forbidden("命令匹配到高危模式（删根目录 / 管道执行下载内容 / 写裸设备等）");
+            }
+        }
+        for (String secret : SECRET_PATHS) {
+            if (lower.contains(secret)) {
+                return CommandRisk.forbidden("命令涉及密钥或系统凭据文件: " + secret);
+            }
+        }
+
+        // ---- 2. 逐段判定，取最严的一档 ----
+        RiskLevel worst = RiskLevel.SAFE;
+        String reason = "";
+        for (String segment : splitSegments(command)) {
+            CommandRisk risk = assessSegment(segment);
+            if (risk.isForbidden()) {
+                return risk;                       // 有一段是禁止的，整条就禁止
+            }
+            if (risk.needsApproval() && worst == RiskLevel.SAFE) {
+                worst = RiskLevel.NEEDS_APPROVAL;
+                reason = risk.reason();
+            }
+        }
+        return worst == RiskLevel.SAFE ? CommandRisk.safe() : CommandRisk.approval(reason);
+    }
+
+    private CommandRisk assessSegment(String segment) {
+        String name = commandName(segment);
+        if (name.isEmpty()) {
+            return CommandRisk.safe();
+        }
+        String lower = segment.toLowerCase(Locale.ROOT);
+
+        if (FORBIDDEN_COMMANDS.contains(name)) {
+            return CommandRisk.forbidden(name + " 属于禁止执行的命令（提权 / 系统级操作）");
+        }
+        for (String prefix : FORBIDDEN_PREFIXES) {
+            if (name.startsWith(prefix)) {
+                return CommandRisk.forbidden(name + " 会格式化磁盘");
+            }
+        }
+
+        // 写操作碰系统目录，直接拒绝
+        if (WRITE_COMMANDS.contains(name)) {
+            for (String path : SYSTEM_PATHS) {
+                if (lower.contains(path)) {
+                    return CommandRisk.forbidden(name + " 试图修改系统目录 " + path);
+                }
+            }
+        }
+
+        // rm -r 的目标只要不像是工作区内的相对路径，就不许执行
+        if ("rm".equals(name) && RM_RECURSIVE.matcher(lower).find()
+                && (lower.contains(" /") || lower.contains(" ~") || lower.contains(".."))) {
+            return CommandRisk.forbidden("rm -r 的目标超出了工作区");
+        }
+
+        if ("git".equals(name)) {
+            return bySubcommand(segment, SAFE_GIT_SUBCOMMANDS, "git", "会改动仓库状态或与远端交互");
+        }
+        if (PACKAGE_MANAGERS.contains(name)) {
+            // npm test / npm run build 是日常操作，npm install 才会下载并执行第三方脚本
+            return bySubcommand(segment, SAFE_PACKAGE_SUBCOMMANDS, name, "会安装或发布依赖包");
+        }
+        if ("sed".equals(name) && SED_IN_PLACE.matcher(lower).find()) {
+            return CommandRisk.approval("sed -i 会就地改写文件");
+        }
+        if (APPROVAL_COMMANDS.contains(name)) {
+            return CommandRisk.approval(name + " 可能修改文件、访问网络或执行外部代码");
+        }
+        if (SAFE_COMMANDS.contains(name)) {
+            return CommandRisk.safe();
+        }
+        // 白名单没列到的一律多问一句
+        return CommandRisk.approval("未知命令 " + name + "，无法判断其影响");
+    }
+
+    /**
+     * 按子命令细分风险。像 git、npm 这类「一个命令干很多事」的工具，
+     * 一刀切成危险会把 git status、npm test 这种日常操作也拦下来，
+     * 用户被问烦了就会一路按 y，那道防线也就废了。
+     */
+    private CommandRisk bySubcommand(String segment, Set<String> safeSubcommands,
+                                     String name, String reason) {
+        for (String token : segment.trim().split("\\s+")) {
+            if (token.isEmpty() || token.startsWith("-") || token.endsWith(name)) {
+                continue;                          // 跳过命令自身和它的选项
+            }
+            String sub = token.toLowerCase(Locale.ROOT);
+            return safeSubcommands.contains(sub)
+                    ? CommandRisk.safe()
+                    : CommandRisk.approval(name + " " + sub + " " + reason);
+        }
+        return CommandRisk.safe();                 // 光一个命令名，没带子命令
+    }
+
+    /**
+     * 按分隔符拆段。
+     *
+     * 故意不解析引号：{@code echo "a; rm -rf /"} 会被切成两段，
+     * 于是引号里的内容也按命令判一次。这会产生误报，但方向是安全的——
+     * 宁可让模型换个写法，也不能放过真的危险命令。
+     */
+    private static List<String> splitSegments(String command) {
+        String normalized = command
+                .replace("&&", "\n").replace("||", "\n")
+                .replace("$(", "\n").replace("`", "\n")
+                .replace(";", "\n").replace("|", "\n")
+                .replace(")", "\n");
+        return List.of(normalized.split("\n"));
+    }
+
+    /** 取一段里真正的命令名：跳过 FOO=bar 这类前缀赋值，并去掉路径。 */
+    private static String commandName(String segment) {
+        for (String token : segment.trim().split("\\s+")) {
+            if (token.isEmpty() || (token.contains("=") && !token.startsWith("-"))) {
+                continue;
+            }
+            int slash = token.lastIndexOf('/');
+            String name = slash >= 0 ? token.substring(slash + 1) : token;
+            return name.toLowerCase(Locale.ROOT);
+        }
+        return "";
+    }
+}

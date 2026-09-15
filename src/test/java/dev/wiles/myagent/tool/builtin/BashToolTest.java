@@ -3,6 +3,8 @@ package dev.wiles.myagent.tool.builtin;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.CommandGuard;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,7 +27,8 @@ class BashToolTest {
 
     @BeforeEach
     void setUp() {
-        tool = new BashTool(new Workspace(tmp));
+        // 这个测试类只关心执行机制，安全闸统一放行；安全规则另见 CommandGuardTest
+        tool = new BashTool(new Workspace(tmp), new CommandGuard(), ApprovalPolicy.approveAll());
     }
 
     private ToolResult call(String json) throws Exception {
