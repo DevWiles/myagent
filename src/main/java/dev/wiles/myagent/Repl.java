@@ -10,6 +10,7 @@ import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -53,6 +54,13 @@ public final class Repl {
     }
 
     public void run() {
+        String rejection = WorkspaceGuard.rejectionReason(workspace.root());
+        if (rejection != null) {
+            System.out.println("拒绝在此目录启动: " + workspace.root());
+            System.out.println(rejection);
+            System.out.println("请 cd 到某个具体的项目目录再运行。");
+            return;
+        }
         printBanner();
         try {
             while (true) {

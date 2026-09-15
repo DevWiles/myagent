@@ -85,6 +85,26 @@ public final class CommandGuard {
     private static final List<String> SYSTEM_PATHS = List.of(
             "/etc/", "/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/boot/", "/var/");
 
+    /**
+     * 会毁掉已有数据的命令。它们的目标只要指向工作区外，一律拒绝——
+     * 这是防「把电脑删干净」的主力规则，比逐条列黑名单可靠。
+     */
+    private static final Set<String> DESTRUCTIVE_COMMANDS = Set.of(
+            "rm", "rmdir", "mv", "dd", "truncate", "shred", "srm", "tee", "ln",
+            "chmod", "chown", "chgrp");
+
+    /** find 带这些参数就不再是只读命令了。 */
+    private static final List<String> FIND_DESTRUCTIVE_FLAGS =
+            List.of("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint");
+
+    /** 参数里出现这些，说明目标在工作区之外。 */
+    private static final Pattern OUTSIDE_TARGET = Pattern.compile(
+            "(?:^|\\s)(~|\\$HOME|\\$\\{HOME\\}|/[^\\s]|\\.\\.(?:/|\\s|$))");
+
+    /** 重定向写到工作区外（/dev/null 除外，它无害且常用）。 */
+    private static final Pattern REDIRECT_OUTSIDE = Pattern.compile(
+            ">>?\\s*(~|\\$HOME|/(?!dev/null))");
+
     /** 能改文件的命令，用来判断上面那些系统路径是被读还是被写。 */
     private static final Set<String> WRITE_COMMANDS = Set.of(
             "rm", "rmdir", "mv", "cp", "dd", "tee", "truncate", "ln",
@@ -102,6 +122,9 @@ public final class CommandGuard {
 
     /** rm 带这些参数时特别危险。 */
     private static final Pattern RM_RECURSIVE = Pattern.compile("\\brm\\s+(-\\S*[rR]\\S*\\s+)");
+    /** 任何命令碰到家目录都要提醒一句。 */
+    private static final Pattern HOME_REFERENCE = Pattern.compile("(?:^|\\s)(~|\\$HOME|\\$\\{HOME\\})");
+
     /** 会就地改文件的 sed。 */
     private static final Pattern SED_IN_PLACE = Pattern.compile("\\bsed\\s+(-\\S+\\s+)*-i\\b|\\bsed\\s+-\\S*i");
 
@@ -110,6 +133,11 @@ public final class CommandGuard {
             return CommandRisk.forbidden("命令为空");
         }
         String lower = command.toLowerCase(Locale.ROOT);
+
+        // ---- 0. 重定向写到工作区外，等同于破坏外部文件 ----
+        if (REDIRECT_OUTSIDE.matcher(lower).find()) {
+            return CommandRisk.forbidden("命令试图把内容写到工作区之外的路径");
+        }
 
         // ---- 1. 整体致命模式：拆段后就看不出来了，必须先查 ----
         for (Pattern p : FATAL_PATTERNS) {
@@ -164,10 +192,31 @@ public final class CommandGuard {
             }
         }
 
-        // rm -r 的目标只要不像是工作区内的相对路径，就不许执行
-        if ("rm".equals(name) && RM_RECURSIVE.matcher(lower).find()
-                && (lower.contains(" /") || lower.contains(" ~") || lower.contains(".."))) {
-            return CommandRisk.forbidden("rm -r 的目标超出了工作区");
+        // 破坏性命令的目标只要指向工作区外，一律拒绝。
+        // 这条比逐个列黑名单有效得多：不管是 rm -rf ~、mv ~/Documents /tmp
+        // 还是 chmod -R 000 ~，统统落在这里。
+        if (DESTRUCTIVE_COMMANDS.contains(name) && targetsOutside(segment, name)) {
+            return CommandRisk.forbidden(name + " 的目标超出了工作区，只允许操作工作区内的文件");
+        }
+
+        // find 默认是只读的，但 -delete / -exec 让它变成删除或执行任意命令的工具
+        if ("find".equals(name)) {
+            boolean destructive = FIND_DESTRUCTIVE_FLAGS.stream().anyMatch(lower::contains);
+            if (destructive && targetsOutside(segment, name)) {
+                return CommandRisk.forbidden("find 带 -delete/-exec 且目标超出工作区");
+            }
+            if (destructive) {
+                return CommandRisk.approval("find 带 -delete/-exec，会删除文件或执行任意命令");
+            }
+            if (targetsOutside(segment, name)) {
+                return CommandRisk.approval("find 的搜索范围在工作区之外");
+            }
+            return CommandRisk.safe();
+        }
+
+        // 任何命令只要碰到家目录，都先问一句——那里全是个人数据
+        if (HOME_REFERENCE.matcher(segment).find()) {
+            return CommandRisk.approval(name + " 的参数指向家目录，可能影响工作区之外的个人文件");
         }
 
         if ("git".equals(name)) {
@@ -188,6 +237,19 @@ public final class CommandGuard {
         }
         // 白名单没列到的一律多问一句
         return CommandRisk.approval("未知命令 " + name + "，无法判断其影响");
+    }
+
+    /** 判断参数（不含命令名本身）里是否出现了工作区之外的路径。 */
+    private static boolean targetsOutside(String segment, String name) {
+        String args = stripCommandName(segment, name);
+        return OUTSIDE_TARGET.matcher(args).find();
+    }
+
+    /** 去掉命令名，避免 /bin/rm 这种写法把命令自身的路径当成目标。 */
+    private static String stripCommandName(String segment, String name) {
+        String trimmed = segment.trim();
+        int index = trimmed.toLowerCase(Locale.ROOT).indexOf(name);
+        return index < 0 ? trimmed : trimmed.substring(index + name.length());
     }
 
     /**
