@@ -96,6 +96,31 @@ public final class Ansi {
     }
 
     /**
+     * 进入备用屏幕缓冲区：屏幕清空、程序独占，退出时终端恢复成进来之前的样子。
+     *
+     * 同时开启 Alt Scroll（1007）：备用屏幕里没有滚动缓冲区，滚轮本来是废的，
+     * 1007 让终端把滚轮翻译成方向键发给程序，由程序自己滚内容。
+     * 关键在于它<b>不需要开鼠标上报</b>——鼠标还归终端管，拖拽选中照常可用。
+     */
+    public static String enterFullScreen() {
+        return enabled ? CSI + "?1049h" + CSI + "?1007h" : "";
+    }
+
+    public static String exitFullScreen() {
+        return enabled ? CSI + "?1007l" + CSI + "?1049l" : "";
+    }
+
+    /** 光标移到指定位置（1 起）。 */
+    public static String moveTo(int row, int column) {
+        return enabled ? CSI + row + ";" + column + "H" : "";
+    }
+
+    /** 清除从光标到本行末尾。 */
+    public static String clearToLineEnd() {
+        return enabled ? CSI + "0K" : "";
+    }
+
+    /**
      * 清空可见屏幕并把光标移到左上角。
      *
      * 只清当前这一屏，不动滚动缓冲区——往上翻仍然能看到启动之前的终端内容。

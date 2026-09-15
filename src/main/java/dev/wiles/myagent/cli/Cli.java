@@ -26,6 +26,7 @@ public final class Cli {
         boolean spinner = true;
         boolean mouse = false;
         boolean clearScreen = true;
+        boolean fullscreen = false;
         boolean help = false;
         boolean version = false;
         List<String> rest = new ArrayList<>();
@@ -41,6 +42,7 @@ public final class Cli {
                 case "--no-spinner" -> spinner = false;
                 case "--mouse" -> mouse = true;
                 case "--no-clear" -> clearScreen = false;
+                case "--fullscreen", "-f" -> fullscreen = true;
                 case "-d", "--dir" -> {
                     requireValue(args, i, arg);
                     workspace = Path.of(args[++i]);
@@ -58,7 +60,7 @@ public final class Cli {
             }
         }
         return new CliOptions(workspace, model, planMode, unsafe, color, spinner, mouse,
-                clearScreen,
+                clearScreen, fullscreen,
                 rest.isEmpty() ? null : String.join(" ", rest), help, version);
     }
 
@@ -83,6 +85,8 @@ public final class Cli {
                       --unsafe         跳过工作区安全检查（危险）
                       --no-color       关闭彩色输出
                       --no-spinner     关闭转圈状态行（排查终端渲染问题用）
+                  -f, --fullscreen     占用整个终端（退出后恢复原样）。方向键/滚轮滚动内容，
+                                       翻输入历史改用 Ctrl-P / Ctrl-N
                       --no-clear       启动时不清屏，保留上文
                       --mouse          开启鼠标点击展开（代价：终端的滚动和拖拽选中
                                        都会被程序接管，基本不可用，不建议开）

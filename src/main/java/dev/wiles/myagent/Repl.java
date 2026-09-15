@@ -7,6 +7,7 @@ import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
+import dev.wiles.myagent.cli.FullScreenUi;
 import dev.wiles.myagent.cli.ContextBar;
 import dev.wiles.myagent.cli.InputFrame;
 import dev.wiles.myagent.cli.InterruptWatcher;
@@ -35,6 +36,9 @@ import java.util.Map;
  * 真正的逻辑都在 Agent 里，这里只管人机交互。
  */
 public final class Repl {
+
+    /** 提示符。全屏模式下整屏重绘时也要用它。 */
+    private static final String PROMPT = "› ";
 
     /** 工具输出默认只露一行——过程细节平时没人看，真要看再展开。 */
     private static final int COLLAPSED_OUTPUT_LINES = 1;
@@ -116,6 +120,8 @@ public final class Repl {
     private final boolean rawMode;
     /** 终端宽度，用来画框和分隔线。 */
     private final int width;
+    /** 全屏模式的画布；为 null 表示走老的顺序打印模式。 */
+    private final FullScreenUi fullscreen;
     /** 「思考中…」那一行。 */
     private final StatusLine status;
 
@@ -132,12 +138,17 @@ public final class Repl {
         boolean raw = terminal.enterRaw();
         this.rawMode = raw;
         this.width = TerminalMode.width();
-        this.status = new StatusLine(System.out, raw && options.color() && options.spinner());
+        this.fullscreen = options.fullscreen() && raw ? new FullScreenUi(System.out) : null;
+        // 全屏模式下转圈会和整屏重绘打架，状态直接写在底部状态栏里更稳
+        this.status = new StatusLine(System.out,
+                raw && options.color() && options.spinner() && fullscreen == null);
         this.reader = new LineReader(System.in, System.out, raw)
                 .width(TerminalMode.width())
                 .completions(SLASH_COMMANDS)
                 .onExpand(this::expandLastRun)
-                .onClick(raw && options.mouse() ? this::handleClick : null)
+                .onClick(raw && options.mouse() && fullscreen == null ? this::handleClick : null)
+                .renderer(fullscreen == null ? null : fullscreen::render)
+                .onScroll(fullscreen == null ? null : fullscreen::scroll)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
         this.tools = options.planMode()
@@ -163,7 +174,9 @@ public final class Repl {
                 runOnce(options.initialPrompt());       // 一次性模式，跑完就走
                 return;
             }
-            if (options.clearScreen() && rawMode) {
+            if (fullscreen != null) {
+                fullscreen.enter();
+            } else if (options.clearScreen() && rawMode) {
                 // 招牌置顶，一眼看到的就是本次会话的开头。
                 // 只清可见的这一屏，往上翻还能看到启动之前的终端内容。
                 System.out.print(Ansi.clearScreen());
@@ -171,6 +184,9 @@ public final class Repl {
             printBanner();
             loop();
         } finally {
+            if (fullscreen != null) {
+                fullscreen.exit();                       // 把终端原样还回去
+            }
             System.out.print(Ansi.mouseOff());            // 把文本选择还给终端
             terminal.restore();                          // 无论如何都要把终端还回去
         }
@@ -182,24 +198,24 @@ public final class Repl {
             return true;
         }
         if (options.unsafe()) {
-            System.out.println(Ansi.yellow("⚠ 警告: " + rejection));
-            System.out.println(Ansi.yellow("⚠ 你已强制在此目录运行，请格外小心。") + "\n");
+            emit(Ansi.yellow("⚠ 警告: " + rejection));
+            emit(Ansi.yellow("⚠ 你已强制在此目录运行，请格外小心。") + "\n");
             return true;
         }
-        System.out.println(Ansi.red("拒绝在此目录启动: ") + workspace.root());
-        System.out.println(rejection);
-        System.out.println("请 cd 到某个具体的项目目录再运行。");
-        System.out.println(Ansi.dim("（确实需要的话加 --unsafe）"));
+        emit(Ansi.red("拒绝在此目录启动: ") + workspace.root());
+        emit(rejection);
+        emit("请 cd 到某个具体的项目目录再运行。");
+        emit(Ansi.dim("（确实需要的话加 --unsafe）"));
         return false;
     }
 
     private void runOnce(String prompt) {
         if (agent == null) {
-            System.out.println(noKeyMessage());
+            emit(noKeyMessage());
             return;
         }
         runInterruptible(prompt);   // 内容已经通过流式回调打印过了
-        System.out.println();
+        emit("");
     }
 
     /**
@@ -268,14 +284,17 @@ public final class Repl {
         while (true) {
             String line;
             try {
-                line = reader.readLine("› ", inputFrame());
+                if (fullscreen != null) {
+                    fullscreen.setStatus(statusBar());
+                }
+                line = reader.readLine(PROMPT, inputFrame());
             } catch (LineReader.Interrupted e) {
                 // 空行上按 Ctrl-C。我们关掉了 SIGINT，必须自己提供这条退路，
                 // 但也不能一按就退——手滑的代价太大，所以要求连按两次。
                 if (++consecutiveInterrupts >= 2) {
                     break;
                 }
-                System.out.println(Ansi.dim("再按一次 Ctrl-C 退出，或输入 /exit"));
+                emit(Ansi.dim("再按一次 Ctrl-C 退出，或输入 /exit"));
                 continue;
             }
             consecutiveInterrupts = 0;
@@ -294,13 +313,13 @@ public final class Repl {
                 continue;
             }
             if (agent == null) {
-                System.out.println(noKeyMessage());
+                emit(noKeyMessage());
                 continue;
             }
             runInterruptible(line);
-            System.out.println();
+            emit("");
         }
-        System.out.println(Ansi.dim("bye."));
+        emit(Ansi.dim("bye."));
     }
 
     private static boolean isExitCommand(String line) {
@@ -375,7 +394,7 @@ public final class Repl {
         } else if (event instanceof AgentEvent.Compacted c) {
             collapseToolGroup();
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
-            System.out.println("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
+            emit("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
                     + c.tokensAfter() + " tokens"
                     + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
@@ -416,7 +435,16 @@ public final class Repl {
      */
     private void expandLastRun() {
         if (lastRunTools.isEmpty()) {
-            System.out.println(Ansi.dim("最近一轮没有调用工具。"));
+            emit(Ansi.dim("最近一轮没有调用工具。"));
+            return;
+        }
+        if (fullscreen != null) {
+            // 摘要行和它之后的内容都在缓冲区里，删掉重新铺一遍就是原地展开
+            List<String> tail = new ArrayList<>(replayBuffer);
+            fullscreen.buffer().removeLast(tail.size() + 1);
+            recording = false;
+            printToolDetails();
+            tail.forEach(this::emit);
             return;
         }
         // 要退回去多少行：摘要行自己 1 行，加上它之后记下来的那些
@@ -453,16 +481,16 @@ public final class Repl {
     /** 把最近一轮每次工具调用的完整参数和输出打出来。 */
     private void printToolDetails() {
         for (ToolRecord record : lastRunTools) {
-            System.out.println(Ansi.green("⏺ ") + Ansi.bold(record.tool()) + " "
+            emit(Ansi.green("⏺ ") + Ansi.bold(record.tool()) + " "
                     + Ansi.dim(oneLine(record.arguments(), Math.max(20, width - 8))));
             String mark = record.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
             String[] lines = record.output().split("\n");
             for (int i = 0; i < Math.min(lines.length, VERBOSE_OUTPUT_LINES); i++) {
-                System.out.println((i == 0 ? mark : "    ")
+                emit((i == 0 ? mark : "    ")
                         + Ansi.dim(oneLine(lines[i], Math.max(20, width - 6))));
             }
             if (lines.length > VERBOSE_OUTPUT_LINES) {
-                System.out.println(Ansi.dim("    … 另有 "
+                emit(Ansi.dim("    … 另有 "
                         + (lines.length - VERBOSE_OUTPUT_LINES) + " 行"));
             }
         }
@@ -525,7 +553,13 @@ public final class Repl {
 
     /** 打印一行；摘要行之后的内容要记下来，展开时原样重放。 */
     private void emit(String line) {
-        System.out.println(line);
+        if (fullscreen != null) {
+            fullscreen.append(line);
+            // agent 干活时输入行是空的，重绘用空输入即可
+            fullscreen.render(PROMPT, "", 0);
+        } else {
+            System.out.println(line);
+        }
         if (recording) {
             replayBuffer.add(line);
         }
@@ -533,7 +567,7 @@ public final class Repl {
 
     /** 打印属于当前工具组的一行，记着行数好在收起时擦掉。 */
     private void toolPrintln(String text) {
-        System.out.println(text);
+        emit(text);
         toolGroupLines++;
     }
 
@@ -552,12 +586,22 @@ public final class Repl {
             resetToolGroup();
             return;
         }
+        if (fullscreen != null) {
+            // 全屏模式下不用摆弄光标：那几行就在缓冲区里，删掉换成摘要即可，
+            // 也不怕它们已经滚出屏幕
+            fullscreen.buffer().removeLast(toolGroupLines);
+            replayBuffer.clear();
+            recording = true;
+            emit(Ansi.green("⏺ ") + Ansi.dim(ToolSummary.describe(toolGroupCounts)));
+            resetToolGroup();
+            return;
+        }
         StringBuilder erase = new StringBuilder();
         for (int i = 0; i < toolGroupLines; i++) {
             erase.append(Ansi.up(1)).append(Ansi.clearLine());
         }
         System.out.print(erase);
-        System.out.println(Ansi.green("⏺ ") + Ansi.dim(ToolSummary.describe(toolGroupCounts)));
+        emit(Ansi.green("⏺ ") + Ansi.dim(ToolSummary.describe(toolGroupCounts)));
         // 从这里开始记账：展开时要把摘要行之后的内容原样重放
         replayBuffer.clear();
         recording = true;
@@ -601,24 +645,24 @@ public final class Repl {
                 if (agent != null) {
                     agent.reset();
                 }
-                System.out.println(Ansi.dim("对话历史已清空。"));
+                emit(Ansi.dim("对话历史已清空。"));
                 return true;
             }
             case "/tools" -> {
                 for (Tool tool : tools.all()) {
-                    System.out.println("  " + Ansi.bold(tool.name()) + "  "
+                    emit("  " + Ansi.bold(tool.name()) + "  "
                             + Ansi.dim(tool.description()));
                 }
                 return true;
             }
             case "/history" -> {
                 if (agent == null) {
-                    System.out.println(Ansi.dim("(未启用)"));
+                    emit(Ansi.dim("(未启用)"));
                     return true;
                 }
-                System.out.println(Ansi.dim("当前上下文共 " + agent.history().size() + " 条消息，约 "
+                emit(Ansi.dim("当前上下文共 " + agent.history().size() + " 条消息，约 "
                         + agent.estimatedTokens() + " tokens（含每轮重发的工具菜单）:"));
-                agent.history().forEach(m -> System.out.println(
+                agent.history().forEach(m -> emit(
                         "  " + Ansi.cyan("[" + m.role() + "]") + " "
                                 + (m.hasToolCalls() ? "调用 " + m.toolCallsOrEmpty().size() + " 个工具 " : "")
                                 + Ansi.dim(oneLine(m.content() == null ? "" : m.content(),
@@ -631,20 +675,20 @@ public final class Repl {
             }
             case "/verbose" -> {
                 detail = detail.toggle(OutputDetail.VERBOSE);
-                System.out.println(Ansi.dim("过程信息：" + detail.label()));
+                emit(Ansi.dim("过程信息：" + detail.label()));
                 return true;
             }
             case "/quiet" -> {
                 detail = detail.toggle(OutputDetail.QUIET);
-                System.out.println(Ansi.dim("过程信息：" + detail.label()));
+                emit(Ansi.dim("过程信息：" + detail.label()));
                 return true;
             }
             case "/config" -> {
-                System.out.println(config);
+                emit(config.toString());
                 return true;
             }
             case "/help" -> {
-                System.out.println("""
+                emit("""
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
@@ -669,9 +713,10 @@ public final class Repl {
     }
 
     private void printBanner() {
-        System.out.print(Banner.render(Cli.VERSION, config.model(), workspace.root(),
-                tools.all().stream().map(Tool::name).toList(),
-                options.planMode(), agent != null, width));
+        Banner.render(Cli.VERSION, config.model(), workspace.root(),
+                        tools.all().stream().map(Tool::name).toList(),
+                        options.planMode(), agent != null, width)
+                .lines().forEach(this::emit);
     }
 
     /** 输入框的上下横线，撑满整个终端宽度。 */
@@ -679,8 +724,20 @@ public final class Repl {
         return Ansi.dim("─".repeat(Math.max(20, width)));
     }
 
+    /** 全屏模式下常驻底部的状态栏内容。 */
+    private String statusBar() {
+        if (agent == null) {
+            return Ansi.dim("  未配置 API key");
+        }
+        return ContextBar.render(agent.estimatedTokens(), agent.contextLimit(),
+                agent.history().size(), config.model());
+    }
+
     /** 输入行的上下横线，外加一行上下文用量。 */
     private InputFrame inputFrame() {
+        if (fullscreen != null) {
+            return InputFrame.none();    // 全屏模式的边框是整屏布局的一部分
+        }
         if (agent == null) {
             return new InputFrame(rule(), rule(), null);
         }

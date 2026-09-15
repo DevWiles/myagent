@@ -41,6 +41,14 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("--fullscreen 占用整个终端，默认关闭")
+    void fullscreenFlag() {
+        assertFalse(Cli.parse(new String[]{}).fullscreen());
+        assertTrue(Cli.parse(new String[]{"--fullscreen"}).fullscreen());
+        assertTrue(Cli.parse(new String[]{"-f"}).fullscreen());
+    }
+
+    @Test
     @DisplayName("长短参数都认")
     void shortAndLongFlags() {
         assertTrue(Cli.parse(new String[]{"-h"}).help());

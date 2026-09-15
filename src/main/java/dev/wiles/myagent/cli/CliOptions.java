@@ -14,6 +14,7 @@ import java.nio.file.Path;
  * @param mouse         是否开启鼠标点击。默认关闭：开启后终端的滚动和拖拽选中
  *                      都会被程序接管，得不偿失
  * @param clearScreen   启动时是否清屏，让招牌置顶
+ * @param fullscreen    是否占用整个终端（备用屏幕）。滚动由程序自己实现
  * @param initialPrompt 一次性执行的提示词；非空时跑完就退出，不进交互
  * @param help          打印用法
  * @param version       打印版本
@@ -27,6 +28,7 @@ public record CliOptions(
         boolean spinner,
         boolean mouse,
         boolean clearScreen,
+        boolean fullscreen,
         String initialPrompt,
         boolean help,
         boolean version

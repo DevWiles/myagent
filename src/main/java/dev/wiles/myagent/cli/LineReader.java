@@ -29,6 +29,12 @@ import java.util.regex.Pattern;
  */
 public final class LineReader {
 
+    /** 把输入行画到屏幕上。全屏模式下整屏都归它管。 */
+    @FunctionalInterface
+    public interface ScreenRenderer {
+        void render(String prompt, String input, int cursor);
+    }
+
     /**
      * 空行上按了 Ctrl-C。
      *
@@ -53,6 +59,9 @@ public final class LineReader {
     private static final int TAB = 9;
     /** Ctrl-O：展开最近一轮的过程详情。 */
     private static final int CTRL_O = 15;
+    /** 全屏模式下方向键用来滚内容，历史改走 Ctrl-P / Ctrl-N。 */
+    private static final int CTRL_P = 16;
+    private static final int CTRL_N = 14;
     private static final int ENTER = 13;
     private static final int NEWLINE = 10;
     private static final int BACKSPACE = 127;
@@ -68,6 +77,10 @@ public final class LineReader {
     private List<String> completions = List.of();
     private Path historyFile;
     private Runnable expandAction;
+    /** 全屏模式下由外部负责画整屏；为 null 时按老办法自己重画一行。 */
+    private ScreenRenderer renderer;
+    /** 全屏模式下方向键的去处：正数往下、负数往上。 */
+    private IntConsumer scrollAction;
     private IntConsumer clickAction;
     private boolean mouseEnabled;
     /** 输入行此刻在屏幕的第几行（1 起）。点击坐标要靠它换算。 */
@@ -101,6 +114,27 @@ public final class LineReader {
      */
     public LineReader onExpand(Runnable action) {
         this.expandAction = action;
+        return this;
+    }
+
+    /**
+     * 交出渲染权：有它在，行编辑只管维护缓冲区和光标，画面由外部整屏重绘。
+     * 全屏模式用这个。
+     */
+    public LineReader renderer(ScreenRenderer renderer) {
+        this.renderer = renderer;
+        return this;
+    }
+
+    /**
+     * 方向键上下改成滚动内容。
+     *
+     * 全屏模式下必须这么接：Alt Scroll 把滚轮翻译成方向键送进来，
+     * 程序分不出「用户按了方向键」和「用户滚了滚轮」——既然滚轮更常用，
+     * 方向键就让给滚动，翻历史改用 Ctrl-P / Ctrl-N。
+     */
+    public LineReader onScroll(IntConsumer action) {
+        this.scrollAction = action;
         return this;
     }
 
@@ -217,6 +251,8 @@ public final class LineReader {
                             redraw(prompt);
                         }
                     }
+                    case CTRL_P -> navigateHistory(-1, prompt);
+                    case CTRL_N -> navigateHistory(1, prompt);
                     case CTRL_A -> {
                         cursor = 0;
                         redraw(prompt);
@@ -301,8 +337,22 @@ public final class LineReader {
             return;
         }
         switch (third) {
-            case 'A' -> navigateHistory(-1, prompt);
-            case 'B' -> navigateHistory(1, prompt);
+            case 'A' -> {
+                if (scrollAction != null) {
+                    scrollAction.accept(-1);       // 滚轮上滚 / 方向键上
+                    redraw(prompt);
+                } else {
+                    navigateHistory(-1, prompt);
+                }
+            }
+            case 'B' -> {
+                if (scrollAction != null) {
+                    scrollAction.accept(1);
+                    redraw(prompt);
+                } else {
+                    navigateHistory(1, prompt);
+                }
+            }
             case 'C' -> {
                 if (cursor < buffer.length()) {
                     cursor++;
@@ -459,6 +509,10 @@ public final class LineReader {
 
     /** 首次铺开整个框，光标停在输入行。 */
     private void drawFrame(String prompt) {
+        if (renderer != null) {
+            redraw(prompt);          // 全屏模式的布局是固定的，不需要铺开什么
+            return;
+        }
         inputScreenRow = -1;
         if (frame.isEmpty()) {
             redraw(prompt);
@@ -493,6 +547,9 @@ public final class LineReader {
      */
     /** 把输入框从屏幕上抹掉，光标停在框原来的起始位置。 */
     private void eraseFrame() {
+        if (renderer != null) {
+            return;
+        }
         if (frame.isEmpty()) {
             return;
         }
@@ -503,6 +560,9 @@ public final class LineReader {
     }
 
     private void collapseFrame(String finalLine) {
+        if (renderer != null) {
+            return;                  // 全屏模式下输入框是常驻的，没有收起这回事
+        }
         if (frame.isEmpty()) {
             out.println();
             return;
@@ -542,8 +602,12 @@ public final class LineReader {
         return Ansi.cyan(prompt) + buffer;
     }
 
-    /** 只重画输入行——上下的横线不动。 */
+    /** 画出当前状态。全屏模式下交给外部整屏重绘，否则只重画输入行。 */
     private void redraw(String prompt) {
+        if (renderer != null) {
+            renderer.render(prompt, buffer.toString(), cursor);
+            return;
+        }
         out.print(Ansi.clearLine() + inputLine(prompt));
         // 光标此刻停在内容末尾，按显示宽度退回到该在的位置（汉字占两列）
         out.print(Ansi.left(Ansi.displayWidth(buffer.substring(cursor))));
