@@ -11,6 +11,7 @@ import dev.wiles.myagent.cli.ContextBar;
 import dev.wiles.myagent.cli.InputFrame;
 import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
+import dev.wiles.myagent.cli.MarkdownRenderer;
 import dev.wiles.myagent.cli.StatusLine;
 import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
@@ -31,11 +32,13 @@ import java.util.List;
  */
 public final class Repl {
 
-    /** 工具输出在终端里最多显示几行；完整内容照样发给模型。 */
-    private static final int OUTPUT_PREVIEW_LINES = 6;
+    /** 工具输出默认只露一行——过程细节平时没人看，真要看再展开。 */
+    private static final int COLLAPSED_OUTPUT_LINES = 1;
+    /** /verbose 打开后显示这么多行。完整内容无论如何都会原样发给模型。 */
+    private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/clear", "/tools", "/history", "/config", "/exit", "/quit");
+            List.of("/help", "/clear", "/tools", "/history", "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
     private static final List<String> EXIT_WORDS =
@@ -49,8 +52,13 @@ public final class Repl {
     private final LineReader reader;
     private final Agent agent;
 
-    /** 当前是否有一行流式文本还没收尾。 */
-    private boolean streaming = false;
+    /** 攒够一行再渲染：Markdown 的行内标记要整行到齐才能判断闭合。 */
+    private final StringBuilder pendingLine = new StringBuilder();
+    private final MarkdownRenderer markdown = new MarkdownRenderer();
+    /** 当前这段文字是否已经开了头（用来决定要不要先空一行）。 */
+    private boolean textStarted = false;
+    /** 是否展开工具输出。 */
+    private boolean verbose = false;
     /** 是否处于 raw 模式：只有这时才能后台监听 Ctrl-C。 */
     private final boolean rawMode;
     /** 终端宽度，用来画框和分隔线。 */
@@ -140,9 +148,11 @@ public final class Repl {
      * 那个线程会把管道里后续的输入全吃掉。
      */
     private void runInterruptible(String prompt) {
+        markdown.reset();          // 上一轮没闭合的代码块不能影响这一轮
         if (!rawMode) {
             agent.run(prompt);
             status.stop();
+            flushText();
             return;
         }
         try (InterruptWatcher watcher = new InterruptWatcher(System.in, agent::cancel)) {
@@ -150,6 +160,7 @@ public final class Repl {
             agent.run(prompt);
         } finally {
             status.stop();          // 无论如何都不能把转圈留在屏幕上
+            flushText();
         }
     }
 
@@ -212,59 +223,89 @@ public final class Repl {
         // 状态行和正文抢同一块屏幕，所以打印任何东西之前先把它擦掉
         status.stop();
 
+        if (event instanceof AgentEvent.TextDelta d) {
+            appendText(d.text());
+            return;
+        }
+        // 其余事件都要先把攒着的半行吐出来，否则会被后面的内容截断
+        flushText();
+
         if (event instanceof AgentEvent.Thinking t) {
             status.start("思考中…");
 
-        } else if (event instanceof AgentEvent.TextDelta d) {
-            if (!streaming) {
-                System.out.println();      // 新一段文本和上面的工具输出隔开
-            }
-            // 边收边打，不换行——同一段的后续增量紧接着往后续
-            System.out.print(d.text());
-            System.out.flush();
-            streaming = true;
-
         } else if (event instanceof AgentEvent.Thought t) {
-            // 文本已经由 TextDelta 实时打出来了，这里不再重复渲染
+            // 文本已经由 TextDelta 打出来了，这里不再重复渲染
 
         } else if (event instanceof AgentEvent.ToolStarted t) {
-            endStreamingLine();
             System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
                     + Ansi.dim(oneLine(t.arguments(), 100)));
             status.start("执行 " + t.tool() + "…");
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
-            endStreamingLine();
-            String mark = t.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
-            String[] lines = t.output().split("\n");
-            for (int i = 0; i < Math.min(lines.length, OUTPUT_PREVIEW_LINES); i++) {
-                System.out.println((i == 0 ? mark : "    ") + Ansi.dim(oneLine(lines[i], 160)));
-            }
-            if (lines.length > OUTPUT_PREVIEW_LINES) {
-                System.out.println(Ansi.dim("    … 另有 " + (lines.length - OUTPUT_PREVIEW_LINES) + " 行"));
-            }
+            renderToolOutput(t);
 
         } else if (event instanceof AgentEvent.Done d) {
-            endStreamingLine();
+            // 文本已经吐完了，这里不用再做什么
 
         } else if (event instanceof AgentEvent.Compacted c) {
-            endStreamingLine();
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
             System.out.println("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
                     + c.tokensAfter() + " tokens"
                     + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
         } else if (event instanceof AgentEvent.Failed f) {
-            endStreamingLine();
             System.out.println(Ansi.red("⚠ " + f.reason()));
         }
     }
 
-    /** 流式输出没有换行符收尾，后面要打别的东西之前得先补一个。 */
-    private void endStreamingLine() {
-        if (streaming) {
-            System.out.println();
-            streaming = false;
+    /**
+     * 收到新的文本增量。
+     *
+     * 攒够一整行才渲染输出：Markdown 的行内标记要等整行到齐才能判断闭合，
+     * 逐字打的话用户会眼看着星号一个个冒出来再消失。
+     */
+    private void appendText(String delta) {
+        if (!textStarted) {
+            System.out.println();         // 新一段文字和上面的内容隔开
+            textStarted = true;
+        }
+        pendingLine.append(delta);
+        int newline;
+        while ((newline = pendingLine.indexOf("\n")) >= 0) {
+            String line = pendingLine.substring(0, newline);
+            pendingLine.delete(0, newline + 1);
+            System.out.println(markdown.renderLine(line));
+        }
+        System.out.flush();
+    }
+
+    /** 把攒着还没换行的最后半行吐出去。 */
+    private void flushText() {
+        if (pendingLine.length() > 0) {
+            System.out.println(markdown.renderLine(pendingLine.toString()));
+            pendingLine.setLength(0);
+        }
+        textStarted = false;
+    }
+
+    /**
+     * 工具输出默认只露第一行。
+     *
+     * 过程细节平时没人看，一屏全是文件内容反而把结论挤没了。
+     * 注意这只影响**显示**——完整内容照样原样发给模型，它需要看全。
+     */
+    private void renderToolOutput(AgentEvent.ToolFinished event) {
+        String mark = event.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
+        String[] lines = event.output().split("\n");
+        int limit = verbose ? VERBOSE_OUTPUT_LINES : COLLAPSED_OUTPUT_LINES;
+
+        for (int i = 0; i < Math.min(lines.length, limit); i++) {
+            System.out.println((i == 0 ? mark : "    ") + Ansi.dim(oneLine(lines[i], 160)));
+        }
+        int hidden = lines.length - limit;
+        if (hidden > 0) {
+            System.out.println(Ansi.dim("    … 另有 " + hidden + " 行"
+                    + (verbose ? "" : "（/verbose 展开）")));
         }
     }
 
@@ -302,6 +343,11 @@ public final class Repl {
                                 + Ansi.dim(oneLine(m.content() == null ? "" : m.content(), 80))));
                 return true;
             }
+            case "/verbose" -> {
+                verbose = !verbose;
+                System.out.println(Ansi.dim("工具输出" + (verbose ? "已展开" : "已折叠")));
+                return true;
+            }
             case "/config" -> {
                 System.out.println(config);
                 return true;
@@ -311,6 +357,7 @@ public final class Repl {
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
+                          /verbose  展开或折叠工具输出
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）
 

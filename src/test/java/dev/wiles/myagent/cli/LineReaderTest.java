@@ -244,22 +244,45 @@ class LineReaderTest {
     }
 
     @Test
-    @DisplayName("提交时跨过下方装饰再换行，框才会原样留在历史里")
-    void leavesFrameOnSubmit() {
-        LineReader r = reader(keys("x", ENTER));
-        r.readLine("> ", new InputFrame("上", "下", "状态"));
+    @DisplayName("提交后把框收起来，四行塌成一行——边框是「正在输入」的提示，输完就没意义了")
+    void collapsesFrameOnSubmit() {
+        LineReader r = reader(keys("你好", ENTER));
+        assertEquals("你好", r.readLine("> ", new InputFrame("上", "下", "状态")));
 
-        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.down(2)),
-                "提交时应当先跨过下方的装饰");
+        String screen = captured.toString(StandardCharsets.UTF_8);
+        // 下方两行装饰逐行擦掉，再退回上边线那一行覆盖它
+        assertTrue(screen.contains(Ansi.up(3)), "没有退回到上边线的位置");
+        assertTrue(screen.endsWith("> 你好" + System.lineSeparator()),
+                "收起后应当只剩这一行内容");
     }
 
     @Test
-    @DisplayName("只有上下线、没有状态行时只跨 1 行")
-    void handlesFrameWithoutStatus() {
+    @DisplayName("没有状态行时少收一行")
+    void collapsesFrameWithoutStatus() {
         LineReader r = reader(keys("x", ENTER));
         r.readLine("> ", new InputFrame("上", "下", null));
 
-        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.down(1)));
+        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.up(2)));
+    }
+
+    @Test
+    @DisplayName("行内有内容时按 Ctrl-C 只重画输入行，不能再铺一个框出来")
+    void ctrlCDoesNotRedrawFrame() {
+        LineReader r = reader(keys("写错了", CTRL_C, "重来", ENTER));
+        assertEquals("重来", r.readLine("> ", new InputFrame("上", "下", "状态")));
+
+        String screen = captured.toString(StandardCharsets.UTF_8);
+        assertEquals(1, countOccurrences(screen, "上"), "框被铺了不止一次");
+    }
+
+    private static int countOccurrences(String text, String needle) {
+        int count = 0;
+        int index = 0;
+        while ((index = text.indexOf(needle, index)) >= 0) {
+            count++;
+            index += needle.length();
+        }
+        return count;
     }
 
     @Test

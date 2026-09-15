@@ -138,26 +138,27 @@ public final class LineReader {
                 }
                 switch (b) {
                     case ENTER, NEWLINE -> {
-                        leaveFrame();
+                        collapseFrame(prompt + buffer);
                         out.flush();
                         String line = buffer.toString();
                         remember(line);
                         return line;
                     }
                     case CTRL_C -> {
-                        leaveFrame();
                         if (buffer.length() == 0) {
                             // 空行上的 Ctrl-C 交给调用方决定（通常是「再按一次就退出」）
+                            collapseFrame("^C");
                             throw new Interrupted();
                         }
-                        // 有内容时和 shell 一致：放弃当前这行，另起一行
+                        // 有内容时和 shell 一致：清掉这一行重来。
+                        // 注意只重画输入行，不能再铺一次框，否则屏幕上会多出一个框。
                         buffer = new StringBuilder();
                         cursor = 0;
-                        drawFrame(prompt);
+                        redraw(prompt);
                     }
                     case CTRL_D -> {
                         if (buffer.length() == 0) {
-                            leaveFrame();
+                            collapseFrame(prompt.isEmpty() ? "" : prompt);
                             return null;                  // 空行上的 Ctrl-D 才是退出
                         }
                         if (cursor < buffer.length()) {
@@ -353,10 +354,26 @@ public final class LineReader {
         redraw(prompt);
     }
 
-    /** 提交或中断时，跨过下方的装饰再换行，把框留在历史里。 */
-    private void leaveFrame() {
-        out.print(Ansi.down(frame.linesBelow()));
-        out.println();
+    /**
+     * 提交时把框收起来，只留下一行输入内容。
+     *
+     * 边框是「正在输入」这个状态的提示，输入完就没意义了——
+     * 留在历史里只会让屏幕被一堆横线切得七零八落。
+     * 所以擦掉上下边线和状态行，把内容重画在原来上边线的位置，四行塌成一行。
+     */
+    private void collapseFrame(String finalLine) {
+        if (frame.isEmpty()) {
+            out.println();
+            return;
+        }
+        // 光标现在在输入行，逐行下移把下方的装饰擦掉
+        for (int i = 0; i < frame.linesBelow(); i++) {
+            out.print(Ansi.down(1) + Ansi.clearLine());
+        }
+        // 再回到上边线所在的行，用内容覆盖它
+        int back = frame.linesBelow() + (frame.top() != null ? 1 : 0);
+        out.print(Ansi.up(back) + Ansi.clearLine());
+        out.println(finalLine);
     }
 
     /** 只重画输入行——上下的装饰不动。 */

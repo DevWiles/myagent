@@ -55,6 +55,11 @@ public final class Ansi {
         return wrap("36", text);
     }
 
+    /** 淡色背景，用来标出用户刚提交的那一行。 */
+    public static String highlight(String text) {
+        return enabled ? CSI + "48;5;236m" + text + CSI + "0m" : text;
+    }
+
     // ---- 光标与清除，行编辑要用 ----
 
     /** 回到行首并清掉整行。 */
