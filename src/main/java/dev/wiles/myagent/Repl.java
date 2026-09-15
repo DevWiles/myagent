@@ -9,6 +9,7 @@ import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
+import dev.wiles.myagent.cli.StatusLine;
 import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
@@ -50,6 +51,10 @@ public final class Repl {
     private boolean streaming = false;
     /** 是否处于 raw 模式：只有这时才能后台监听 Ctrl-C。 */
     private final boolean rawMode;
+    /** 终端宽度，用来画框和分隔线。 */
+    private final int width;
+    /** 「思考中…」那一行。 */
+    private final StatusLine status;
 
     public Repl(CliOptions options) {
         this.options = options;
@@ -63,6 +68,8 @@ public final class Repl {
         // raw 模式拿不到就退化成按行读，管道和重定向下都是这条路径
         boolean raw = terminal.enterRaw();
         this.rawMode = raw;
+        this.width = TerminalMode.width();
+        this.status = new StatusLine(System.out, raw && options.color());
         this.reader = new LineReader(System.in, System.out, raw)
                 .completions(SLASH_COMMANDS)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
@@ -133,11 +140,14 @@ public final class Repl {
     private void runInterruptible(String prompt) {
         if (!rawMode) {
             agent.run(prompt);
+            status.stop();
             return;
         }
         try (InterruptWatcher watcher = new InterruptWatcher(System.in, agent::cancel)) {
             watcher.start();
             agent.run(prompt);
+        } finally {
+            status.stop();          // 无论如何都不能把转圈留在屏幕上
         }
     }
 
@@ -145,6 +155,7 @@ public final class Repl {
         int consecutiveInterrupts = 0;
         while (true) {
             String line;
+            System.out.println(rule());
             try {
                 line = reader.readLine(Ansi.cyan("› "));
             } catch (LineReader.Interrupted e) {
@@ -157,6 +168,7 @@ public final class Repl {
                 continue;
             }
             consecutiveInterrupts = 0;
+            System.out.println(rule());
 
             if (line == null) {                          // Ctrl-D
                 break;
@@ -197,7 +209,13 @@ public final class Repl {
      * 全程不出声的话，用户没法判断它是在干活还是卡死了。
      */
     private void render(AgentEvent event) {
-        if (event instanceof AgentEvent.TextDelta d) {
+        // 状态行和正文抢同一块屏幕，所以打印任何东西之前先把它擦掉
+        status.stop();
+
+        if (event instanceof AgentEvent.Thinking t) {
+            status.start("思考中…");
+
+        } else if (event instanceof AgentEvent.TextDelta d) {
             if (!streaming) {
                 System.out.println();      // 新一段文本和上面的工具输出隔开
             }
@@ -213,6 +231,7 @@ public final class Repl {
             endStreamingLine();
             System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
                     + Ansi.dim(oneLine(t.arguments(), 100)));
+            status.start("执行 " + t.tool() + "…");
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
             endStreamingLine();
@@ -239,7 +258,6 @@ public final class Repl {
             endStreamingLine();
             System.out.println(Ansi.red("⚠ " + f.reason()));
         }
-        // Thinking 不渲染，太吵
     }
 
     /** 流式输出没有换行符收尾，后面要打别的东西之前得先补一个。 */
@@ -311,6 +329,11 @@ public final class Repl {
     private void printBanner() {
         System.out.print(Banner.render(Cli.VERSION, config.model(), workspace.root(),
                 tools.all().stream().map(Tool::name).toList(),
-                options.planMode(), agent != null));
+                options.planMode(), agent != null, width));
+    }
+
+    /** 输入框的横线。 */
+    private String rule() {
+        return Ansi.dim("─".repeat(Math.max(20, width)));
     }
 }

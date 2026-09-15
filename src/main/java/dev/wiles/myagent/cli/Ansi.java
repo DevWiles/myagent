@@ -62,6 +62,15 @@ public final class Ansi {
         return enabled ? "\r" + CSI + "2K" : "\r";
     }
 
+    /** 隐藏光标。spinner 转的时候光标跟着乱跳很难看。 */
+    public static String hideCursor() {
+        return enabled ? CSI + "?25l" : "";
+    }
+
+    public static String showCursor() {
+        return enabled ? CSI + "?25h" : "";
+    }
+
     /** 光标左移 n 列。 */
     public static String left(int n) {
         return n <= 0 || !enabled ? "" : CSI + n + "D";

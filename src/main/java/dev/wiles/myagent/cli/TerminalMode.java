@@ -18,6 +18,10 @@ import java.nio.charset.StandardCharsets;
  */
 public final class TerminalMode {
 
+    private static final int DEFAULT_WIDTH = 80;
+    /** 超宽屏上把框拉满会很难看，也不利于阅读。 */
+    private static final int MAX_WIDTH = 100;
+
     private String savedSettings;
 
     /** 当前进程是不是接在真终端上（管道、重定向时为否）。 */
@@ -56,6 +60,29 @@ public final class TerminalMode {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 终端宽度（列数）。
+     *
+     * 取不到就退回 80——这是终端宽度的传统默认值，
+     * 画框时宁可窄一点也不能超出，超出会换行把整个框撑烂。
+     */
+    public static int width() {
+        if (!isInteractive()) {
+            return DEFAULT_WIDTH;
+        }
+        try {
+            String output = exec("stty size < /dev/tty").trim();
+            String[] parts = output.split("\\s+");
+            if (parts.length == 2) {
+                int columns = Integer.parseInt(parts[1]);
+                return columns > 20 ? Math.min(columns, MAX_WIDTH) : DEFAULT_WIDTH;
+            }
+        } catch (Exception ignored) {
+            // 拿不到就用默认值
+        }
+        return DEFAULT_WIDTH;
     }
 
     public void restore() {

@@ -360,6 +360,7 @@ public final class LineReader {
             int b;
             while ((b = in.read()) != -1) {
                 if (b == NEWLINE) {
+                    out.println();      // 这个模式下没有回显，得自己补个换行
                     return line.toString();
                 }
                 if (b != ENTER) {
