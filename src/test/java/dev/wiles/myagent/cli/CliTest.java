@@ -34,6 +34,13 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("默认启动时清屏让招牌置顶，--no-clear 保留上文")
+    void clearScreenByDefault() {
+        assertTrue(Cli.parse(new String[]{}).clearScreen());
+        assertFalse(Cli.parse(new String[]{"--no-clear"}).clearScreen());
+    }
+
+    @Test
     @DisplayName("长短参数都认")
     void shortAndLongFlags() {
         assertTrue(Cli.parse(new String[]{"-h"}).help());

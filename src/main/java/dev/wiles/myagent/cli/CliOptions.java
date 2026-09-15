@@ -13,6 +13,7 @@ import java.nio.file.Path;
  * @param spinner       是否显示转圈的状态行
  * @param mouse         是否开启鼠标点击。默认关闭：开启后终端的滚动和拖拽选中
  *                      都会被程序接管，得不偿失
+ * @param clearScreen   启动时是否清屏，让招牌置顶
  * @param initialPrompt 一次性执行的提示词；非空时跑完就退出，不进交互
  * @param help          打印用法
  * @param version       打印版本
@@ -25,6 +26,7 @@ public record CliOptions(
         boolean color,
         boolean spinner,
         boolean mouse,
+        boolean clearScreen,
         String initialPrompt,
         boolean help,
         boolean version

@@ -95,6 +95,16 @@ public final class Ansi {
         return enabled ? CSI + "?1006l" + CSI + "?1000l" : "";
     }
 
+    /**
+     * 清空可见屏幕并把光标移到左上角。
+     *
+     * 只清当前这一屏，不动滚动缓冲区——往上翻仍然能看到启动之前的终端内容。
+     * （真要连历史一起清是 ESC[3J，但那等于替用户做主删东西，不合适。）
+     */
+    public static String clearScreen() {
+        return enabled ? CSI + "H" + CSI + "2J" : "";
+    }
+
     /** 查询光标位置（DSR）。终端会回一个 ESC[行;列R。 */
     public static String queryCursor() {
         return enabled ? CSI + "6n" : "";

@@ -163,6 +163,11 @@ public final class Repl {
                 runOnce(options.initialPrompt());       // 一次性模式，跑完就走
                 return;
             }
+            if (options.clearScreen() && rawMode) {
+                // 招牌置顶，一眼看到的就是本次会话的开头。
+                // 只清可见的这一屏，往上翻还能看到启动之前的终端内容。
+                System.out.print(Ansi.clearScreen());
+            }
             printBanner();
             loop();
         } finally {
