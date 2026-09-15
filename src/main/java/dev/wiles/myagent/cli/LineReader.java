@@ -374,13 +374,17 @@ public final class LineReader {
             out.println();
             return;
         }
-        // 光标现在在输入行，逐行下移把下方的装饰擦掉
+        // 先一路向下，把下方的装饰逐行擦掉
         for (int i = 0; i < frame.linesBelow(); i++) {
             out.print(Ansi.down(1) + Ansi.clearLine());
         }
-        // 再回到上边线所在的行，用内容覆盖它
-        int back = frame.linesBelow() + (frame.top() != null ? 1 : 0);
-        out.print(Ansi.up(back) + Ansi.clearLine());
+        // 再一路向上擦回去，每上一行擦一行。
+        // 注意必须逐行擦：只 up 到最顶上再 clearLine 的话，
+        // 夹在中间的输入行不会被清掉，它的旧内容会原样留在屏幕上。
+        int linesToErase = frame.linesBelow() + (frame.top() != null ? 1 : 0);
+        for (int i = 0; i < linesToErase; i++) {
+            out.print(Ansi.up(1) + Ansi.clearLine());
+        }
         out.println(finalLine);
     }
 

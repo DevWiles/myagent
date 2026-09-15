@@ -252,9 +252,6 @@ class LineReaderTest {
             assertEquals("你好", r.readLine("> ", new InputFrame("上", "下", "状态")));
 
             String screen = captured.toString(StandardCharsets.UTF_8);
-            // 下方两行装饰逐行擦掉，再退回上边线那一行覆盖它
-            assertTrue(screen.contains(Ansi.up(3)) || screen.contains("上"),
-                    "没有退回到上边线的位置");
             assertTrue(screen.endsWith("> 你好" + System.lineSeparator()),
                     "收起后应当只剩这一行内容");
         } finally {
@@ -296,12 +293,28 @@ class LineReaderTest {
     }
 
     @Test
-    @DisplayName("没有状态行时少收一行")
+    @DisplayName("收起时每一行都要擦，包括夹在中间的输入行——漏掉它旧内容会留在屏幕上")
+    void erasesEveryLineIncludingTheInputLine() {
+        LineReader r = reader(keys("x", ENTER));
+        r.readLine("> ", new InputFrame("上", "下", "状态"));
+
+        String screen = captured.toString(StandardCharsets.UTF_8);
+        // 下方两行 + 输入行 + 上边线 = 4 次清行（还有输入过程中的重画）
+        int clears = countOccurrences(screen, Ansi.clearLine());
+        assertTrue(clears >= 4, "清行次数不够，有行没被擦到: " + clears);
+        // 向上擦回去的次数 = 下方装饰 2 行 + 上边线 1 行
+        assertEquals(3, countOccurrences(screen, Ansi.up(1)),
+                "必须逐行向上擦，一次 up 到顶会漏掉中间的输入行");
+    }
+
+    @Test
+    @DisplayName("没有状态行时少擦一行")
     void collapsesFrameWithoutStatus() {
         LineReader r = reader(keys("x", ENTER));
         r.readLine("> ", new InputFrame("上", "下", null));
 
-        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.up(2)));
+        // 铺开时回到输入行用掉 1 次 up(1)（只有一行装饰），收起时向上擦 2 行
+        assertEquals(3, countOccurrences(captured.toString(StandardCharsets.UTF_8), Ansi.up(1)));
     }
 
     @Test
