@@ -1,0 +1,198 @@
+package dev.wiles.myagent.llm;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.wiles.myagent.config.Config;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+
+/**
+ * DeepSeek 的 LlmClient 实现。
+ *
+ * DeepSeek 用的是 OpenAI 兼容协议，所以这份实现换个 baseUrl/model 就能对接
+ * Kimi、通义、本地 Ollama 等一大票服务，不必改代码。
+ */
+public final class DeepSeekClient implements LlmClient {
+
+    private static final Logger log = LoggerFactory.getLogger(DeepSeekClient.class);
+    private static final MediaType JSON = MediaType.get("application/json");
+
+    /** 限流和服务端抖动重试几次，其余错误立刻抛出。 */
+    private static final int MAX_RETRIES = 2;
+
+    private final ObjectMapper mapper = new ObjectMapper()
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+
+    private final Config config;
+    private final OkHttpClient http;
+
+    private Double temperature;
+    private Integer maxTokens;
+
+    public DeepSeekClient(Config config) {
+        this(config, defaultHttpClient());
+    }
+
+    public DeepSeekClient(Config config, OkHttpClient http) {
+        if (!config.hasApiKey()) {
+            throw new LlmException("未配置 API key：请设置环境变量 DEEPSEEK_API_KEY，"
+                    + "或在 ~/.myagent/config.json 里写 apiKey");
+        }
+        this.config = config;
+        this.http = http;
+    }
+
+    private static OkHttpClient defaultHttpClient() {
+        return new OkHttpClient.Builder()
+                .connectTimeout(Duration.ofSeconds(15))
+                .writeTimeout(Duration.ofSeconds(30))
+                // 模型出长回答可能要一两分钟，读超时必须给足
+                .readTimeout(Duration.ofMinutes(5))
+                .build();
+    }
+
+    public DeepSeekClient temperature(double value) {
+        this.temperature = value;
+        return this;
+    }
+
+    public DeepSeekClient maxTokens(int value) {
+        this.maxTokens = value;
+        return this;
+    }
+
+    @Override
+    public String modelName() {
+        return config.model();
+    }
+
+    @Override
+    public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+        if (messages == null || messages.isEmpty()) {
+            throw new IllegalArgumentException("messages 不能为空");
+        }
+        boolean withTools = tools != null && !tools.isEmpty();
+
+        ChatRequest payload = new ChatRequest(
+                config.model(),
+                messages,
+                withTools ? tools : null,           // 空数组会被部分网关判为非法，必须省略
+                withTools ? "auto" : null,          // auto：由模型自行决定要不要调工具
+                temperature,
+                maxTokens,
+                false);                             // 流式输出留到后面再做
+
+        String body = writeJson(payload);
+        log.debug("-> {} ({} 条消息, {} 个工具)", config.chatCompletionsUrl(), messages.size(),
+                withTools ? tools.size() : 0);
+
+        String responseBody = execute(body);
+        ChatResponse response = readJson(responseBody);
+
+        if (log.isDebugEnabled() && response.usage() != null) {
+            log.debug("<- finish_reason={} tokens: prompt={} completion={}",
+                    response.finishReason(),
+                    response.usage().promptTokens(),
+                    response.usage().completionTokens());
+        }
+        return response;
+    }
+
+    /** 发请求并返回响应体字符串，内含有限次重试。 */
+    private String execute(String jsonBody) {
+        IOException lastIoError = null;
+
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+                sleepBackoff(attempt);
+                log.warn("重试第 {} 次", attempt);
+            }
+
+            Request request = new Request.Builder()
+                    .url(config.chatCompletionsUrl())
+                    .addHeader("Authorization", "Bearer " + config.apiKey())
+                    .addHeader("Content-Type", "application/json")
+                    .post(RequestBody.create(jsonBody, JSON))
+                    .build();
+
+            try (Response response = http.newCall(request).execute()) {
+                ResponseBody rb = response.body();
+                String text = rb == null ? "" : rb.string();
+
+                if (response.isSuccessful()) {
+                    return text;
+                }
+                if (isRetryable(response.code()) && attempt < MAX_RETRIES) {
+                    log.warn("HTTP {}，准备重试: {}", response.code(), brief(text));
+                    continue;
+                }
+                throw new LlmException(explain(response.code()) + " (HTTP " + response.code() + "): "
+                        + brief(text), response.code(), null);
+
+            } catch (IOException e) {
+                lastIoError = e;
+                if (attempt < MAX_RETRIES) {
+                    log.warn("网络异常，准备重试: {}", e.getMessage());
+                    continue;
+                }
+            }
+        }
+        throw new LlmException("请求模型失败: " + lastIoError.getMessage(), lastIoError);
+    }
+
+    private static boolean isRetryable(int code) {
+        return code == 429 || code >= 500;
+    }
+
+    private static String explain(int code) {
+        return switch (code) {
+            case 401 -> "鉴权失败，检查 API key";
+            case 402 -> "账户余额不足";
+            case 422 -> "请求参数非法";
+            case 429 -> "触发限流";
+            default -> code >= 500 ? "服务端错误" : "请求失败";
+        };
+    }
+
+    private static void sleepBackoff(int attempt) {
+        try {
+            Thread.sleep(1000L * (1L << (attempt - 1)));   // 1s, 2s
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new LlmException("请求被中断", ie);
+        }
+    }
+
+    private static String brief(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= 500 ? text : text.substring(0, 500) + "...(已截断)";
+    }
+
+    private String writeJson(ChatRequest payload) {
+        try {
+            return mapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new LlmException("序列化请求失败", e);
+        }
+    }
+
+    private ChatResponse readJson(String body) {
+        try {
+            return mapper.readValue(body, ChatResponse.class);
+        } catch (Exception e) {
+            throw new LlmException("解析模型响应失败: " + brief(body), e);
+        }
+    }
+}
