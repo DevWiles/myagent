@@ -27,10 +27,10 @@ class CliTest {
     }
 
     @Test
-    @DisplayName("--no-mouse 关掉鼠标点击，换回原生选中复制")
-    void noMouse() {
-        assertTrue(Cli.parse(new String[]{}).mouse());
-        assertFalse(Cli.parse(new String[]{"--no-mouse"}).mouse());
+    @DisplayName("鼠标默认关闭——开了它终端就滚不动了")
+    void mouseOffByDefault() {
+        assertFalse(Cli.parse(new String[]{}).mouse());
+        assertTrue(Cli.parse(new String[]{"--mouse"}).mouse());
     }
 
     @Test

@@ -649,9 +649,8 @@ public final class Repl {
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）
 
-                        展开: 点一下「⏺ 读取 N 个文件」那行，或按 Ctrl-O
-                              （开了鼠标之后，拖拽选中复制要按住 Option；
-                                想换回原生选中就加 --no-mouse 启动）
+                        展开: Ctrl-O 展开最近一轮的过程详情
+                              （--mouse 可以改成点击展开，但那样终端就滚不动了）
                         退出: Ctrl-D，或空行连按两次 Ctrl-C，或输入 exit
                         中断: 任务跑到一半按 Ctrl-C 可以中止它，会话继续
                         编辑: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾

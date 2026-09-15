@@ -11,7 +11,8 @@ import java.nio.file.Path;
  * @param unsafe        跳过工作区安全检查
  * @param color         是否输出颜色
  * @param spinner       是否显示转圈的状态行
- * @param mouse         是否开启鼠标点击（开启后终端原生文本选择要按 Option）
+ * @param mouse         是否开启鼠标点击。默认关闭：开启后终端的滚动和拖拽选中
+ *                      都会被程序接管，得不偿失
  * @param initialPrompt 一次性执行的提示词；非空时跑完就退出，不进交互
  * @param help          打印用法
  * @param version       打印版本
