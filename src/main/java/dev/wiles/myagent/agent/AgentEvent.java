@@ -18,6 +18,13 @@ public sealed interface AgentEvent {
     record Thinking(int step) implements AgentEvent {
     }
 
+    /**
+     * 模型新吐出的一小段文本（增量，不是全文）。
+     * 界面靠它做到边生成边显示，而不是等整段完成再一次性蹦出来。
+     */
+    record TextDelta(String text) implements AgentEvent {
+    }
+
     /** 模型在调用工具之前说的话，相当于 ReAct 里的 Thought。 */
     record Thought(String text) implements AgentEvent {
     }

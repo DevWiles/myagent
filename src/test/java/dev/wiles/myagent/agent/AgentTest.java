@@ -248,13 +248,17 @@ class AgentTest {
         List<String> seen = new ArrayList<>();
         agent(llm, tools).onEvent(e -> seen.add(describe(e))).run("读 a.txt");
 
-        assertEquals(List.of("思考1", "想法:我先读一下", "调用:read_file", "结果:true",
-                "思考2", "完成2"), seen);
+        // 不支持流式的客户端会退化成「一次性把全文当作一个增量发出」，
+        // 所以这里也能看到 TextDelta——上层只需要认这一种事件
+        assertEquals(List.of("思考1", "文本:我先读一下", "想法:我先读一下",
+                "调用:read_file", "结果:true",
+                "思考2", "文本:读完了", "完成2"), seen);
     }
 
     /** switch 的模式匹配要 Java 21 才转正，17 上只能用 instanceof 链。 */
     private static String describe(AgentEvent e) {
         if (e instanceof AgentEvent.Thinking t) return "思考" + t.step();
+        if (e instanceof AgentEvent.TextDelta d) return "文本:" + d.text();
         if (e instanceof AgentEvent.Thought t) return "想法:" + t.text();
         if (e instanceof AgentEvent.ToolStarted t) return "调用:" + t.tool();
         if (e instanceof AgentEvent.ToolFinished t) return "结果:" + t.ok();

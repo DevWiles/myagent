@@ -20,6 +20,25 @@ public interface LlmClient {
         return chat(messages, null);
     }
 
+    /**
+     * 流式版本：内容一边生成一边通过 listener 回调，返回值仍是拼装完整的响应。
+     *
+     * 默认实现退化成非流式，最后一次性把全文发给 listener——
+     * 这样上层代码只写一条路径，换个不支持流式的实现也不用改。
+     */
+    default ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools,
+                              StreamListener listener) {
+        ChatResponse response = chat(messages, tools);
+        String text = response.text();
+        if (!text.isEmpty()) {
+            listener.onTextDelta(text);
+        }
+        for (ToolCall call : response.message().toolCallsOrEmpty()) {
+            listener.onToolCallStarted(call.name());
+        }
+        return response;
+    }
+
     /** 当前使用的模型名，用于展示和日志。 */
     String modelName();
 }

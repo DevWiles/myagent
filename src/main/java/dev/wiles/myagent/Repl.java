@@ -4,6 +4,7 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.cli.Ansi;
+import dev.wiles.myagent.cli.Banner;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.cli.LineReader;
@@ -39,6 +40,9 @@ public final class Repl {
     private final TerminalMode terminal = new TerminalMode();
     private final LineReader reader;
     private final Agent agent;
+
+    /** 当前是否有一行流式文本还没收尾。 */
+    private boolean streaming = false;
 
     public Repl(CliOptions options) {
         this.options = options;
@@ -107,7 +111,8 @@ public final class Repl {
             System.out.println(noKeyMessage());
             return;
         }
-        System.out.println("\n" + agent.run(prompt));
+        agent.run(prompt);          // 内容已经通过流式回调打印过了
+        System.out.println();
     }
 
     private void loop() {
@@ -130,7 +135,8 @@ public final class Repl {
                 System.out.println(noKeyMessage());
                 continue;
             }
-            System.out.println("\n" + agent.run(line));
+            agent.run(line);        // 内容已经通过流式回调打印过了
+            System.out.println();
         }
         System.out.println(Ansi.dim("bye."));
     }
@@ -147,14 +153,25 @@ public final class Repl {
      * 全程不出声的话，用户没法判断它是在干活还是卡死了。
      */
     private void render(AgentEvent event) {
-        if (event instanceof AgentEvent.Thought t) {
-            System.out.println("\n" + t.text());
+        if (event instanceof AgentEvent.TextDelta d) {
+            if (!streaming) {
+                System.out.println();      // 新一段文本和上面的工具输出隔开
+            }
+            // 边收边打，不换行——同一段的后续增量紧接着往后续
+            System.out.print(d.text());
+            System.out.flush();
+            streaming = true;
+
+        } else if (event instanceof AgentEvent.Thought t) {
+            // 文本已经由 TextDelta 实时打出来了，这里不再重复渲染
 
         } else if (event instanceof AgentEvent.ToolStarted t) {
+            endStreamingLine();
             System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
                     + Ansi.dim(oneLine(t.arguments(), 100)));
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
+            endStreamingLine();
             String mark = t.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
             String[] lines = t.output().split("\n");
             for (int i = 0; i < Math.min(lines.length, OUTPUT_PREVIEW_LINES); i++) {
@@ -164,16 +181,29 @@ public final class Repl {
                 System.out.println(Ansi.dim("    … 另有 " + (lines.length - OUTPUT_PREVIEW_LINES) + " 行"));
             }
 
+        } else if (event instanceof AgentEvent.Done d) {
+            endStreamingLine();
+
         } else if (event instanceof AgentEvent.Compacted c) {
+            endStreamingLine();
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
             System.out.println("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
                     + c.tokensAfter() + " tokens"
                     + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
         } else if (event instanceof AgentEvent.Failed f) {
-            System.out.println("\n" + Ansi.red("⚠ " + f.reason()));
+            endStreamingLine();
+            System.out.println(Ansi.red("⚠ " + f.reason()));
         }
-        // Thinking 和 Done 不单独渲染：前者太吵，后者由 run() 的返回值负责打印
+        // Thinking 不渲染，太吵
+    }
+
+    /** 流式输出没有换行符收尾，后面要打别的东西之前得先补一个。 */
+    private void endStreamingLine() {
+        if (streaming) {
+            System.out.println();
+            streaming = false;
+        }
     }
 
     private static String oneLine(String text, int max) {
@@ -233,16 +263,8 @@ public final class Repl {
     }
 
     private void printBanner() {
-        System.out.println(Ansi.bold("myagent " + Cli.VERSION) + Ansi.dim("  (Java "
-                + Runtime.version().feature() + ")"));
-        if (agent == null) {
-            System.out.println(Ansi.red("⚠ 未配置 API key，只能使用 /help 等本地命令。"));
-        } else {
-            System.out.println(Ansi.dim("模型: ") + config.model()
-                    + (options.planMode() ? Ansi.yellow("   [只读模式]") : "")
-                    + Ansi.dim("   /help 查看命令"));
-        }
-        System.out.println(Ansi.dim("工作区: " + workspace.root() + "   "
-                + tools.all().size() + " 个工具"));
+        System.out.print(Banner.render(Cli.VERSION, config.model(), workspace.root(),
+                tools.all().stream().map(Tool::name).toList(),
+                options.planMode(), agent != null));
     }
 }

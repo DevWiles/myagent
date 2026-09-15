@@ -12,6 +12,7 @@ import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
@@ -106,6 +107,84 @@ public final class DeepSeekClient implements LlmClient {
                     response.usage().completionTokens());
         }
         return response;
+    }
+
+    @Override
+    public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools,
+                             StreamListener listener) {
+        if (messages == null || messages.isEmpty()) {
+            throw new IllegalArgumentException("messages 不能为空");
+        }
+        boolean withTools = tools != null && !tools.isEmpty();
+        ChatRequest payload = new ChatRequest(
+                config.model(), messages,
+                withTools ? tools : null,
+                withTools ? "auto" : null,
+                temperature, maxTokens,
+                true);                              // 唯一的区别就是这个 true
+
+        String body = writeJson(payload);
+        log.debug("-> {} (流式, {} 条消息, {} 个工具)", config.chatCompletionsUrl(),
+                messages.size(), withTools ? tools.size() : 0);
+
+        Request request = new Request.Builder()
+                .url(config.chatCompletionsUrl())
+                .addHeader("Authorization", "Bearer " + config.apiKey())
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "text/event-stream")
+                .post(RequestBody.create(body, JSON))
+                .build();
+
+        // 流式不做重试：内容可能已经打到用户屏幕上了，重来一次会把前半段重复输出一遍。
+        // 失败就抛出去，由 Agent 统一回滚本轮对话。
+        try (Response response = http.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                ResponseBody rb = response.body();
+                String text = rb == null ? "" : rb.string();
+                throw new LlmException(explain(response.code()) + " (HTTP " + response.code()
+                        + "): " + brief(text), response.code(), null);
+            }
+            ResponseBody rb = response.body();
+            if (rb == null) {
+                throw new LlmException("流式响应没有 body");
+            }
+            return readEventStream(rb.charStream(), listener);
+        } catch (IOException e) {
+            throw new LlmException("流式请求失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 解析 SSE（Server-Sent Events）。
+     *
+     * 格式很简单：每行 "data: {json}"，空行分隔，最后一行是 "data: [DONE]"。
+     * 注意不能用 body.string() 一次读完——那样就退化成非流式，
+     * 必须按行读，读到一行处理一行。
+     */
+    private ChatResponse readEventStream(java.io.Reader source, StreamListener listener)
+            throws IOException {
+        StreamAccumulator accumulator = new StreamAccumulator();
+        try (BufferedReader reader = new BufferedReader(source)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data:")) {
+                    continue;                       // 空行和 event:/id: 之类一概忽略
+                }
+                String payload = line.substring(5).trim();
+                if (payload.isEmpty()) {
+                    continue;
+                }
+                if ("[DONE]".equals(payload)) {
+                    break;
+                }
+                try {
+                    accumulator.accept(mapper.readTree(payload), listener);
+                } catch (Exception e) {
+                    log.warn("跳过无法解析的流式分片: {}", brief(payload));
+                }
+            }
+        }
+        return accumulator.toResponse();
     }
 
     /** 发请求并返回响应体字符串，内含有限次重试。 */

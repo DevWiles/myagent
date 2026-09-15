@@ -40,7 +40,16 @@ public final class TerminalMode {
             if (savedSettings.isEmpty()) {
                 return false;
             }
-            exec("stty raw -echo < /dev/tty");
+            // 关键：用 -icanon -echo -isig，而不是 stty raw。
+            //
+            // stty raw 会把「输出换行转换」(onlcr) 一并关掉，于是 \n 只让光标下移一行、
+            // 不回行首，每行输出都比上一行更靠右，屏幕最后变成阶梯状。
+            // 我们真正需要的只有三件事：
+            //   -icanon 逐字符读（不等回车）
+            //   -echo   终端别替我们回显
+            //   -isig   Ctrl-C 交给程序自己处理，不要变成 SIGINT 直接杀进程
+            // 输出侧的处理全部保留，printf 的 \n 照常被转成 \r\n。
+            exec("stty -icanon -echo -isig min 1 time 0 < /dev/tty");
             // 程序万一崩掉也要还原终端，否则用户的 shell 会变得不回显、没法用
             Runtime.getRuntime().addShutdownHook(new Thread(this::restore));
             return true;

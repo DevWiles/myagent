@@ -109,7 +109,7 @@ public final class LineReader {
                 }
                 switch (b) {
                     case ENTER, NEWLINE -> {
-                        out.print("\r\n");
+                        out.println();
                         out.flush();
                         String line = buffer.toString();
                         remember(line);
@@ -117,14 +117,14 @@ public final class LineReader {
                     }
                     case CTRL_C -> {
                         // 和 shell 一致：放弃当前这行，另起一行，但不退出程序
-                        out.print("^C\r\n");
+                        out.println("^C");
                         buffer = new StringBuilder();
                         cursor = 0;
                         redraw(prompt);
                     }
                     case CTRL_D -> {
                         if (buffer.length() == 0) {
-                            out.print("\r\n");
+                            out.println();
                             return null;                  // 空行上的 Ctrl-D 才是退出
                         }
                         if (cursor < buffer.length()) {
@@ -293,7 +293,8 @@ public final class LineReader {
             cursor = buffer.length();
             return;
         }
-        out.print("\r\n" + String.join("   ", matches) + "\r\n");
+        out.println();
+        out.println(String.join("   ", matches));
     }
 
     private void redraw(String prompt) {

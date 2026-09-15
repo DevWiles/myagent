@@ -4,6 +4,7 @@ import dev.wiles.myagent.llm.ChatMessage;
 import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
+import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
@@ -61,6 +62,14 @@ public final class Agent {
     private Consumer<AgentEvent> listener = event -> {
     };
 
+    /** 把模型的流式增量转成 agent 事件发出去。 */
+    private final StreamListener stream = new StreamListener() {
+        @Override
+        public void onTextDelta(String delta) {
+            listener.accept(new AgentEvent.TextDelta(delta));
+        }
+    };
+
     public Agent(LlmClient client, ToolRegistry tools, String systemPrompt) {
         this(client, tools, systemPrompt, DEFAULT_MAX_STEPS);
     }
@@ -114,7 +123,7 @@ public final class Agent {
                 // 在循环中间压会切出无主的 tool 消息
                 compactIfNeeded(specs);
 
-                ChatResponse response = client.chat(history, specs);
+                ChatResponse response = client.chat(history, specs, stream);
                 ChatMessage assistant = response.message();
 
                 // 原样入历史。这条消息里的 tool_calls 是后面 tool 消息的锚点，
@@ -181,7 +190,7 @@ public final class Agent {
         history.add(ChatMessage.user(
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {
-            ChatResponse response = client.chat(history, null);   // tools 传 null = 没得调
+            ChatResponse response = client.chat(history, null, stream);   // tools 传 null = 没得调
             history.add(response.message());
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
