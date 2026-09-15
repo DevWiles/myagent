@@ -7,6 +7,8 @@ import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
+import dev.wiles.myagent.cli.ContextBar;
+import dev.wiles.myagent.cli.InputFrame;
 import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
 import dev.wiles.myagent.cli.StatusLine;
@@ -155,9 +157,8 @@ public final class Repl {
         int consecutiveInterrupts = 0;
         while (true) {
             String line;
-            System.out.println(rule());
             try {
-                line = reader.readLine(Ansi.cyan("› "));
+                line = reader.readLine(Ansi.cyan("› "), inputFrame());
             } catch (LineReader.Interrupted e) {
                 // 空行上按 Ctrl-C。我们关掉了 SIGINT，必须自己提供这条退路，
                 // 但也不能一按就退——手滑的代价太大，所以要求连按两次。
@@ -168,7 +169,6 @@ public final class Repl {
                 continue;
             }
             consecutiveInterrupts = 0;
-            System.out.println(rule());
 
             if (line == null) {                          // Ctrl-D
                 break;
@@ -335,5 +335,15 @@ public final class Repl {
     /** 输入框的横线。 */
     private String rule() {
         return Ansi.dim("─".repeat(Math.max(20, width)));
+    }
+
+    /** 输入行的上下边线，外加一行上下文用量。 */
+    private InputFrame inputFrame() {
+        if (agent == null) {
+            return new InputFrame(rule(), rule(), null);
+        }
+        return new InputFrame(rule(), rule(), ContextBar.render(
+                agent.estimatedTokens(), agent.contextLimit(),
+                agent.history().size(), config.model()));
     }
 }

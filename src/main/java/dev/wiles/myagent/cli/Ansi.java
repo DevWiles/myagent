@@ -71,6 +71,16 @@ public final class Ansi {
         return enabled ? CSI + "?25h" : "";
     }
 
+    /** 光标上移 n 行。 */
+    public static String up(int n) {
+        return n <= 0 || !enabled ? "" : CSI + n + "A";
+    }
+
+    /** 光标下移 n 行。 */
+    public static String down(int n) {
+        return n <= 0 || !enabled ? "" : CSI + n + "B";
+    }
+
     /** 光标左移 n 列。 */
     public static String left(int n) {
         return n <= 0 || !enabled ? "" : CSI + n + "D";

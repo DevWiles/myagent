@@ -221,6 +221,54 @@ class LineReaderTest {
     }
 
     @Test
+    @DisplayName("带边框时，上下线和状态行一次性铺开")
+    void drawsInputFrame() {
+        LineReader r = reader(keys("你好", ENTER));
+        r.readLine("> ", new InputFrame("上边线", "下边线", "状态行"));
+
+        String screen = captured.toString(StandardCharsets.UTF_8);
+        assertTrue(screen.contains("上边线"));
+        assertTrue(screen.contains("下边线"));
+        assertTrue(screen.contains("状态行"));
+    }
+
+    @Test
+    @DisplayName("铺开之后光标要回到输入行，否则用户会在状态行上打字")
+    void movesCursorBackToInputLine() {
+        LineReader r = reader(keys(ENTER));
+        r.readLine("> ", new InputFrame("上", "下", "状态"));
+
+        // 下方两行装饰 → 上移 2 行回到输入行
+        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.up(2)),
+                "没有把光标移回输入行");
+    }
+
+    @Test
+    @DisplayName("提交时跨过下方装饰再换行，框才会原样留在历史里")
+    void leavesFrameOnSubmit() {
+        LineReader r = reader(keys("x", ENTER));
+        r.readLine("> ", new InputFrame("上", "下", "状态"));
+
+        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.down(2)),
+                "提交时应当先跨过下方的装饰");
+    }
+
+    @Test
+    @DisplayName("只有上下线、没有状态行时只跨 1 行")
+    void handlesFrameWithoutStatus() {
+        LineReader r = reader(keys("x", ENTER));
+        r.readLine("> ", new InputFrame("上", "下", null));
+
+        assertTrue(captured.toString(StandardCharsets.UTF_8).contains(Ansi.down(1)));
+    }
+
+    @Test
+    @DisplayName("不带边框时行为和以前一样")
+    void worksWithoutFrame() {
+        assertEquals("hello", read("hello", ENTER));
+    }
+
+    @Test
     @DisplayName("非 raw 环境（管道/重定向）退化成按行读")
     void fallsBackToLineMode() {
         LineReader r = new LineReader(

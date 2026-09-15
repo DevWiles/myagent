@@ -63,6 +63,7 @@ public final class LineReader {
     private List<String> completions = List.of();
     private Path historyFile;
 
+    private InputFrame frame = InputFrame.none();
     private StringBuilder buffer = new StringBuilder();
     private int cursor;                 // 光标在 buffer 中的字符下标
     private int historyIndex;           // 当前浏览到历史的第几条
@@ -104,14 +105,29 @@ public final class LineReader {
      * @return 用户输入的内容；按 Ctrl-D（空行）或输入结束时返回 null
      */
     public String readLine(String prompt) {
+        return readLine(prompt, InputFrame.none());
+    }
+
+    /**
+     * 读一行，并在输入行上下画出边框。
+     *
+     * 画法是「先铺开，再回去」：一上来就把上边线、输入行、下边线、状态行全部打出来，
+     * 然后用光标上移回到输入行。之后每次按键只重画输入行那一行——
+     * 上下的装饰已经在屏幕上了，不用动。
+     *
+     * 提交时再把光标移到最下面一行之后换行，这样装饰会原样留在历史记录里，
+     * 顺带充当每一轮的分隔。
+     */
+    public String readLine(String prompt, InputFrame frame) {
         if (!raw) {
             return readLineSimple(prompt);
         }
+        this.frame = frame;
         buffer = new StringBuilder();
         cursor = 0;
         historyIndex = history.size();
         stashedLine = "";
-        redraw(prompt);
+        drawFrame(prompt);
 
         try {
             while (true) {
@@ -122,14 +138,14 @@ public final class LineReader {
                 }
                 switch (b) {
                     case ENTER, NEWLINE -> {
-                        out.println();
+                        leaveFrame();
                         out.flush();
                         String line = buffer.toString();
                         remember(line);
                         return line;
                     }
                     case CTRL_C -> {
-                        out.println("^C");
+                        leaveFrame();
                         if (buffer.length() == 0) {
                             // 空行上的 Ctrl-C 交给调用方决定（通常是「再按一次就退出」）
                             throw new Interrupted();
@@ -137,11 +153,11 @@ public final class LineReader {
                         // 有内容时和 shell 一致：放弃当前这行，另起一行
                         buffer = new StringBuilder();
                         cursor = 0;
-                        redraw(prompt);
+                        drawFrame(prompt);
                     }
                     case CTRL_D -> {
                         if (buffer.length() == 0) {
-                            out.println();
+                            leaveFrame();
                             return null;                  // 空行上的 Ctrl-D 才是退出
                         }
                         if (cursor < buffer.length()) {
@@ -314,6 +330,36 @@ public final class LineReader {
         out.println(String.join("   ", matches));
     }
 
+    /** 首次铺开整个框，光标停在输入行。 */
+    private void drawFrame(String prompt) {
+        if (frame.isEmpty()) {
+            redraw(prompt);
+            return;
+        }
+        StringBuilder sb = new StringBuilder(Ansi.clearLine());
+        if (frame.top() != null) {
+            sb.append(frame.top()).append('\n');
+        }
+        sb.append(prompt).append(buffer);
+        if (frame.bottom() != null) {
+            sb.append('\n').append(frame.bottom());
+        }
+        if (frame.below() != null) {
+            sb.append('\n').append(frame.below());
+        }
+        // 回到输入行。装饰已经铺在屏幕上了，后面每次按键只需重画这一行。
+        sb.append(Ansi.up(frame.linesBelow()));
+        out.print(sb);
+        redraw(prompt);
+    }
+
+    /** 提交或中断时，跨过下方的装饰再换行，把框留在历史里。 */
+    private void leaveFrame() {
+        out.print(Ansi.down(frame.linesBelow()));
+        out.println();
+    }
+
+    /** 只重画输入行——上下的装饰不动。 */
     private void redraw(String prompt) {
         out.print(Ansi.clearLine() + prompt + buffer);
         int tail = Ansi.displayWidth(buffer.substring(cursor));

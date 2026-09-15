@@ -67,6 +67,11 @@ public final class ContextManager {
         }
     }
 
+    /** 上下文窗口上限，界面要用它算占用比例。 */
+    public int maxTokens() {
+        return maxTokens;
+    }
+
     public int estimate(List<ChatMessage> history, List<ToolSpec> tools) {
         return TokenEstimator.estimate(history) + TokenEstimator.estimateTools(tools);
     }

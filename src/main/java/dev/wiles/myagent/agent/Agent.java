@@ -198,6 +198,11 @@ public final class Agent {
         return context.estimate(history, tools.specs());
     }
 
+    /** 上下文窗口上限。 */
+    public int contextLimit() {
+        return context.maxTokens();
+    }
+
     private void compactIfNeeded(List<ToolSpec> specs) {
         if (!context.needsCompaction(history, specs)) {
             return;
