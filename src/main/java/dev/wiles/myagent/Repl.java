@@ -108,6 +108,11 @@ public final class Repl {
                 System.out.println("    … 另有 " + (lines.length - OUTPUT_PREVIEW_LINES) + " 行");
             }
 
+        } else if (event instanceof AgentEvent.Compacted c) {
+            // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
+            System.out.println("\n… 上下文已压缩 " + c.tokensBefore() + " → " + c.tokensAfter()
+                    + " tokens" + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）"));
+
         } else if (event instanceof AgentEvent.Failed f) {
             System.out.println("\n⚠ " + f.reason());
         }
@@ -139,7 +144,8 @@ public final class Repl {
                     System.out.println("(未启用)");
                     return true;
                 }
-                System.out.println("当前上下文共 " + agent.history().size() + " 条消息:");
+                System.out.println("当前上下文共 " + agent.history().size() + " 条消息，约 "
+                        + agent.estimatedTokens() + " tokens（含每轮重发的工具菜单）:");
                 agent.history().forEach(m -> System.out.println(
                         "  [" + m.role() + "] "
                                 + (m.hasToolCalls() ? "调用 " + m.toolCallsOrEmpty().size() + " 个工具 " : "")

@@ -5,6 +5,8 @@ import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
 import dev.wiles.myagent.llm.ToolCall;
+import dev.wiles.myagent.llm.ToolSpec;
+import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
 import org.slf4j.Logger;
@@ -54,6 +56,7 @@ public final class Agent {
     private final List<ChatMessage> history = new ArrayList<>();
     private final String systemPrompt;
     private final int maxSteps;
+    private final ContextManager context;
 
     private Consumer<AgentEvent> listener = event -> {
     };
@@ -63,10 +66,16 @@ public final class Agent {
     }
 
     public Agent(LlmClient client, ToolRegistry tools, String systemPrompt, int maxSteps) {
+        this(client, tools, systemPrompt, maxSteps, new ContextManager());
+    }
+
+    public Agent(LlmClient client, ToolRegistry tools, String systemPrompt, int maxSteps,
+                 ContextManager context) {
         this.client = client;
         this.tools = tools;
         this.systemPrompt = systemPrompt;
         this.maxSteps = maxSteps;
+        this.context = context;
         reset();
     }
 
@@ -100,7 +109,12 @@ public final class Agent {
             for (int step = 1; step <= maxSteps; step++) {
                 listener.accept(new AgentEvent.Thinking(step));
 
-                ChatResponse response = client.chat(history, tools.specs());
+                List<ToolSpec> specs = tools.specs();
+                // 压缩必须发生在请求之前、且此刻历史是自洽的（上一轮的工具结果都已回填），
+                // 在循环中间压会切出无主的 tool 消息
+                compactIfNeeded(specs);
+
+                ChatResponse response = client.chat(history, specs);
                 ChatMessage assistant = response.message();
 
                 // 原样入历史。这条消息里的 tool_calls 是后面 tool 消息的锚点，
@@ -144,6 +158,22 @@ public final class Agent {
             listener.accept(new AgentEvent.Failed(e.getMessage()));
             return "调用模型失败: " + e.getMessage();
         }
+    }
+
+    /** 估算当前上下文占用（含每轮都要重发的工具菜单）。 */
+    public int estimatedTokens() {
+        return context.estimate(history, tools.specs());
+    }
+
+    private void compactIfNeeded(List<ToolSpec> specs) {
+        if (!context.needsCompaction(history, specs)) {
+            return;
+        }
+        ContextManager.Result result = context.compact(history, specs, client);
+        history.clear();
+        history.addAll(result.messages());
+        listener.accept(new AgentEvent.Compacted(
+                result.tokensBefore(), result.tokensAfter(), result.summarized()));
     }
 
     /** 不给工具再问一次，逼模型输出结论。 */

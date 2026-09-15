@@ -7,6 +7,7 @@ import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
+import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
@@ -32,8 +33,15 @@ class AgentTest {
         final List<List<ChatMessage>> received = new ArrayList<>();
         final List<List<ToolSpec>> receivedTools = new ArrayList<>();
 
+        int summaryRequests = 0;
+
         @Override
         public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+            // 压缩时发来的摘要请求走单独分支，不占用剧本
+            if (messages.get(0).content().contains("压缩对话历史")) {
+                summaryRequests++;
+                return response(ChatMessage.assistant("[摘要] 之前读过几个文件"), "stop");
+            }
             received.add(List.copyOf(messages));
             receivedTools.add(tools);
             if (script.isEmpty()) {
@@ -250,9 +258,62 @@ class AgentTest {
         if (e instanceof AgentEvent.Thought t) return "想法:" + t.text();
         if (e instanceof AgentEvent.ToolStarted t) return "调用:" + t.tool();
         if (e instanceof AgentEvent.ToolFinished t) return "结果:" + t.ok();
+        if (e instanceof AgentEvent.Compacted c) return "压缩" + c.tokensBefore() + "->" + c.tokensAfter();
         if (e instanceof AgentEvent.Done d) return "完成" + d.steps();
         if (e instanceof AgentEvent.Failed f) return "失败";
         throw new IllegalStateException("未处理的事件类型: " + e);
+    }
+
+    @Test
+    @DisplayName("上下文涨太大时自动压缩，压缩后对话照常进行")
+    void compactsWhenContextGrows() {
+        String huge = "很长的文件内容 ".repeat(400);
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "read_file", "{}"))
+                .calls(null, ToolCall.of("c2", "read_file", "{}"))
+                .calls(null, ToolCall.of("c3", "read_file", "{}"))
+                .says("三个文件都看完了");
+        ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
+
+        List<AgentEvent> events = new ArrayList<>();
+        Agent agent = new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6))
+                .onEvent(events::add);
+
+        String answer = agent.run("读三个文件");
+
+        assertEquals("三个文件都看完了", answer, "压缩之后对话必须还能正常走完");
+        assertTrue(events.stream().anyMatch(e -> e instanceof AgentEvent.Compacted),
+                "上下文撑大了就该触发压缩");
+
+        AgentEvent.Compacted c = (AgentEvent.Compacted) events.stream()
+                .filter(e -> e instanceof AgentEvent.Compacted).findFirst().orElseThrow();
+        assertTrue(c.tokensAfter() < c.tokensBefore(), "压完必须真的变小了");
+    }
+
+    @Test
+    @DisplayName("压缩后发给模型的消息序列依然合法，没有无主的 tool 消息")
+    void compactedHistoryStaysValid() {
+        String huge = "很长的文件内容 ".repeat(400);
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "read_file", "{}"))
+                .calls(null, ToolCall.of("c2", "read_file", "{}"))
+                .calls(null, ToolCall.of("c3", "read_file", "{}"))
+                .says("好了");
+        ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
+
+        new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6)).run("读文件");
+
+        for (List<ChatMessage> sent : llm.received) {
+            java.util.Set<String> pending = new java.util.HashSet<>();
+            for (ChatMessage m : sent) {
+                if (m.hasToolCalls()) {
+                    m.toolCallsOrEmpty().forEach(x -> pending.add(x.id()));
+                } else if (ChatMessage.ROLE_TOOL.equals(m.role())) {
+                    assertTrue(pending.remove(m.toolCallId()),
+                            "发出去的历史里出现无主 tool 消息: " + m.toolCallId());
+                }
+            }
+        }
     }
 
     @Test

@@ -30,6 +30,10 @@ public sealed interface AgentEvent {
     record ToolFinished(String tool, boolean ok, String output) implements AgentEvent {
     }
 
+    /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢失。 */
+    record Compacted(int tokensBefore, int tokensAfter, boolean summarized) implements AgentEvent {
+    }
+
     /** 模型给出最终答复，本次 run 结束。 */
     record Done(String text, int steps) implements AgentEvent {
     }
