@@ -64,6 +64,8 @@ public final class LineReader {
     private Path historyFile;
 
     private InputFrame frame = InputFrame.none();
+    /** 画成带左右边框的盒子时的总宽度；0 表示不画盒子。 */
+    private int boxWidth;
     private StringBuilder buffer = new StringBuilder();
     private int cursor;                 // 光标在 buffer 中的字符下标
     private int historyIndex;           // 当前浏览到历史的第几条
@@ -78,6 +80,16 @@ public final class LineReader {
     /** Tab 补全的候选项，目前是斜杠命令。 */
     public LineReader completions(List<String> values) {
         this.completions = List.copyOf(values);
+        return this;
+    }
+
+    /**
+     * 把输入行画成一个带左右边框的盒子。
+     *
+     * @param width 盒子总宽度（含两侧边框）；传 0 退回朴素的一行提示符
+     */
+    public LineReader box(int width) {
+        this.boxWidth = width;
         return this;
     }
 
@@ -138,7 +150,7 @@ public final class LineReader {
                 }
                 switch (b) {
                     case ENTER, NEWLINE -> {
-                        collapseFrame(prompt + buffer);
+                        collapseFrame(submittedLine(prompt));
                         out.flush();
                         String line = buffer.toString();
                         remember(line);
@@ -341,7 +353,7 @@ public final class LineReader {
         if (frame.top() != null) {
             sb.append(frame.top()).append('\n');
         }
-        sb.append(prompt).append(buffer);
+        sb.append(inputLine(prompt));
         if (frame.bottom() != null) {
             sb.append('\n').append(frame.bottom());
         }
@@ -376,11 +388,41 @@ public final class LineReader {
         out.println(finalLine);
     }
 
+    /**
+     * 提交后留在屏幕上的那一行：整行铺底色，一眼能认出哪句是自己说的。
+     * 底色要铺满整行宽度才显眼，所以末尾补空格。
+     */
+    private String submittedLine(String prompt) {
+        String text = prompt + buffer;
+        int pad = Math.max(0, boxWidth - Ansi.displayWidth(text));
+        return Ansi.highlight(Ansi.cyan(prompt) + buffer + " ".repeat(pad));
+    }
+
+    /**
+     * 输入行长什么样。首次铺开和之后每次重画都用它，
+     * 否则先画一版没有边框的再覆盖，屏幕会闪一下。
+     */
+    private String inputLine(String prompt) {
+        if (boxWidth <= 0) {
+            return Ansi.cyan(prompt) + buffer;
+        }
+        // 盒子模式：左右各一道边框，中间填内容，不足的用空格顶到右边框
+        int inner = boxWidth - 4;                       // "│ " + 内容 + " │"
+        int contentWidth = Ansi.displayWidth(prompt) + Ansi.displayWidth(buffer.toString());
+        int pad = Math.max(0, inner - contentWidth);
+        return Ansi.dim("│ ") + Ansi.cyan(prompt) + buffer + " ".repeat(pad) + Ansi.dim(" │");
+    }
+
     /** 只重画输入行——上下的装饰不动。 */
     private void redraw(String prompt) {
-        out.print(Ansi.clearLine() + prompt + buffer);
-        int tail = Ansi.displayWidth(buffer.substring(cursor));
-        out.print(Ansi.left(tail));
+        out.print(Ansi.clearLine() + inputLine(prompt));
+
+        // 光标此刻停在行尾（盒子模式下是右边框之后），按显示宽度算着退回去
+        int cursorColumn = (boxWidth > 0 ? 2 : 0) + Ansi.displayWidth(prompt)
+                + Ansi.displayWidth(buffer.substring(0, cursor));
+        int lineEnd = boxWidth > 0 ? boxWidth
+                : Ansi.displayWidth(prompt) + Ansi.displayWidth(buffer.toString());
+        out.print(Ansi.left(lineEnd - cursorColumn));
         out.flush();
     }
 

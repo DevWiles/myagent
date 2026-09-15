@@ -1,5 +1,7 @@
 package dev.wiles.myagent;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
@@ -12,6 +14,7 @@ import dev.wiles.myagent.cli.InputFrame;
 import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
 import dev.wiles.myagent.cli.MarkdownRenderer;
+import dev.wiles.myagent.cli.OutputDetail;
 import dev.wiles.myagent.cli.StatusLine;
 import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
@@ -37,8 +40,11 @@ public final class Repl {
     /** /verbose 打开后显示这么多行。完整内容无论如何都会原样发给模型。 */
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/clear", "/tools", "/history", "/verbose", "/config", "/exit", "/quit");
+            List.of("/help", "/clear", "/tools", "/history", "/quiet", "/verbose",
+                    "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
     private static final List<String> EXIT_WORDS =
@@ -57,8 +63,12 @@ public final class Repl {
     private final MarkdownRenderer markdown = new MarkdownRenderer();
     /** 当前这段文字是否已经开了头（用来决定要不要先空一行）。 */
     private boolean textStarted = false;
-    /** 是否展开工具输出。 */
-    private boolean verbose = false;
+    /** 过程信息显示到什么程度。 */
+    private OutputDetail detail = OutputDetail.NORMAL;
+    /** 本轮统计，跑完在输入框上方汇报一行。 */
+    private long runStartedAt;
+    private int runSteps;
+    private int runToolCalls;
     /** 是否处于 raw 模式：只有这时才能后台监听 Ctrl-C。 */
     private final boolean rawMode;
     /** 终端宽度，用来画框和分隔线。 */
@@ -81,6 +91,7 @@ public final class Repl {
         this.width = TerminalMode.width();
         this.status = new StatusLine(System.out, raw && options.color());
         this.reader = new LineReader(System.in, System.out, raw)
+                .box(raw ? TerminalMode.width() : 0)
                 .completions(SLASH_COMMANDS)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
@@ -149,6 +160,9 @@ public final class Repl {
      */
     private void runInterruptible(String prompt) {
         markdown.reset();          // 上一轮没闭合的代码块不能影响这一轮
+        runStartedAt = System.nanoTime();
+        runSteps = 0;
+        runToolCalls = 0;
         // 立刻起转。等 Agent 发出第一个 Thinking 事件才转的话，
         // 中间那段（建连接、压缩上下文）屏幕上是死的，用户会以为程序挂了。
         status.start("思考中…");
@@ -164,7 +178,44 @@ public final class Repl {
         } finally {
             status.stop();          // 无论如何都不能把转圈留在屏幕上
             flushText();
+            printRunSummary();
         }
+    }
+
+    /**
+     * 跑完在输入框上方留一行小结。
+     *
+     * 过程细节被折叠之后，用户看不出这一轮到底忙了些什么——
+     * 这行摘要既是交代，也是耗时的反馈。
+     */
+    private void printRunSummary() {
+        long seconds = (System.nanoTime() - runStartedAt) / 1_000_000_000L;
+        if (seconds < 1 && runToolCalls == 0) {
+            return;                 // 一问一答的小事不必汇报
+        }
+        StringBuilder sb = new StringBuilder("✻ 用时 ").append(seconds).append("s");
+        if (runSteps > 1) {
+            sb.append(" · ").append(runSteps).append(" 轮");
+        }
+        if (runToolCalls > 0) {
+            sb.append(" · ").append(runToolCalls).append(" 次工具调用");
+        }
+        System.out.println("\n" + Ansi.dim(sb.toString()));
+    }
+
+    /** 从参数 JSON 里挑出最能说明问题的那个值，精简模式下只显示它。 */
+    private static String keyArgument(String argumentsJson) {
+        try {
+            JsonNode args = JSON.readTree(argumentsJson);
+            for (String field : new String[]{"path", "command", "dirs", "files"}) {
+                if (args.hasNonNull(field)) {
+                    return oneLine(args.get(field).asText(args.get(field).toString()), 80);
+                }
+            }
+        } catch (Exception ignored) {
+            // 解析不了就退回原样
+        }
+        return oneLine(argumentsJson, 80);
     }
 
     private void loop() {
@@ -172,7 +223,7 @@ public final class Repl {
         while (true) {
             String line;
             try {
-                line = reader.readLine(Ansi.cyan("› "), inputFrame());
+                line = reader.readLine("› ", inputFrame());
             } catch (LineReader.Interrupted e) {
                 // 空行上按 Ctrl-C。我们关掉了 SIGINT，必须自己提供这条退路，
                 // 但也不能一按就退——手滑的代价太大，所以要求连按两次。
@@ -234,14 +285,22 @@ public final class Repl {
         flushText();
 
         if (event instanceof AgentEvent.Thinking t) {
+            runSteps = t.step();
             status.start("思考中…");
 
         } else if (event instanceof AgentEvent.Thought t) {
             // 文本已经由 TextDelta 打出来了，这里不再重复渲染
 
         } else if (event instanceof AgentEvent.ToolStarted t) {
-            System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
-                    + Ansi.dim(oneLine(t.arguments(), 100)));
+            runToolCalls++;
+            if (detail == OutputDetail.QUIET) {
+                // 精简模式只留一行：工具名 + 最要紧的那个参数
+                System.out.println(Ansi.green("⏺ ") + Ansi.bold(t.tool())
+                        + " " + Ansi.dim(keyArgument(t.arguments())));
+            } else {
+                System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
+                        + Ansi.dim(oneLine(t.arguments(), 100)));
+            }
             status.start("执行 " + t.tool() + "…");
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
@@ -298,9 +357,12 @@ public final class Repl {
      * 注意这只影响**显示**——完整内容照样原样发给模型，它需要看全。
      */
     private void renderToolOutput(AgentEvent.ToolFinished event) {
+        if (detail == OutputDetail.QUIET && event.ok()) {
+            return;                 // 精简模式下成功的调用不必汇报结果；失败的仍然要说
+        }
         String mark = event.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
         String[] lines = event.output().split("\n");
-        int limit = verbose ? VERBOSE_OUTPUT_LINES : COLLAPSED_OUTPUT_LINES;
+        int limit = detail == OutputDetail.VERBOSE ? VERBOSE_OUTPUT_LINES : COLLAPSED_OUTPUT_LINES;
 
         for (int i = 0; i < Math.min(lines.length, limit); i++) {
             System.out.println((i == 0 ? mark : "    ") + Ansi.dim(oneLine(lines[i], 160)));
@@ -308,7 +370,7 @@ public final class Repl {
         int hidden = lines.length - limit;
         if (hidden > 0) {
             System.out.println(Ansi.dim("    … 另有 " + hidden + " 行"
-                    + (verbose ? "" : "（/verbose 展开）")));
+                    + (detail == OutputDetail.VERBOSE ? "" : "（/verbose 展开）")));
         }
     }
 
@@ -347,8 +409,13 @@ public final class Repl {
                 return true;
             }
             case "/verbose" -> {
-                verbose = !verbose;
-                System.out.println(Ansi.dim("工具输出" + (verbose ? "已展开" : "已折叠")));
+                detail = detail.toggle(OutputDetail.VERBOSE);
+                System.out.println(Ansi.dim("过程信息：" + detail.label()));
+                return true;
+            }
+            case "/quiet" -> {
+                detail = detail.toggle(OutputDetail.QUIET);
+                System.out.println(Ansi.dim("过程信息：" + detail.label()));
                 return true;
             }
             case "/config" -> {
@@ -360,7 +427,8 @@ public final class Repl {
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
-                          /verbose  展开或折叠工具输出
+                          /quiet    只留工具名，过程细节全收起
+                          /verbose  展开工具输出（再按一次回到正常）
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）
 
@@ -382,17 +450,21 @@ public final class Repl {
                 options.planMode(), agent != null, width));
     }
 
-    /** 输入框的横线。 */
-    private String rule() {
-        return Ansi.dim("─".repeat(Math.max(20, width)));
+    /** 输入框的上下边框。 */
+    private String boxTop() {
+        return Ansi.dim("╭" + "─".repeat(Math.max(18, width - 2)) + "╮");
     }
 
-    /** 输入行的上下边线，外加一行上下文用量。 */
+    private String boxBottom() {
+        return Ansi.dim("╰" + "─".repeat(Math.max(18, width - 2)) + "╯");
+    }
+
+    /** 输入行的上下边框，外加一行上下文用量。 */
     private InputFrame inputFrame() {
         if (agent == null) {
-            return new InputFrame(rule(), rule(), null);
+            return new InputFrame(boxTop(), boxBottom(), null);
         }
-        return new InputFrame(rule(), rule(), ContextBar.render(
+        return new InputFrame(boxTop(), boxBottom(), ContextBar.render(
                 agent.estimatedTokens(), agent.contextLimit(),
                 agent.history().size(), config.model()));
     }

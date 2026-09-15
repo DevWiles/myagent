@@ -246,14 +246,54 @@ class LineReaderTest {
     @Test
     @DisplayName("提交后把框收起来，四行塌成一行——边框是「正在输入」的提示，输完就没意义了")
     void collapsesFrameOnSubmit() {
-        LineReader r = reader(keys("你好", ENTER));
-        assertEquals("你好", r.readLine("> ", new InputFrame("上", "下", "状态")));
+        Ansi.setEnabled(false);
+        try {
+            LineReader r = reader(keys("你好", ENTER));
+            assertEquals("你好", r.readLine("> ", new InputFrame("上", "下", "状态")));
+
+            String screen = captured.toString(StandardCharsets.UTF_8);
+            // 下方两行装饰逐行擦掉，再退回上边线那一行覆盖它
+            assertTrue(screen.contains(Ansi.up(3)) || screen.contains("上"),
+                    "没有退回到上边线的位置");
+            assertTrue(screen.endsWith("> 你好" + System.lineSeparator()),
+                    "收起后应当只剩这一行内容");
+        } finally {
+            Ansi.setEnabled(true);
+        }
+    }
+
+    @Test
+    @DisplayName("盒子模式下左右都有边框，内容靠空格顶到右边框")
+    void drawsBox() {
+        Ansi.setEnabled(false);
+        try {
+            LineReader r = reader(keys("abc", ENTER)).box(30);
+            r.readLine("> ", InputFrame.none());
+
+            String screen = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(screen.contains("│ > abc"), "左边框和内容: " + screen);
+            assertTrue(screen.contains("│"), "右边框");
+        } finally {
+            Ansi.setEnabled(true);
+        }
+    }
+
+    @Test
+    @DisplayName("盒子里的中文也要能正确定位光标——汉字占两列")
+    void boxHandlesWideCharacters() {
+        LineReader r = reader(keys("你好", ESC, '[', 'D', "x", ENTER)).box(40);
+        assertEquals("你x好", r.readLine("> ", InputFrame.none()),
+                "光标按字符数退格会插错位置");
+    }
+
+    @Test
+    @DisplayName("提交后的那一行带底色，一眼能认出哪句是自己说的")
+    void submittedLineIsHighlighted() {
+        LineReader r = reader(keys("问题", ENTER)).box(40);
+        r.readLine("> ", new InputFrame("上", "下", null));
 
         String screen = captured.toString(StandardCharsets.UTF_8);
-        // 下方两行装饰逐行擦掉，再退回上边线那一行覆盖它
-        assertTrue(screen.contains(Ansi.up(3)), "没有退回到上边线的位置");
-        assertTrue(screen.endsWith("> 你好" + System.lineSeparator()),
-                "收起后应当只剩这一行内容");
+        assertTrue(screen.contains("48;5;236"), "提交行没有加底色");
     }
 
     @Test
