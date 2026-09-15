@@ -138,7 +138,7 @@ public final class Repl {
         boolean raw = terminal.enterRaw();
         this.rawMode = raw;
         this.width = TerminalMode.width();
-        this.fullscreen = options.fullscreen() && raw ? new FullScreenUi(System.out) : null;
+        this.fullscreen = options.fullscreen() && raw ? new FullScreenUi(System.out, System.in) : null;
         // 全屏模式下转圈会和整屏重绘打架，状态直接写在底部状态栏里更稳
         this.status = new StatusLine(System.out,
                 raw && options.color() && options.spinner() && fullscreen == null);
@@ -726,11 +726,14 @@ public final class Repl {
 
     /** 全屏模式下常驻底部的状态栏内容。 */
     private String statusBar() {
+        // 带上屏幕尺寸：布局一旦错位，第一眼就能看出是尺寸没量对
+        String size = fullscreen == null ? ""
+                : Ansi.dim("  ·  " + fullscreen.width() + "x" + fullscreen.height());
         if (agent == null) {
-            return Ansi.dim("  未配置 API key");
+            return Ansi.dim("  未配置 API key") + size;
         }
         return ContextBar.render(agent.estimatedTokens(), agent.contextLimit(),
-                agent.history().size(), config.model());
+                agent.history().size(), config.model()) + size;
     }
 
     /** 输入行的上下横线，外加一行上下文用量。 */
