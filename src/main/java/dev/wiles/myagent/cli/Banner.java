@@ -57,7 +57,9 @@ public final class Banner {
 
     /** 大字招牌，套一个双线框。 */
     private static String drawLogoBox(String version, int terminalWidth) {
-        int inner = Math.max(Logo.WIDTH + 4, terminalWidth - 4);
+        // 按内容宽度走，不跟着终端撑满：输入框的横线该撑满，
+        // 招牌撑满就成了一张空荡荡的大框，中间孤零零一个 logo。
+        int inner = Math.min(terminalWidth - 4, Logo.WIDTH + 12);
 
         List<Row> rows = new ArrayList<>();
         rows.add(Row.blank());

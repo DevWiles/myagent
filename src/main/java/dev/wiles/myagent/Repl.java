@@ -65,6 +65,15 @@ public final class Repl {
     private boolean textStarted = false;
     /** 过程信息显示到什么程度。 */
     private OutputDetail detail = OutputDetail.NORMAL;
+    /**
+     * 精简模式下攒着的文字。
+     *
+     * 流式输出时没法预先知道哪段是「过程说明」哪段是「最终答案」——
+     * 所以先攒着：后面要是来了工具调用，说明刚才那段只是过程说明，丢掉；
+     * 一直攒到这一轮结束还没有工具调用，那就是最终答案，打出来。
+     */
+    private final StringBuilder quietBuffer = new StringBuilder();
+
     /** 本轮统计，跑完在输入框上方汇报一行。 */
     private long runStartedAt;
     private int runSteps;
@@ -163,6 +172,7 @@ public final class Repl {
         runStartedAt = System.nanoTime();
         runSteps = 0;
         runToolCalls = 0;
+        quietBuffer.setLength(0);
         // 立刻起转。等 Agent 发出第一个 Thinking 事件才转的话，
         // 中间那段（建连接、压缩上下文）屏幕上是死的，用户会以为程序挂了。
         status.start("思考中…");
@@ -178,6 +188,7 @@ public final class Repl {
         } finally {
             status.stop();          // 无论如何都不能把转圈留在屏幕上
             flushText();
+            flushQuietBuffer();     // 中途被打断时也不能把答案吞掉
             printRunSummary();
         }
     }
@@ -278,7 +289,11 @@ public final class Repl {
         status.stop();
 
         if (event instanceof AgentEvent.TextDelta d) {
-            appendText(d.text());
+            if (detail == OutputDetail.QUIET) {
+                quietBuffer.append(d.text());       // 先攒着，还不知道是不是最终答案
+            } else {
+                appendText(d.text());
+            }
             return;
         }
         // 其余事件都要先把攒着的半行吐出来，否则会被后面的内容截断
@@ -294,9 +309,8 @@ public final class Repl {
         } else if (event instanceof AgentEvent.ToolStarted t) {
             runToolCalls++;
             if (detail == OutputDetail.QUIET) {
-                // 精简模式只留一行：工具名 + 最要紧的那个参数
-                System.out.println(Ansi.green("⏺ ") + Ansi.bold(t.tool())
-                        + " " + Ansi.dim(keyArgument(t.arguments())));
+                // 既然来了工具调用，说明刚才攒的那段只是过程说明，不是答案
+                quietBuffer.setLength(0);
             } else {
                 System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
                         + Ansi.dim(oneLine(t.arguments(), 100)));
@@ -307,7 +321,7 @@ public final class Repl {
             renderToolOutput(t);
 
         } else if (event instanceof AgentEvent.Done d) {
-            // 文本已经吐完了，这里不用再做什么
+            flushQuietBuffer();
 
         } else if (event instanceof AgentEvent.Compacted c) {
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
@@ -316,6 +330,7 @@ public final class Repl {
                     + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
         } else if (event instanceof AgentEvent.Failed f) {
+            flushQuietBuffer();
             System.out.println(Ansi.red("⚠ " + f.reason()));
         }
     }
@@ -341,6 +356,18 @@ public final class Repl {
         System.out.flush();
     }
 
+    /** 精简模式攒下来的最终答案，到这一轮结束才打出来。 */
+    private void flushQuietBuffer() {
+        if (quietBuffer.length() == 0) {
+            return;
+        }
+        System.out.println();
+        for (String line : quietBuffer.toString().split("\n", -1)) {
+            System.out.println(markdown.renderLine(line));
+        }
+        quietBuffer.setLength(0);
+    }
+
     /** 把攒着还没换行的最后半行吐出去。 */
     private void flushText() {
         if (pendingLine.length() > 0) {
@@ -357,8 +384,14 @@ public final class Repl {
      * 注意这只影响**显示**——完整内容照样原样发给模型，它需要看全。
      */
     private void renderToolOutput(AgentEvent.ToolFinished event) {
-        if (detail == OutputDetail.QUIET && event.ok()) {
-            return;                 // 精简模式下成功的调用不必汇报结果；失败的仍然要说
+        if (detail == OutputDetail.QUIET) {
+            if (event.ok()) {
+                return;             // 成功的过程一概不显示
+            }
+            // 失败是必须让人看见的，否则用户完全不知道出了什么事
+            System.out.println(Ansi.red("⏺ " + event.tool() + " ✗ ")
+                    + Ansi.dim(oneLine(event.output(), 120)));
+            return;
         }
         String mark = event.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
         String[] lines = event.output().split("\n");
@@ -427,7 +460,7 @@ public final class Repl {
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
-                          /quiet    只留工具名，过程细节全收起
+                          /quiet    整个推理过程收起，只看最终答案
                           /verbose  展开工具输出（再按一次回到正常）
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）

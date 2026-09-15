@@ -391,7 +391,9 @@ public final class LineReader {
     private String submittedLine(String prompt) {
         String text = prompt + buffer;
         int pad = Math.max(0, lineWidth - Ansi.displayWidth(text));
-        return Ansi.highlight(Ansi.cyan(prompt) + buffer + " ".repeat(pad));
+        // 注意不能在里面再套 Ansi.cyan()：那串颜色码是以「重置全部属性」收尾的，
+        // 会把外层的背景色一起关掉，结果只有提示符那一小段有底色。
+        return Ansi.highlight(text + " ".repeat(pad));
     }
 
     /** 输入行长什么样。首次铺开和之后每次重画共用，免得闪。 */
