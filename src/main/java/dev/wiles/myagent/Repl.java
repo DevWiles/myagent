@@ -26,6 +26,7 @@ import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -41,8 +42,8 @@ public final class Repl {
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/clear", "/tools", "/history", "/quiet", "/verbose",
-                    "/config", "/exit", "/quit");
+            List.of("/help", "/clear", "/tools", "/history", "/expand", "/quiet",
+                    "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
     private static final List<String> EXIT_WORDS =
@@ -83,6 +84,20 @@ public final class Repl {
     private final Map<String, Integer> toolGroupCounts = ToolSummary.newCounter();
     private boolean toolGroupHasFailure;
 
+    /**
+     * 最近一轮每次工具调用的完整记录。
+     *
+     * 过程收起来之后细节就从屏幕上消失了，但人经常会想回头看一眼
+     * ——「刚才那条命令到底输出了什么」。终端没法把已经打印的内容再展开，
+     * 所以留一份在内存里，按 Ctrl-O 或 /expand 重新打一遍。
+     */
+    private record ToolRecord(String tool, String arguments, String output, boolean ok) {
+    }
+
+    private final List<ToolRecord> lastRunTools = new ArrayList<>();
+    private String pendingToolName;
+    private String pendingToolArgs;
+
     /** 本轮统计，跑完在输入框上方汇报一行。 */
     private long runStartedAt;
     private int runSteps;
@@ -111,6 +126,7 @@ public final class Repl {
         this.reader = new LineReader(System.in, System.out, raw)
                 .width(TerminalMode.width())
                 .completions(SLASH_COMMANDS)
+                .onExpand(this::expandLastRun)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
         this.tools = options.planMode()
@@ -182,6 +198,8 @@ public final class Repl {
         runSteps = 0;
         runToolCalls = 0;
         quietBuffer.setLength(0);
+        lastRunTools.clear();
+        pendingToolName = null;
         // 立刻起转。等 Agent 发出第一个 Thinking 事件才转的话，
         // 中间那段（建连接、压缩上下文）屏幕上是死的，用户会以为程序挂了。
         status.start("思考中…");
@@ -305,6 +323,8 @@ public final class Repl {
 
         } else if (event instanceof AgentEvent.ToolStarted t) {
             runToolCalls++;
+            pendingToolName = t.tool();
+            pendingToolArgs = t.arguments();
             if (detail == OutputDetail.QUIET) {
                 // 既然来了工具调用，说明刚才攒的那段只是过程说明，不是答案
                 quietBuffer.setLength(0);
@@ -321,6 +341,11 @@ public final class Repl {
             status.start("执行 " + t.tool() + "…");
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
+            if (pendingToolName != null) {
+                lastRunTools.add(new ToolRecord(pendingToolName, pendingToolArgs,
+                        t.output(), t.ok()));
+                pendingToolName = null;
+            }
             renderToolOutput(t);
 
         } else if (event instanceof AgentEvent.Done d) {
@@ -360,6 +385,38 @@ public final class Repl {
             System.out.println(markdown.renderLine(line));
         }
         System.out.flush();
+    }
+
+    /**
+     * 把最近一轮的工具调用详情重新打一遍。
+     *
+     * 终端做不到「点一下原地展开」——内容一旦打进滚动缓冲区就改不了了，
+     * 除非整个界面改成全屏重绘。这里的做法是把详情追加打印在下面，
+     * 信息一样拿得到。
+     */
+    private void expandLastRun() {
+        if (lastRunTools.isEmpty()) {
+            System.out.println(Ansi.dim("最近一轮没有调用工具。"));
+            return;
+        }
+        System.out.println();
+        System.out.println(Ansi.dim("── 最近一轮的 " + lastRunTools.size() + " 次工具调用 ──"));
+        for (ToolRecord record : lastRunTools) {
+            System.out.println();
+            System.out.println(Ansi.green("⏺ ") + Ansi.bold(record.tool()) + " "
+                    + Ansi.dim(oneLine(record.arguments(), Math.max(20, width - 8))));
+            String mark = record.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
+            String[] lines = record.output().split("\n");
+            for (int i = 0; i < Math.min(lines.length, VERBOSE_OUTPUT_LINES); i++) {
+                System.out.println((i == 0 ? mark : "    ")
+                        + Ansi.dim(oneLine(lines[i], Math.max(20, width - 6))));
+            }
+            if (lines.length > VERBOSE_OUTPUT_LINES) {
+                System.out.println(Ansi.dim("    … 另有 "
+                        + (lines.length - VERBOSE_OUTPUT_LINES) + " 行"));
+            }
+        }
+        System.out.println();
     }
 
     /** 精简模式攒下来的最终答案，到这一轮结束才打出来。 */
@@ -508,6 +565,10 @@ public final class Repl {
                                         Math.max(20, width - 20)))));
                 return true;
             }
+            case "/expand" -> {
+                expandLastRun();
+                return true;
+            }
             case "/verbose" -> {
                 detail = detail.toggle(OutputDetail.VERBOSE);
                 System.out.println(Ansi.dim("过程信息：" + detail.label()));
@@ -527,11 +588,13 @@ public final class Repl {
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
+                          /expand   把最近一轮的工具调用详情重新打出来（等同 Ctrl-O）
                           /quiet    整个推理过程收起，只看最终答案
                           /verbose  展开工具输出（再按一次回到正常）
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）
 
+                        展开: Ctrl-O 把最近一轮的过程详情重新打出来
                         退出: Ctrl-D，或空行连按两次 Ctrl-C，或输入 exit
                         中断: 任务跑到一半按 Ctrl-C 可以中止它，会话继续
                         编辑: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾

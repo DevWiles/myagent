@@ -48,6 +48,8 @@ public final class LineReader {
     private static final int CTRL_U = 21;
     private static final int CTRL_W = 23;
     private static final int TAB = 9;
+    /** Ctrl-O：展开最近一轮的过程详情。 */
+    private static final int CTRL_O = 15;
     private static final int ENTER = 13;
     private static final int NEWLINE = 10;
     private static final int BACKSPACE = 127;
@@ -62,6 +64,7 @@ public final class LineReader {
     private final List<String> history = new ArrayList<>();
     private List<String> completions = List.of();
     private Path historyFile;
+    private Runnable expandAction;
 
     private InputFrame frame = InputFrame.none();
     /** 整行宽度，提交后铺底色要铺满这么宽；0 表示不知道宽度。 */
@@ -80,6 +83,17 @@ public final class LineReader {
     /** Tab 补全的候选项，目前是斜杠命令。 */
     public LineReader completions(List<String> values) {
         this.completions = List.copyOf(values);
+        return this;
+    }
+
+    /**
+     * 按 Ctrl-O 时干什么。
+     *
+     * 典型用途是把刚才被收起来的过程详情重新打一遍——终端做不到
+     * 「点一下原地展开」，能做的是把内容追加打印在下面。
+     */
+    public LineReader onExpand(Runnable action) {
+        this.expandAction = action;
         return this;
     }
 
@@ -204,6 +218,15 @@ public final class LineReader {
                     case TAB -> {
                         complete();
                         redraw(prompt);
+                    }
+                    case CTRL_O -> {
+                        if (expandAction != null) {
+                            // 先把输入框整个抹掉，让详情从干净的位置开始打，
+                            // 打完再把框原样铺回来——输入到一半的内容不受影响
+                            eraseFrame();
+                            expandAction.run();
+                            drawFrame(prompt);
+                        }
                     }
                     case Ansi.ESC -> handleEscape(prompt);
                     default -> {
@@ -369,6 +392,17 @@ public final class LineReader {
      * 留在历史里只会让屏幕被一堆横线切得七零八落。
      * 所以擦掉上下边线和状态行，把内容重画在原来上边线的位置，四行塌成一行。
      */
+    /** 把输入框从屏幕上抹掉，光标停在框原来的起始位置。 */
+    private void eraseFrame() {
+        if (frame.isEmpty()) {
+            return;
+        }
+        if (frame.top() != null) {
+            out.print(Ansi.up(1));
+        }
+        out.print(Ansi.toLineStart() + Ansi.clearToEnd());
+    }
+
     private void collapseFrame(String finalLine) {
         if (frame.isEmpty()) {
             out.println();

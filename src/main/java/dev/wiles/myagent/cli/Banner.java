@@ -98,7 +98,7 @@ public final class Banner {
         String tools = toolNames.isEmpty() ? "无" : String.join(" · ", toolNames);
         rows.add(labelled("工具", tools, Ansi.dim(tools)));
         rows.add(Row.blank());
-        String hint = "/help 查看命令 · Ctrl-C 中断 · exit 退出";
+        String hint = "/help 查看命令 · Ctrl-O 展开过程 · Ctrl-C 中断 · exit 退出";
         rows.add(new Row("  " + hint, "  " + Ansi.dim(hint)));
 
         StringBuilder sb = new StringBuilder();

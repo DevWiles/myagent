@@ -191,6 +191,23 @@ class LineReaderTest {
     }
 
     @Test
+    @DisplayName("Ctrl-O 触发展开回调，输入到一半的内容不受影响")
+    void ctrlOTriggersExpand() {
+        StringBuilder log = new StringBuilder();
+        LineReader r = reader(keys("写到一半", 15, "继续写", ENTER))
+                .onExpand(() -> log.append("展开了"));
+
+        assertEquals("写到一半继续写", r.readLine("> ", new InputFrame("上", "下", "状态")));
+        assertEquals("展开了", log.toString());
+    }
+
+    @Test
+    @DisplayName("没注册展开回调时按 Ctrl-O 什么也不做，不能崩")
+    void ctrlOWithoutHandler() {
+        assertEquals("abc", read("ab", 15, "c", ENTER));
+    }
+
+    @Test
     @DisplayName("空行上按 Ctrl-D 表示退出")
     void ctrlDOnEmptyLineExits() {
         assertNull(read(CTRL_D));
