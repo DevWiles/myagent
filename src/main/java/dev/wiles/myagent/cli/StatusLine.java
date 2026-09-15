@@ -85,7 +85,7 @@ public final class StatusLine {
             }
             thread = null;
         }
-        out.print(Ansi.clearLine() + Ansi.showCursor());
+        out.print(Ansi.clearLine());
         out.flush();
     }
 
@@ -95,7 +95,10 @@ public final class StatusLine {
 
     private void animate() {
         int frame = 0;
-        out.print(Ansi.hideCursor());
+        // 不再发「隐藏光标」。它本来只是想让转圈时光标别跟着跳，
+        // 但 macOS Terminal.app 在光标不可见时会画自己的光标位置指示器
+        // （行首行尾一对方括号），反而多出一堆看不懂的字符。
+        // 光标跟着 spinner 走其实没什么不好，大多数命令行工具也是这样。
         while (running) {
             // 先画再睡。反过来的话，100ms 内就结束的任务会一帧都画不出来，
             // 用户按完回车对着空屏幕，只能猜程序是不是死了。

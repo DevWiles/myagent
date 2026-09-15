@@ -51,8 +51,8 @@ class StatusLineTest {
         Thread.sleep(150);
         status.stop();
 
-        assertTrue(screen().endsWith(Ansi.clearLine() + Ansi.showCursor()),
-                "停下时最后一件事应当是清行并恢复光标");
+        assertTrue(screen().endsWith(Ansi.clearLine()),
+                "停下时最后一件事应当是把这一行清掉");
         assertFalse(status.isRunning());
     }
 
@@ -89,6 +89,18 @@ class StatusLineTest {
 
         assertTrue(screen().endsWith("这是模型的回答" + System.lineSeparator()),
                 "正文被动画线程覆盖了");
+    }
+
+    @Test
+    @DisplayName("不发隐藏光标序列——Terminal.app 会因此画出自己的光标指示器")
+    @Timeout(5)
+    void doesNotHideCursor() throws Exception {
+        StatusLine status = new StatusLine(out, true);
+        status.start("思考中…");
+        Thread.sleep(250);
+        status.stop();
+
+        assertFalse(screen().contains("?25"), "输出里不该出现隐藏/显示光标的序列");
     }
 
     @Test
