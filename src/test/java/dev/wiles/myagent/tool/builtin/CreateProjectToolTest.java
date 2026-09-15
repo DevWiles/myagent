@@ -3,6 +3,8 @@ package dev.wiles.myagent.tool.builtin;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,7 +15,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 【待实现】重点在「部分失败怎么汇报」这条。 */
+
 class CreateProjectToolTest {
 
     private static final ObjectMapper M = new ObjectMapper();
@@ -24,7 +26,8 @@ class CreateProjectToolTest {
 
     @BeforeEach
     void setUp() {
-        tool = new CreateProjectTool(new Workspace(tmp));
+        // 这个测试类只关心写入逻辑，审批统一放行；审批行为另见 FileWriteApprovalTest
+        tool = new CreateProjectTool(new Workspace(tmp), new FileWriteGuard(), ApprovalPolicy.approveAll());
     }
 
     private ToolResult call(String json) throws Exception {

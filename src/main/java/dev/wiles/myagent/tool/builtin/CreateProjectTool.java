@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.CommandRisk;
+import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import java.util.List;
 import java.util.ArrayList;
 import java.nio.file.Path;
@@ -30,9 +33,17 @@ import dev.wiles.myagent.tool.Args;
 public final class CreateProjectTool implements Tool {
 
     private final Workspace workspace;
+    private final FileWriteGuard guard;
+    private final ApprovalPolicy approval;
 
     public CreateProjectTool(Workspace workspace) {
+        this(workspace, new FileWriteGuard(), ApprovalPolicy.denyAll());
+    }
+
+    public CreateProjectTool(Workspace workspace, FileWriteGuard guard, ApprovalPolicy approval) {
         this.workspace = workspace;
+        this.guard = guard;
+        this.approval = approval;
     }
 
     @Override
@@ -117,6 +128,17 @@ public final class CreateProjectTool implements Tool {
                 }
                 if (Files.exists(target) && !overwrite) {
                     skipped.add(pathArg);
+                    continue;
+                }
+                CommandRisk risk = guard.assess(pathArg, target, content);
+                if (risk.isForbidden()) {
+                    failed.add(pathArg + " (" + risk.reason() + ")");
+                    continue;
+                }
+                // 批量创建时逐个弹框会烦死人，所以只对真正要覆盖的那些问，
+                // 且把每个文件的变化幅度写进提示里
+                if (risk.needsApproval() && !approval.approve("覆盖文件", pathArg, risk.reason())) {
+                    failed.add(pathArg + " (用户拒绝覆盖)");
                     continue;
                 }
                 try {

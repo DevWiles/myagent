@@ -56,10 +56,17 @@ public final class Repl {
     public void run() {
         String rejection = WorkspaceGuard.rejectionReason(workspace.root());
         if (rejection != null) {
-            System.out.println("拒绝在此目录启动: " + workspace.root());
-            System.out.println(rejection);
-            System.out.println("请 cd 到某个具体的项目目录再运行。");
-            return;
+            // 留一个逃生舱，但必须显式设环境变量——这样绝不会是手滑进来的
+            if ("1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"))) {
+                System.out.println("⚠ 警告: " + rejection);
+                System.out.println("⚠ 你已通过 MYAGENT_UNSAFE_WORKSPACE=1 强制在此目录运行，请格外小心。\n");
+            } else {
+                System.out.println("拒绝在此目录启动: " + workspace.root());
+                System.out.println(rejection);
+                System.out.println("请 cd 到某个具体的项目目录再运行。");
+                System.out.println("（确实需要在这里运行的话：MYAGENT_UNSAFE_WORKSPACE=1 java -jar ...）");
+                return;
+            }
         }
         printBanner();
         try {
