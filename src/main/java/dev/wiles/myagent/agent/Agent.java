@@ -62,6 +62,9 @@ public final class Agent {
     private Consumer<AgentEvent> listener = event -> {
     };
 
+    /** 用户按了 Ctrl-C。volatile 是因为置位的是另一个线程。 */
+    private volatile boolean cancelled;
+
     /** 把模型的流式增量转成 agent 事件发出去。 */
     private final StreamListener stream = new StreamListener() {
         @Override
@@ -88,6 +91,17 @@ public final class Agent {
         reset();
     }
 
+    /**
+     * 中止当前这轮 run()。由监听 Ctrl-C 的线程调用。
+     *
+     * 两件事都要做：置标志让循环在下一个检查点退出，
+     * 同时掐断正在进行的 HTTP 请求——否则主线程还要傻等模型把话说完。
+     */
+    public void cancel() {
+        cancelled = true;
+        client.cancel();
+    }
+
     public Agent onEvent(Consumer<AgentEvent> listener) {
         this.listener = listener;
         return this;
@@ -112,10 +126,14 @@ public final class Agent {
     public String run(String userInput) {
         // 记下起点：中途任何环节失败，都回滚到这里，保证历史永远是完整的一问一答
         final int snapshot = history.size();
+        cancelled = false;
         history.add(ChatMessage.user(userInput));
 
         try {
             for (int step = 1; step <= maxSteps; step++) {
+                if (cancelled) {
+                    return abort(snapshot);
+                }
                 listener.accept(new AgentEvent.Thinking(step));
 
                 List<ToolSpec> specs = tools.specs();
@@ -144,6 +162,9 @@ public final class Agent {
                 // 模型可能一次点好几个工具。必须全部执行、全部回传，
                 // 漏掉任何一个，那个 tool_call_id 就永远等不到结果，下轮请求必然报错。
                 for (ToolCall call : assistant.toolCallsOrEmpty()) {
+                    if (cancelled) {
+                        return abort(snapshot);
+                    }
                     listener.accept(new AgentEvent.ToolStarted(call.name(), call.argumentsJson()));
 
                     ToolResult result = tools.execute(call);   // 它保证不抛异常
@@ -160,6 +181,9 @@ public final class Agent {
             return forceConclusion();
 
         } catch (LlmException e) {
+            if (cancelled) {
+                return abort(snapshot);      // 取消导致的请求失败，不算错误
+            }
             // 回滚到本轮之前。宁可丢掉这次提问，也不能让残缺的消息序列留在历史里——
             // 那会让之后**每一次**请求都失败，整个会话报废。
             rollbackTo(snapshot);
@@ -183,6 +207,18 @@ public final class Agent {
         history.addAll(result.messages());
         listener.accept(new AgentEvent.Compacted(
                 result.tokensBefore(), result.tokensAfter(), result.summarized()));
+    }
+
+    /**
+     * 被取消时的收尾。
+     *
+     * 必须回滚：取消很可能发生在「assistant 已经要求调工具、但结果还没回填」的当口，
+     * 这种残缺序列留在历史里会让之后每一次请求都 400。
+     */
+    private String abort(int snapshot) {
+        rollbackTo(snapshot);
+        listener.accept(new AgentEvent.Failed("已取消"));
+        return "已取消。";
     }
 
     /** 不给工具再问一次，逼模型输出结论。 */

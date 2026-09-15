@@ -26,6 +26,19 @@ import java.util.List;
  */
 public final class LineReader {
 
+    /**
+     * 空行上按了 Ctrl-C。
+     *
+     * 为什么要抛出去而不是自己消化掉：我们用 -isig 关掉了终端的信号处理，
+     * Ctrl-C 不再产生 SIGINT，也就不会有人替我们结束进程了。
+     * 于是「按 Ctrl-C 退出」这条所有人都指望着的退路，必须由程序自己实现。
+     */
+    public static final class Interrupted extends RuntimeException {
+        public Interrupted() {
+            super("用户中断", null, false, false);
+        }
+    }
+
     // 控制字符
     private static final int CTRL_C = 3;
     private static final int CTRL_D = 4;
@@ -116,8 +129,12 @@ public final class LineReader {
                         return line;
                     }
                     case CTRL_C -> {
-                        // 和 shell 一致：放弃当前这行，另起一行，但不退出程序
                         out.println("^C");
+                        if (buffer.length() == 0) {
+                            // 空行上的 Ctrl-C 交给调用方决定（通常是「再按一次就退出」）
+                            throw new Interrupted();
+                        }
+                        // 有内容时和 shell 一致：放弃当前这行，另起一行
                         buffer = new StringBuilder();
                         cursor = 0;
                         redraw(prompt);

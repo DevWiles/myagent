@@ -41,4 +41,13 @@ public interface LlmClient {
 
     /** 当前使用的模型名，用于展示和日志。 */
     String modelName();
+
+    /**
+     * 取消正在进行的请求。
+     *
+     * 用户按 Ctrl-C 时，光设个标志位没用——主线程正阻塞在读响应上，
+     * 要等模型把话说完（可能几十秒）才有机会看到标志。必须真的把连接掐掉。
+     */
+    default void cancel() {
+    }
 }

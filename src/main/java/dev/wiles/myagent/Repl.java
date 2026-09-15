@@ -7,6 +7,7 @@ import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
+import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
 import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
@@ -33,6 +34,10 @@ public final class Repl {
     private static final List<String> SLASH_COMMANDS =
             List.of("/help", "/clear", "/tools", "/history", "/config", "/exit", "/quit");
 
+    /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
+    private static final List<String> EXIT_WORDS =
+            List.of("/exit", "/quit", "/q", "exit", "quit", "q", ":q", ":wq");
+
     private final CliOptions options;
     private final Config config;
     private final Workspace workspace;
@@ -43,6 +48,8 @@ public final class Repl {
 
     /** 当前是否有一行流式文本还没收尾。 */
     private boolean streaming = false;
+    /** 是否处于 raw 模式：只有这时才能后台监听 Ctrl-C。 */
+    private final boolean rawMode;
 
     public Repl(CliOptions options) {
         this.options = options;
@@ -55,6 +62,7 @@ public final class Repl {
         this.workspace = new Workspace(options.workspace());
         // raw 模式拿不到就退化成按行读，管道和重定向下都是这条路径
         boolean raw = terminal.enterRaw();
+        this.rawMode = raw;
         this.reader = new LineReader(System.in, System.out, raw)
                 .completions(SLASH_COMMANDS)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
@@ -111,13 +119,45 @@ public final class Repl {
             System.out.println(noKeyMessage());
             return;
         }
-        agent.run(prompt);          // 内容已经通过流式回调打印过了
+        runInterruptible(prompt);   // 内容已经通过流式回调打印过了
         System.out.println();
     }
 
+    /**
+     * 跑一轮任务，期间允许 Ctrl-C 中断。
+     *
+     * 主线程这会儿阻塞在 agent.run() 里，自己读不了键盘，
+     * 所以要另起一个线程盯着 Ctrl-C。非 raw 模式下不能这么做——
+     * 那个线程会把管道里后续的输入全吃掉。
+     */
+    private void runInterruptible(String prompt) {
+        if (!rawMode) {
+            agent.run(prompt);
+            return;
+        }
+        try (InterruptWatcher watcher = new InterruptWatcher(System.in, agent::cancel)) {
+            watcher.start();
+            agent.run(prompt);
+        }
+    }
+
     private void loop() {
+        int consecutiveInterrupts = 0;
         while (true) {
-            String line = reader.readLine(Ansi.cyan("› "));
+            String line;
+            try {
+                line = reader.readLine(Ansi.cyan("› "));
+            } catch (LineReader.Interrupted e) {
+                // 空行上按 Ctrl-C。我们关掉了 SIGINT，必须自己提供这条退路，
+                // 但也不能一按就退——手滑的代价太大，所以要求连按两次。
+                if (++consecutiveInterrupts >= 2) {
+                    break;
+                }
+                System.out.println(Ansi.dim("再按一次 Ctrl-C 退出，或输入 /exit"));
+                continue;
+            }
+            consecutiveInterrupts = 0;
+
             if (line == null) {                          // Ctrl-D
                 break;
             }
@@ -125,7 +165,7 @@ public final class Repl {
             if (line.isEmpty()) {
                 continue;
             }
-            if ("/exit".equals(line) || "/quit".equals(line)) {
+            if (isExitCommand(line)) {
                 break;
             }
             if (handleSlashCommand(line)) {
@@ -135,10 +175,14 @@ public final class Repl {
                 System.out.println(noKeyMessage());
                 continue;
             }
-            agent.run(line);        // 内容已经通过流式回调打印过了
+            runInterruptible(line);
             System.out.println();
         }
         System.out.println(Ansi.dim("bye."));
+    }
+
+    private static boolean isExitCommand(String line) {
+        return EXIT_WORDS.contains(line.toLowerCase());
     }
 
     private String noKeyMessage() {
@@ -250,10 +294,12 @@ public final class Repl {
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
                           /config   查看当前配置（密钥已脱敏）
-                          /exit     退出
+                          /exit     退出（exit / quit / q 也行）
 
-                        快捷键: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾   Ctrl-U/K 删到行首/尾
-                                Ctrl-W 删词   Ctrl-C 放弃当前行   Ctrl-D 退出""");
+                        退出: Ctrl-D，或空行连按两次 Ctrl-C，或输入 exit
+                        中断: 任务跑到一半按 Ctrl-C 可以中止它，会话继续
+                        编辑: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾
+                              Ctrl-U/K 删到行首/尾   Ctrl-W 删词""");
                 return true;
             }
             default -> {

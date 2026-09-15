@@ -203,9 +203,15 @@ class LineReaderTest {
     }
 
     @Test
-    @DisplayName("Ctrl-C 放弃当前行但不退出程序")
+    @DisplayName("有内容时 Ctrl-C 放弃当前行，继续读下一行")
     void ctrlCAbandonsLine() {
         assertEquals("重新输入", read("写错了", CTRL_C, "重新输入", ENTER));
+    }
+
+    @Test
+    @DisplayName("空行上的 Ctrl-C 抛给调用方——我们关了 SIGINT，退出路径得自己给")
+    void ctrlCOnEmptyLineThrows() {
+        assertThrows(LineReader.Interrupted.class, () -> read(CTRL_C));
     }
 
     @Test

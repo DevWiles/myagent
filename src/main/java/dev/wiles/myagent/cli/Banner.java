@@ -37,7 +37,7 @@ public final class Banner {
                 : String.join(Ansi.dim(" · "), toolNames)));
         sb.append('\n');
         sb.append("  ").append(Ansi.dim(
-                "↑↓ 历史 · Tab 补全 · Ctrl-C 放弃当前行 · Ctrl-D 退出 · /help 查看命令"));
+                "↑↓ 历史 · Tab 补全 · Ctrl-C 中断任务 · Ctrl-D 或 exit 退出 · /help 查看命令"));
         sb.append('\n');
         return sb.toString();
     }

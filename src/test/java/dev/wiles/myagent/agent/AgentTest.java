@@ -321,6 +321,76 @@ class AgentTest {
     }
 
     @Test
+    @DisplayName("任务跑到一半被取消：立刻停下，历史回滚干净")
+    void cancelStopsTheLoop() {
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "slow", "{}"))
+                .calls(null, ToolCall.of("c2", "slow", "{}"))
+                .says("不该走到这里");
+        Agent[] holder = new Agent[1];
+        // 第一个工具执行时用户按下了 Ctrl-C
+        ToolRegistry tools = new ToolRegistry().register(tool("slow", a -> {
+            holder[0].cancel();
+            return ToolResult.ok("做完了");
+        }));
+        Agent agent = agent(llm, tools);
+        holder[0] = agent;
+
+        String answer = agent.run("干个长活");
+
+        assertEquals("已取消。", answer);
+        assertEquals(1, agent.history().size(),
+                "取消常发生在「要求调工具但结果还没回填」的当口，残缺序列留下会让之后每次请求都 400");
+    }
+
+    @Test
+    @DisplayName("取消会掐断正在进行的请求，不是干等模型说完")
+    void cancelAlsoCancelsTheRequest() {
+        boolean[] requestCancelled = {false};
+        LlmClient client = new LlmClient() {
+            public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t) {
+                return new ChatResponse("x", "f", List.of(new ChatResponse.Choice(
+                        0, ChatMessage.assistant("好"), "stop")), null);
+            }
+
+            public String modelName() {
+                return "fake";
+            }
+
+            @Override
+            public void cancel() {
+                requestCancelled[0] = true;
+            }
+        };
+
+        new Agent(client, new ToolRegistry(), "sys").cancel();
+
+        assertTrue(requestCancelled[0], "光置标志没用，主线程还阻塞在读响应上");
+    }
+
+    @Test
+    @DisplayName("取消之后还能继续正常对话")
+    void worksAfterCancel() {
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "t", "{}"))
+                .says("这次好了");
+        Agent[] holder = new Agent[1];
+        boolean[] first = {true};
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            if (first[0]) {
+                first[0] = false;
+                holder[0].cancel();
+            }
+            return ToolResult.ok("ok");
+        }));
+        Agent agent = agent(llm, tools);
+        holder[0] = agent;
+
+        assertEquals("已取消。", agent.run("第一次"));
+        assertEquals("这次好了", agent.run("第二次"), "取消不该把会话搞坏");
+    }
+
+    @Test
     @DisplayName("reset 后回到只有 system 的状态")
     void resetClearsHistory() {
         FakeLlm llm = new FakeLlm().says("好");

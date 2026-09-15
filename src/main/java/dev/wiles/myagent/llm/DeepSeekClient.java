@@ -3,6 +3,7 @@ package dev.wiles.myagent.llm;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.config.Config;
+import okhttp3.Call;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -39,6 +40,8 @@ public final class DeepSeekClient implements LlmClient {
 
     private Double temperature;
     private Integer maxTokens;
+    /** 正在进行的请求，供 cancel() 掐断。 */
+    private volatile Call currentCall;
 
     public DeepSeekClient(Config config) {
         this(config, defaultHttpClient());
@@ -137,7 +140,9 @@ public final class DeepSeekClient implements LlmClient {
 
         // 流式不做重试：内容可能已经打到用户屏幕上了，重来一次会把前半段重复输出一遍。
         // 失败就抛出去，由 Agent 统一回滚本轮对话。
-        try (Response response = http.newCall(request).execute()) {
+        Call call = http.newCall(request);
+        currentCall = call;
+        try (Response response = call.execute()) {
             if (!response.isSuccessful()) {
                 ResponseBody rb = response.body();
                 String text = rb == null ? "" : rb.string();
@@ -150,7 +155,20 @@ public final class DeepSeekClient implements LlmClient {
             }
             return readEventStream(rb.charStream(), listener);
         } catch (IOException e) {
+            if (call.isCanceled()) {
+                throw new LlmException("请求已取消", e);
+            }
             throw new LlmException("流式请求失败: " + e.getMessage(), e);
+        } finally {
+            currentCall = null;
+        }
+    }
+
+    @Override
+    public void cancel() {
+        Call call = currentCall;
+        if (call != null) {
+            call.cancel();      // 正阻塞在读响应的线程会立刻抛 IOException 出来
         }
     }
 
@@ -204,7 +222,9 @@ public final class DeepSeekClient implements LlmClient {
                     .post(RequestBody.create(jsonBody, JSON))
                     .build();
 
-            try (Response response = http.newCall(request).execute()) {
+            Call call = http.newCall(request);
+            currentCall = call;
+            try (Response response = call.execute()) {
                 ResponseBody rb = response.body();
                 String text = rb == null ? "" : rb.string();
 
