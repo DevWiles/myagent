@@ -20,6 +20,18 @@ public final class BuiltinTools {
         return createDefault(workspace, ApprovalPolicy.denyAll());
     }
 
+    /**
+     * 只读工具集：连写文件和执行命令的工具都不注册。
+     *
+     * 这比「注册了但拦住」可靠得多——模型看不到菜单上没有的工具，
+     * 就根本不会尝试调用，也就不存在被绕过的可能。
+     */
+    public static ToolRegistry createReadOnly(Workspace workspace) {
+        return new ToolRegistry()
+                .register(new ReadFileTool(workspace))
+                .register(new ListDirTool(workspace));
+    }
+
     public static ToolRegistry createDefault(Workspace workspace, ApprovalPolicy approval) {
         return new ToolRegistry()
                 .register(new ReadFileTool(workspace))

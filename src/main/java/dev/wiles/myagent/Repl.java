@@ -3,6 +3,11 @@ package dev.wiles.myagent;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.cli.Ansi;
+import dev.wiles.myagent.cli.Cli;
+import dev.wiles.myagent.cli.CliOptions;
+import dev.wiles.myagent.cli.LineReader;
+import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
@@ -12,100 +17,133 @@ import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.List;
 
 /**
- * 交互式命令行外壳。
- *
- * 它现在只做三件事：读输入、把输入交给 Agent、把 agent 发出的事件画到屏幕上。
- * 真正的逻辑全在 Agent 里。
+ * 交互式命令行外壳：读输入、交给 Agent、把事件画到屏幕上。
+ * 真正的逻辑都在 Agent 里，这里只管人机交互。
  */
 public final class Repl {
 
-    private static final String PROMPT = "\n> ";
-    /** 工具输出在终端里最多显示几行，完整内容仍然会完整发给模型。 */
+    /** 工具输出在终端里最多显示几行；完整内容照样发给模型。 */
     private static final int OUTPUT_PREVIEW_LINES = 6;
 
-    /** 和 TerminalApproval 共用一个 reader：各建各的会各自缓冲 System.in，输入会丢。 */
-    private final BufferedReader in =
-            new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+    private static final List<String> SLASH_COMMANDS =
+            List.of("/help", "/clear", "/tools", "/history", "/config", "/exit", "/quit");
 
+    private final CliOptions options;
     private final Config config;
     private final Workspace workspace;
     private final ToolRegistry tools;
+    private final TerminalMode terminal = new TerminalMode();
+    private final LineReader reader;
     private final Agent agent;
 
-    public Repl() {
-        this.config = Config.load();
-        this.workspace = Workspace.ofCurrentDir();
-        this.tools = BuiltinTools.createDefault(workspace, new TerminalApproval(in));
+    public Repl(CliOptions options) {
+        this.options = options;
+        Ansi.setEnabled(options.color() && TerminalMode.isInteractive());
 
-        if (config.hasApiKey()) {
-            LlmClient client = new DeepSeekClient(config);
-            this.agent = new Agent(client, tools, SystemPrompt.forWorkspace(workspace.root()))
-                    .onEvent(this::render);
-        } else {
-            this.agent = null;
-        }
+        Config loaded = Config.load();
+        this.config = options.model() == null ? loaded
+                : new Config(loaded.apiKey(), loaded.baseUrl(), options.model());
+
+        this.workspace = new Workspace(options.workspace());
+        // raw 模式拿不到就退化成按行读，管道和重定向下都是这条路径
+        boolean raw = terminal.enterRaw();
+        this.reader = new LineReader(System.in, System.out, raw)
+                .completions(SLASH_COMMANDS)
+                .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
+
+        this.tools = options.planMode()
+                ? BuiltinTools.createReadOnly(workspace)
+                : BuiltinTools.createDefault(workspace, new TerminalApproval(reader));
+
+        this.agent = config.hasApiKey()
+                ? new Agent(newClient(), tools, SystemPrompt.forWorkspace(workspace.root()))
+                        .onEvent(this::render)
+                : null;
+    }
+
+    private LlmClient newClient() {
+        return new DeepSeekClient(config);
     }
 
     public void run() {
-        String rejection = WorkspaceGuard.rejectionReason(workspace.root());
-        if (rejection != null) {
-            // 留一个逃生舱，但必须显式设环境变量——这样绝不会是手滑进来的
-            if ("1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"))) {
-                System.out.println("⚠ 警告: " + rejection);
-                System.out.println("⚠ 你已通过 MYAGENT_UNSAFE_WORKSPACE=1 强制在此目录运行，请格外小心。\n");
-            } else {
-                System.out.println("拒绝在此目录启动: " + workspace.root());
-                System.out.println(rejection);
-                System.out.println("请 cd 到某个具体的项目目录再运行。");
-                System.out.println("（确实需要在这里运行的话：MYAGENT_UNSAFE_WORKSPACE=1 java -jar ...）");
+        try {
+            if (!checkWorkspace()) {
                 return;
             }
-        }
-        printBanner();
-        try {
-            while (true) {
-                System.out.print(PROMPT);
-                System.out.flush();
-
-                String line = in.readLine();
-                if (line == null) {          // Ctrl-D
-                    System.out.println();
-                    break;
-                }
-                line = line.trim();
-                if (line.isEmpty()) {
-                    continue;
-                }
-                if ("/exit".equals(line) || "/quit".equals(line)) {
-                    break;
-                }
-                if (handleSlashCommand(line)) {
-                    continue;
-                }
-                if (agent == null) {
-                    System.out.println("未配置 API key，无法对话。请设置环境变量 DEEPSEEK_API_KEY，"
-                            + "或在 ~/.myagent/config.json 里写 {\"apiKey\": \"sk-...\"}");
-                    continue;
-                }
-                System.out.println("\n" + agent.run(line));
+            if (options.initialPrompt() != null) {
+                runOnce(options.initialPrompt());       // 一次性模式，跑完就走
+                return;
             }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            printBanner();
+            loop();
+        } finally {
+            terminal.restore();                          // 无论如何都要把终端还回去
         }
-        System.out.println("bye.");
+    }
+
+    private boolean checkWorkspace() {
+        String rejection = WorkspaceGuard.rejectionReason(workspace.root());
+        if (rejection == null) {
+            return true;
+        }
+        if (options.unsafe()) {
+            System.out.println(Ansi.yellow("⚠ 警告: " + rejection));
+            System.out.println(Ansi.yellow("⚠ 你已强制在此目录运行，请格外小心。") + "\n");
+            return true;
+        }
+        System.out.println(Ansi.red("拒绝在此目录启动: ") + workspace.root());
+        System.out.println(rejection);
+        System.out.println("请 cd 到某个具体的项目目录再运行。");
+        System.out.println(Ansi.dim("（确实需要的话加 --unsafe）"));
+        return false;
+    }
+
+    private void runOnce(String prompt) {
+        if (agent == null) {
+            System.out.println(noKeyMessage());
+            return;
+        }
+        System.out.println("\n" + agent.run(prompt));
+    }
+
+    private void loop() {
+        while (true) {
+            String line = reader.readLine(Ansi.cyan("› "));
+            if (line == null) {                          // Ctrl-D
+                break;
+            }
+            line = line.trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            if ("/exit".equals(line) || "/quit".equals(line)) {
+                break;
+            }
+            if (handleSlashCommand(line)) {
+                continue;
+            }
+            if (agent == null) {
+                System.out.println(noKeyMessage());
+                continue;
+            }
+            System.out.println("\n" + agent.run(line));
+        }
+        System.out.println(Ansi.dim("bye."));
+    }
+
+    private String noKeyMessage() {
+        return Ansi.red("未配置 API key。") + "请设置环境变量 DEEPSEEK_API_KEY，"
+                + "或在 ~/.myagent/config.json 里写 {\"apiKey\": \"sk-...\"}";
     }
 
     /**
      * 把 agent 的事件画到终端。
      *
-     * 这一步不只是好看：一次 run 可能跑十几轮、花上一分钟，
+     * 不只是好看：一次 run 可能跑十几轮、花上一分钟，
      * 全程不出声的话，用户没法判断它是在干活还是卡死了。
      */
     private void render(AgentEvent event) {
@@ -113,25 +151,27 @@ public final class Repl {
             System.out.println("\n" + t.text());
 
         } else if (event instanceof AgentEvent.ToolStarted t) {
-            System.out.println("\n⏺ " + t.tool() + " " + oneLine(t.arguments(), 100));
+            System.out.println("\n" + Ansi.green("⏺ ") + Ansi.bold(t.tool()) + " "
+                    + Ansi.dim(oneLine(t.arguments(), 100)));
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
-            String mark = t.ok() ? "  ⎿ " : "  ⎿ ✗ ";
+            String mark = t.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
             String[] lines = t.output().split("\n");
             for (int i = 0; i < Math.min(lines.length, OUTPUT_PREVIEW_LINES); i++) {
-                System.out.println((i == 0 ? mark : "    ") + oneLine(lines[i], 160));
+                System.out.println((i == 0 ? mark : "    ") + Ansi.dim(oneLine(lines[i], 160)));
             }
             if (lines.length > OUTPUT_PREVIEW_LINES) {
-                System.out.println("    … 另有 " + (lines.length - OUTPUT_PREVIEW_LINES) + " 行");
+                System.out.println(Ansi.dim("    … 另有 " + (lines.length - OUTPUT_PREVIEW_LINES) + " 行"));
             }
 
         } else if (event instanceof AgentEvent.Compacted c) {
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
-            System.out.println("\n… 上下文已压缩 " + c.tokensBefore() + " → " + c.tokensAfter()
-                    + " tokens" + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）"));
+            System.out.println("\n" + Ansi.dim("… 上下文已压缩 " + c.tokensBefore() + " → "
+                    + c.tokensAfter() + " tokens"
+                    + (c.summarized() ? "（早期对话已摘要）" : "（裁剪了旧的工具输出）")));
 
         } else if (event instanceof AgentEvent.Failed f) {
-            System.out.println("\n⚠ " + f.reason());
+            System.out.println("\n" + Ansi.red("⚠ " + f.reason()));
         }
         // Thinking 和 Done 不单独渲染：前者太吵，后者由 run() 的返回值负责打印
     }
@@ -147,26 +187,27 @@ public final class Repl {
                 if (agent != null) {
                     agent.reset();
                 }
-                System.out.println("对话历史已清空。");
+                System.out.println(Ansi.dim("对话历史已清空。"));
                 return true;
             }
             case "/tools" -> {
                 for (Tool tool : tools.all()) {
-                    System.out.println("  " + tool.name() + "  —  " + tool.description());
+                    System.out.println("  " + Ansi.bold(tool.name()) + "  "
+                            + Ansi.dim(tool.description()));
                 }
                 return true;
             }
             case "/history" -> {
                 if (agent == null) {
-                    System.out.println("(未启用)");
+                    System.out.println(Ansi.dim("(未启用)"));
                     return true;
                 }
-                System.out.println("当前上下文共 " + agent.history().size() + " 条消息，约 "
-                        + agent.estimatedTokens() + " tokens（含每轮重发的工具菜单）:");
+                System.out.println(Ansi.dim("当前上下文共 " + agent.history().size() + " 条消息，约 "
+                        + agent.estimatedTokens() + " tokens（含每轮重发的工具菜单）:"));
                 agent.history().forEach(m -> System.out.println(
-                        "  [" + m.role() + "] "
+                        "  " + Ansi.cyan("[" + m.role() + "]") + " "
                                 + (m.hasToolCalls() ? "调用 " + m.toolCallsOrEmpty().size() + " 个工具 " : "")
-                                + oneLine(m.content() == null ? "" : m.content(), 80)));
+                                + Ansi.dim(oneLine(m.content() == null ? "" : m.content(), 80))));
                 return true;
             }
             case "/config" -> {
@@ -175,11 +216,14 @@ public final class Repl {
             }
             case "/help" -> {
                 System.out.println("""
-                        /clear    清空对话历史
-                        /tools    查看已注册的工具（即发给模型的菜单）
-                        /history  查看当前上下文里攒了哪些消息
-                        /config   查看当前配置（密钥已脱敏）
-                        /exit     退出""");
+                          /clear    清空对话历史
+                          /tools    查看已注册的工具（即发给模型的菜单）
+                          /history  查看当前上下文攒了哪些消息
+                          /config   查看当前配置（密钥已脱敏）
+                          /exit     退出
+
+                        快捷键: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾   Ctrl-U/K 删到行首/尾
+                                Ctrl-W 删词   Ctrl-C 放弃当前行   Ctrl-D 退出""");
                 return true;
             }
             default -> {
@@ -189,12 +233,16 @@ public final class Repl {
     }
 
     private void printBanner() {
-        System.out.println("myagent 0.1.0  (Java " + Runtime.version().feature() + ")");
+        System.out.println(Ansi.bold("myagent " + Cli.VERSION) + Ansi.dim("  (Java "
+                + Runtime.version().feature() + ")"));
         if (agent == null) {
-            System.out.println("⚠ 未配置 API key，只能使用 /help 等本地命令。");
+            System.out.println(Ansi.red("⚠ 未配置 API key，只能使用 /help 等本地命令。"));
         } else {
-            System.out.println("模型: " + config.model() + "   /help 查看命令，/exit 退出。");
+            System.out.println(Ansi.dim("模型: ") + config.model()
+                    + (options.planMode() ? Ansi.yellow("   [只读模式]") : "")
+                    + Ansi.dim("   /help 查看命令"));
         }
-        System.out.println("工作区: " + workspace.root() + "   已注册 " + tools.all().size() + " 个工具");
+        System.out.println(Ansi.dim("工作区: " + workspace.root() + "   "
+                + tools.all().size() + " 个工具"));
     }
 }
