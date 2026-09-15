@@ -75,6 +75,28 @@ public final class Ansi {
         return enabled ? CSI + "1G" + CSI + "2K" : "\r";
     }
 
+    /**
+     * 开启鼠标上报：终端会把点击位置以转义序列的形式写进 stdin。
+     *
+     * 1000 是「只报按下和松开」，1006 是 SGR 扩展坐标格式
+     * （老式格式把坐标塞进单字节，列号超过 223 就废了，宽屏下必然踩到）。
+     *
+     * 代价要清楚：开启之后终端的原生文本选择被程序接管，
+     * 用户想拖选复制得按住 Option。所以要留一个关掉它的开关。
+     */
+    public static String mouseOn() {
+        return enabled ? CSI + "?1000h" + CSI + "?1006h" : "";
+    }
+
+    public static String mouseOff() {
+        return enabled ? CSI + "?1006l" + CSI + "?1000l" : "";
+    }
+
+    /** 查询光标位置（DSR）。终端会回一个 ESC[行;列R。 */
+    public static String queryCursor() {
+        return enabled ? CSI + "6n" : "";
+    }
+
     /** 把光标移到本行第 1 列（CHA），不清除任何内容。 */
     public static String toLineStart() {
         return enabled ? CSI + "1G" : "\r";

@@ -27,6 +27,13 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("--no-mouse 关掉鼠标点击，换回原生选中复制")
+    void noMouse() {
+        assertTrue(Cli.parse(new String[]{}).mouse());
+        assertFalse(Cli.parse(new String[]{"--no-mouse"}).mouse());
+    }
+
+    @Test
     @DisplayName("长短参数都认")
     void shortAndLongFlags() {
         assertTrue(Cli.parse(new String[]{"-h"}).help());

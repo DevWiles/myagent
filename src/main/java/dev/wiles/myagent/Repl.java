@@ -137,6 +137,7 @@ public final class Repl {
                 .width(TerminalMode.width())
                 .completions(SLASH_COMMANDS)
                 .onExpand(this::expandLastRun)
+                .onClick(raw && options.mouse() ? this::handleClick : null)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
         this.tools = options.planMode()
@@ -165,6 +166,7 @@ public final class Repl {
             printBanner();
             loop();
         } finally {
+            System.out.print(Ansi.mouseOff());            // 把文本选择还给终端
             terminal.restore();                          // 无论如何都要把终端还回去
         }
     }
@@ -430,6 +432,19 @@ public final class Repl {
         recording = false;          // 已经是展开状态了，不用再记账
     }
 
+    /**
+     * 用户点了输入行上方第 linesAbove 行。
+     *
+     * 摘要行在哪：输入行上面是上边线（1 行），再往上是摘要行之后记下的那些内容，
+     * 所以摘要行正好在上方第 replayBuffer.size() + 2 行。点中了才展开，
+     * 点别处什么也不做——不然点哪儿都弹一堆东西太吵。
+     */
+    private void handleClick(int linesAbove) {
+        if (recording && linesAbove == replayBuffer.size() + 2) {
+            expandLastRun();
+        }
+    }
+
     /** 把最近一轮每次工具调用的完整参数和输出打出来。 */
     private void printToolDetails() {
         for (ToolRecord record : lastRunTools) {
@@ -634,7 +649,9 @@ public final class Repl {
                           /config   查看当前配置（密钥已脱敏）
                           /exit     退出（exit / quit / q 也行）
 
-                        展开: Ctrl-O 把最近一轮的过程详情重新打出来
+                        展开: 点一下「⏺ 读取 N 个文件」那行，或按 Ctrl-O
+                              （开了鼠标之后，拖拽选中复制要按住 Option；
+                                想换回原生选中就加 --no-mouse 启动）
                         退出: Ctrl-D，或空行连按两次 Ctrl-C，或输入 exit
                         中断: 任务跑到一半按 Ctrl-C 可以中止它，会话继续
                         编辑: ↑↓ 历史   Tab 补全   Ctrl-A/E 行首尾

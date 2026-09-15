@@ -8,6 +8,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -205,6 +206,30 @@ class LineReaderTest {
     @DisplayName("没注册展开回调时按 Ctrl-O 什么也不做，不能崩")
     void ctrlOWithoutHandler() {
         assertEquals("abc", read("ab", 15, "c", ENTER));
+    }
+
+    @Test
+    @DisplayName("鼠标事件被整段吃掉，不会当成普通字符插进输入里")
+    void swallowsMouseSequences() {
+        // SGR 格式：ESC[<0;10;5M（左键在第 5 行第 10 列按下）
+        LineReader r = reader(keys("ab", ESC, '[', '<', "0;10;5M", "c", ENTER))
+                .onClick(above -> { });
+
+        assertEquals("abc", r.readLine("> ", InputFrame.none()),
+                "鼠标序列漏进缓冲区就会变成一串乱码字符");
+    }
+
+    @Test
+    @DisplayName("滚轮和松开事件不触发点击——不过滤的话滚一下屏幕就展开一次")
+    void ignoresWheelAndRelease() {
+        java.util.List<Integer> clicks = new ArrayList<>();
+        LineReader r = reader(keys(
+                ESC, '[', '<', "64;10;5M",    // 滚轮上滚
+                ESC, '[', '<', "0;10;5m",     // 左键松开（小写 m）
+                "x", ENTER)).onClick(clicks::add);
+
+        assertEquals("x", r.readLine("> ", InputFrame.none()));
+        assertTrue(clicks.isEmpty(), "滚轮或松开被当成了点击: " + clicks);
     }
 
     @Test

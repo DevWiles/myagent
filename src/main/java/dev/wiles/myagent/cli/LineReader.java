@@ -9,6 +9,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 带行编辑、历史和补全的输入读取器。
@@ -65,6 +68,10 @@ public final class LineReader {
     private List<String> completions = List.of();
     private Path historyFile;
     private Runnable expandAction;
+    private IntConsumer clickAction;
+    private boolean mouseEnabled;
+    /** 输入行此刻在屏幕的第几行（1 起）。点击坐标要靠它换算。 */
+    private int inputScreenRow = -1;
 
     private InputFrame frame = InputFrame.none();
     /** 整行宽度，提交后铺底色要铺满这么宽；0 表示不知道宽度。 */
@@ -94,6 +101,19 @@ public final class LineReader {
      */
     public LineReader onExpand(Runnable action) {
         this.expandAction = action;
+        return this;
+    }
+
+    /**
+     * 开启鼠标点击。回调收到的是「点击位置在输入行上方第几行」——
+     * 0 表示点的就是输入行，1 表示上面一行，依此类推。
+     *
+     * 换算要用到输入行当前的屏幕行号，这个值靠 DSR 向终端问出来，
+     * 每次重新铺开输入框时问一次（那时用户还没开始敲，读回复不会和输入抢）。
+     */
+    public LineReader onClick(IntConsumer action) {
+        this.clickAction = action;
+        this.mouseEnabled = action != null;
         return this;
     }
 
@@ -145,6 +165,9 @@ public final class LineReader {
             return readLineSimple(prompt);
         }
         this.frame = frame;
+        if (mouseEnabled) {
+            out.print(Ansi.mouseOn());
+        }
         buffer = new StringBuilder();
         cursor = 0;
         historyIndex = history.size();
@@ -273,6 +296,10 @@ public final class LineReader {
             return;
         }
         int third = in.read();
+        if (third == '<') {
+            handleMouse(prompt);          // SGR 格式的鼠标事件
+            return;
+        }
         switch (third) {
             case 'A' -> navigateHistory(-1, prompt);
             case 'B' -> navigateHistory(1, prompt);
@@ -307,6 +334,74 @@ public final class LineReader {
                 // 其它序列忽略
             }
         }
+    }
+
+    /**
+     * 处理一次鼠标事件。
+     *
+     * SGR 格式：ESC[&lt;按键;列;行M（按下）或 m（松开）。
+     * 只认左键按下，其它一律忽略——滚轮和拖拽也会走这条路，
+     * 不过滤的话滚一下屏幕就触发一次展开。
+     */
+    private void handleMouse(String prompt) throws IOException {
+        StringBuilder raw = new StringBuilder();
+        int b;
+        while ((b = in.read()) != -1 && b != 'M' && b != 'm') {
+            raw.append((char) b);
+        }
+        if (b != 'M' || clickAction == null || inputScreenRow <= 0) {
+            return;
+        }
+        String[] parts = raw.toString().split(";");
+        if (parts.length < 3) {
+            return;
+        }
+        try {
+            if (Integer.parseInt(parts[0]) != 0) {
+                return;                   // 0 才是左键，滚轮是 64/65
+            }
+            int clickedRow = Integer.parseInt(parts[2]);
+            int linesAbove = inputScreenRow - clickedRow;
+            if (linesAbove < 0) {
+                return;                   // 点在输入框下方，没什么可展开的
+            }
+            // 和 Ctrl-O 一样：先把框抹掉，让回调从干净的位置开始画，画完再铺回来
+            eraseFrame();
+            clickAction.accept(linesAbove);
+            drawFrame(prompt);
+        } catch (NumberFormatException ignored) {
+            // 坐标解析不了就当没点
+        }
+    }
+
+    /**
+     * 问终端「光标现在在第几行」（DSR）。
+     *
+     * 回复是从 stdin 读回来的，所以只能在确定用户没在输入的时候问——
+     * 也就是刚铺开输入框那一刻。带超时，终端不认这个序列时不能把程序卡死。
+     */
+    private int queryCursorRow() {
+        out.print(Ansi.queryCursor());
+        out.flush();
+        StringBuilder reply = new StringBuilder();
+        long deadline = System.currentTimeMillis() + 250;
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                if (in.available() > 0) {
+                    int b = in.read();
+                    if (b == 'R') {
+                        break;
+                    }
+                    reply.append((char) b);
+                } else {
+                    Thread.sleep(5);
+                }
+            }
+        } catch (Exception e) {
+            return -1;
+        }
+        Matcher m = Pattern.compile("\\[(\\d+);(\\d+)").matcher(reply);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
     }
 
     private void navigateHistory(int delta, String prompt) {
@@ -364,6 +459,7 @@ public final class LineReader {
 
     /** 首次铺开整个框，光标停在输入行。 */
     private void drawFrame(String prompt) {
+        inputScreenRow = -1;
         if (frame.isEmpty()) {
             redraw(prompt);
             return;
@@ -383,6 +479,9 @@ public final class LineReader {
         sb.append(Ansi.up(frame.linesBelow()));
         out.print(sb);
         redraw(prompt);
+        if (mouseEnabled) {
+            inputScreenRow = queryCursorRow();
+        }
     }
 
     /**

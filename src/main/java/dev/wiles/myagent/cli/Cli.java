@@ -24,6 +24,7 @@ public final class Cli {
         boolean unsafe = "1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"));
         boolean color = true;
         boolean spinner = true;
+        boolean mouse = true;
         boolean help = false;
         boolean version = false;
         List<String> rest = new ArrayList<>();
@@ -37,6 +38,7 @@ public final class Cli {
                 case "--unsafe" -> unsafe = true;
                 case "--no-color" -> color = false;
                 case "--no-spinner" -> spinner = false;
+                case "--no-mouse" -> mouse = false;
                 case "-d", "--dir" -> {
                     requireValue(args, i, arg);
                     workspace = Path.of(args[++i]);
@@ -53,7 +55,7 @@ public final class Cli {
                 }
             }
         }
-        return new CliOptions(workspace, model, planMode, unsafe, color, spinner,
+        return new CliOptions(workspace, model, planMode, unsafe, color, spinner, mouse,
                 rest.isEmpty() ? null : String.join(" ", rest), help, version);
     }
 
@@ -78,6 +80,7 @@ public final class Cli {
                       --unsafe         跳过工作区安全检查（危险）
                       --no-color       关闭彩色输出
                       --no-spinner     关闭转圈状态行（排查终端渲染问题用）
+                      --no-mouse       关闭鼠标点击，换回终端原生的拖拽选中复制
                   -h, --help           显示本帮助
                   -v, --version        显示版本
 
