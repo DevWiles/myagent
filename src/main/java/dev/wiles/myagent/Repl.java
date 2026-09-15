@@ -685,6 +685,13 @@ public final class Repl {
             }
             case "/config" -> {
                 emit(config.toString());
+                // 终端相关的实际状态，排查布局问题时一眼能看出卡在哪一步
+                emit(Ansi.dim("终端: raw=" + rawMode
+                        + "  交互式=" + TerminalMode.isInteractive()
+                        + "  彩色=" + Ansi.isEnabled()
+                        + "  stty尺寸=" + TerminalMode.width() + "x" + TerminalMode.height()
+                        + "  全屏=" + (fullscreen == null ? "off"
+                        : "on " + fullscreen.width() + "x" + fullscreen.height())));
                 return true;
             }
             case "/help" -> {
