@@ -22,71 +22,76 @@ class BannerTest {
         Ansi.setEnabled(true);
     }
 
-    private List<String> lines(String banner) {
-        return banner.lines().filter(l -> !l.isBlank()).toList();
+    private static List<String> boxLines(String banner) {
+        return banner.lines()
+                .filter(l -> l.startsWith("╔") || l.startsWith("║") || l.startsWith("╚"))
+                .toList();
     }
 
-    private void assertAligned(String banner) {
-        List<String> lines = lines(banner);
+    private static void assertBoxAligned(String banner) {
+        List<String> lines = boxLines(banner);
+        assertFalse(lines.isEmpty(), "没画出框来");
         int expected = Ansi.displayWidth(lines.get(0));
         for (String line : lines) {
             assertEquals(expected, Ansi.displayWidth(line),
                     "这一行宽度对不上，框会歪: [" + line + "]");
         }
-        assertTrue(lines.get(0).startsWith("╭"));
-        assertTrue(lines.get(lines.size() - 1).startsWith("╰"));
+        assertTrue(lines.get(0).startsWith("╔"));
+        assertTrue(lines.get(lines.size() - 1).startsWith("╚"));
+    }
+
+    private static String render(int width, boolean planMode, boolean hasKey, List<String> tools) {
+        return Banner.render("0.2.0", "deepseek-chat", Path.of("/tmp/demo"),
+                tools, planMode, hasKey, width);
     }
 
     @Test
-    @DisplayName("中英混排时右边框依然对齐")
-    void alignsWithChinese() {
-        assertAligned(Banner.render("0.2.0", "deepseek-chat", Path.of("/tmp/demo"),
-                List.of("read_file", "write_file", "list_dir"), false, true, 80));
+    @DisplayName("大字招牌出现在框里，且框的每一行等宽")
+    void drawsLogoBox() {
+        String banner = render(100, false, true, List.of("read_file", "write_file"));
+
+        assertTrue(banner.contains(Logo.LINES[0]), "招牌第一行没画出来");
+        assertTrue(banner.contains(Logo.LINES[5]), "招牌最后一行没画出来");
+        assertBoxAligned(banner);
     }
 
     @Test
-    @DisplayName("只读模式的标记也不会把框撑歪")
-    void alignsInPlanMode() {
-        assertAligned(Banner.render("0.2.0", "deepseek-chat", Path.of("/tmp/demo"),
-                List.of("read_file"), true, true, 80));
+    @DisplayName("中文副标题不会把框撑歪")
+    void alignsWithChineseSubtitle() {
+        String banner = render(100, false, true, List.of("read_file"));
+        assertTrue(banner.contains("从零手写的 Java 编码 Agent"));
+        assertBoxAligned(banner);
     }
 
     @Test
-    @DisplayName("未配置 key 时同样对齐")
-    void alignsWithoutKey() {
-        assertAligned(Banner.render("0.2.0", "deepseek-chat", Path.of("/tmp/demo"),
-                List.of(), false, false, 80));
-    }
+    @DisplayName("80 列终端刚好放得下")
+    void fitsIn80Columns() {
+        String banner = render(80, false, true, List.of("read_file", "bash"));
 
-    @Test
-    @DisplayName("超长内容被截断，不会撑破终端宽度")
-    void truncatesLongContent() {
-        String banner = Banner.render("0.2.0", "deepseek-chat",
-                Path.of("/very/long/path/that/goes/on/and/on/and/on/forever/and/ever/deeper"),
-                List.of("tool_with_a_very_long_name_one", "tool_with_a_very_long_name_two",
-                        "tool_with_a_very_long_name_three", "tool_with_a_very_long_name_four"),
-                false, true, 60);
-
-        assertAligned(banner);
-        for (String line : lines(banner)) {
-            assertTrue(Ansi.displayWidth(line) <= 60,
-                    "超出终端宽度会换行，整个框就烂了: " + Ansi.displayWidth(line));
+        assertBoxAligned(banner);
+        for (String line : banner.lines().toList()) {
+            assertTrue(Ansi.displayWidth(line) <= 80,
+                    "超出终端宽度会换行: " + Ansi.displayWidth(line) + " [" + line + "]");
         }
     }
 
     @Test
-    @DisplayName("窄终端下也有个下限，不会挤成一条缝")
-    void hasMinimumWidth() {
-        String banner = Banner.render("0.2.0", "m", Path.of("/x"), List.of("a"), false, true, 30);
-        assertAligned(banner);
-        assertTrue(Ansi.displayWidth(lines(banner).get(0)) >= 40);
+    @DisplayName("终端太窄就不画大字，退回一行标题")
+    void fallsBackWhenNarrow() {
+        String banner = render(60, false, true, List.of("read_file"));
+
+        assertFalse(banner.contains(Logo.LINES[0]), "窄终端下画大字会换行错位");
+        assertTrue(banner.contains("myagent 0.2.0"));
+        for (String line : banner.lines().toList()) {
+            assertTrue(Ansi.displayWidth(line) <= 60, "窄终端下也不能超宽: [" + line + "]");
+        }
     }
 
     @Test
-    @DisplayName("关键信息都在：版本、模型、工作区、工具")
+    @DisplayName("关键信息都在：版本、模型、工作区、工具、怎么退出")
     void containsEssentials() {
         String banner = Banner.render("9.9.9", "some-model", Path.of("/tmp/proj"),
-                List.of("read_file"), false, true, 80);
+                List.of("read_file"), false, true, 100);
 
         assertTrue(banner.contains("9.9.9"));
         assertTrue(banner.contains("some-model"));
@@ -96,11 +101,30 @@ class BannerTest {
     }
 
     @Test
+    @DisplayName("只读模式和未配置 key 都有标记")
+    void showsModes() {
+        assertTrue(render(100, true, true, List.of("read_file")).contains("只读模式"));
+        assertTrue(render(100, false, false, List.of()).contains("未配置 API key"));
+    }
+
+    @Test
+    @DisplayName("超长的工具列表被截断，不会撑破终端宽度")
+    void truncatesLongToolList() {
+        String banner = render(80, false, true, List.of(
+                "tool_with_a_very_long_name_one", "tool_with_a_very_long_name_two",
+                "tool_with_a_very_long_name_three", "tool_with_a_very_long_name_four"));
+
+        for (String line : banner.lines().toList()) {
+            assertTrue(Ansi.displayWidth(line) <= 80, "超宽了: [" + line + "]");
+        }
+    }
+
+    @Test
     @DisplayName("家目录缩写成 ~，不把用户名晒出来")
     void shortensHome() {
         String home = System.getProperty("user.home");
         String banner = Banner.render("0.2.0", "m", Path.of(home, "code", "demo"),
-                List.of("a"), false, true, 80);
+                List.of("a"), false, true, 100);
 
         assertTrue(banner.contains("~/code/demo"));
         assertFalse(banner.contains(home));

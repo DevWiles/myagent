@@ -5,17 +5,21 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 启动横幅，画成一个圆角框。
+ * 启动横幅：大字招牌 + 一块运行信息。
  *
  * <h3>画框最容易错的地方</h3>
- * 右边框要对齐，就得知道每行内容占多少列。而这里有两个陷阱：
+ * 右边框要对齐，就得知道每行内容占多少列。这里有两个陷阱叠在一起：
  * <ol>
  *   <li>一个汉字占两列，用 length() 算出来的宽度是错的</li>
- *   <li>上了色的字符串里含 ANSI 转义序列，那些字符<b>不占任何显示宽度</b>，
+ *   <li>上了色的字符串含 ANSI 转义序列，那些字符<b>不占任何显示宽度</b>，
  *       但 length() 会把它们算进去，于是带色的行永远比不带色的短一截</li>
  * </ol>
- * 所以每一行都要同时准备「纯文本」和「带色文本」两个版本：
+ * 所以每一行都同时准备「纯文本」和「带色文本」两个版本：
  * 用前者算宽度，用后者输出。
+ *
+ * <h3>窄终端降级</h3>
+ * 大字招牌固定 64 列，终端不够宽时画出来会换行、整幅图错位，
+ * 那还不如不画——所以窄终端自动退回不带招牌的紧凑版。
  */
 public final class Banner {
 
@@ -39,28 +43,68 @@ public final class Banner {
     public static String render(String version, String model, Path workspace,
                                 List<String> toolNames, boolean planMode, boolean hasApiKey,
                                 int terminalWidth) {
+        StringBuilder sb = new StringBuilder("\n");
+        if (Logo.fitsIn(terminalWidth)) {
+            sb.append(drawLogoBox(version, terminalWidth));
+        } else {
+            sb.append("  ").append(Ansi.cyan("✻ "))
+                    .append(Ansi.bold("myagent " + version)).append('\n');
+        }
+        sb.append('\n');
+        sb.append(info(version, model, workspace, toolNames, planMode, hasApiKey, terminalWidth));
+        return sb.toString();
+    }
+
+    /** 大字招牌，套一个双线框。 */
+    private static String drawLogoBox(String version, int terminalWidth) {
+        int inner = Math.max(Logo.WIDTH + 4, Math.min(terminalWidth - 4, 92));
+
         List<Row> rows = new ArrayList<>();
-        rows.add(new Row("✻ myagent " + version + "   一个从零手写的编码 agent",
-                Ansi.cyan("✻ ") + Ansi.bold("myagent " + version)
-                        + Ansi.dim("   一个从零手写的编码 agent")));
+        rows.add(Row.blank());
+        for (String line : Logo.LINES) {
+            rows.add(new Row(center(line, inner), center(Ansi.cyan(line), inner, line)));
+        }
+        rows.add(Row.blank());
+        String subtitle = "从零手写的 Java 编码 Agent  ·  v" + version;
+        rows.add(new Row(center(subtitle, inner), center(Ansi.dim(subtitle), inner, subtitle)));
         rows.add(Row.blank());
 
+        StringBuilder sb = new StringBuilder();
+        sb.append(Ansi.cyan("╔" + "═".repeat(inner + 2) + "╗")).append('\n');
+        for (Row row : rows) {
+            int pad = inner - Ansi.displayWidth(row.plain());
+            sb.append(Ansi.cyan("║ ")).append(row.colored())
+                    .append(" ".repeat(Math.max(0, pad)))
+                    .append(Ansi.cyan(" ║")).append('\n');
+        }
+        sb.append(Ansi.cyan("╚" + "═".repeat(inner + 2) + "╝")).append('\n');
+        return sb.toString();
+    }
+
+    /** 运行信息，不画框——信息块画框反而显得吵。 */
+    private static String info(String version, String model, Path workspace,
+                               List<String> toolNames, boolean planMode, boolean hasApiKey,
+                               int terminalWidth) {
+        List<Row> rows = new ArrayList<>();
         if (!hasApiKey) {
             rows.add(labelled("模型", "未配置 API key", Ansi.red("未配置 API key")));
         } else {
-            String suffix = planMode ? "   [只读模式]" : "";
-            rows.add(labelled("模型", model + suffix,
+            rows.add(labelled("模型", model + (planMode ? "   [只读模式]" : ""),
                     model + (planMode ? "   " + Ansi.yellow("[只读模式]") : "")));
         }
         rows.add(labelled("工作区", shorten(workspace), shorten(workspace)));
-
         String tools = toolNames.isEmpty() ? "无" : String.join(" · ", toolNames);
-        rows.add(labelled("工具", tools, tools));
+        rows.add(labelled("工具", tools, Ansi.dim(tools)));
         rows.add(Row.blank());
-        rows.add(new Row("  /help 查看命令 · Ctrl-C 中断 · exit 退出",
-                Ansi.dim("  /help 查看命令 · Ctrl-C 中断 · exit 退出")));
+        String hint = "/help 查看命令 · Ctrl-C 中断 · exit 退出";
+        rows.add(new Row("  " + hint, "  " + Ansi.dim(hint)));
 
-        return draw(rows, terminalWidth);
+        StringBuilder sb = new StringBuilder();
+        for (Row row : rows) {
+            sb.append(truncate(row, Math.max(MIN_INNER_WIDTH, terminalWidth - 2)).colored())
+                    .append('\n');
+        }
+        return sb.toString();
     }
 
     private static Row labelled(String label, String plainValue, String coloredValue) {
@@ -69,26 +113,18 @@ public final class Banner {
                 "  " + Ansi.dim(label + pad) + coloredValue);
     }
 
-    private static String draw(List<Row> rows, int terminalWidth) {
-        // 框占 4 列（两条边框各 1 列 + 两侧各 1 空格），内容不能超出剩下的部分
-        // 直接撑满终端宽度，这样框的边缘和输入框的横线能对齐；
-        // 按内容宽度收缩的话，两者宽度不一致，看着很乱。
-        int inner = Math.max(MIN_INNER_WIDTH, terminalWidth - 4);
-
-        StringBuilder sb = new StringBuilder("\n");
-        sb.append(Ansi.dim("╭" + "─".repeat(inner + 2) + "╮")).append('\n');
-        for (Row row : rows) {
-            Row fitted = truncate(row, inner);
-            int pad = inner - Ansi.displayWidth(fitted.plain());
-            sb.append(Ansi.dim("│ ")).append(fitted.colored())
-                    .append(" ".repeat(Math.max(0, pad)))
-                    .append(Ansi.dim(" │")).append('\n');
-        }
-        sb.append(Ansi.dim("╰" + "─".repeat(inner + 2) + "╯")).append('\n');
-        return sb.toString();
+    /** 按显示宽度居中。 */
+    private static String center(String text, int width) {
+        return center(text, width, text);
     }
 
-    /** 超宽的行（工具列表、长路径）要截断，否则终端换行会把整个框撑烂。 */
+    /** 带色版本要按纯文本的宽度来算左边距，否则会被转义序列带偏。 */
+    private static String center(String colored, int width, String plain) {
+        int left = Math.max(0, (width - Ansi.displayWidth(plain)) / 2);
+        return " ".repeat(left) + colored;
+    }
+
+    /** 超宽的行（长路径、工具列表）要截断，否则终端换行会把排版撑烂。 */
     private static Row truncate(Row row, int limit) {
         if (Ansi.displayWidth(row.plain()) <= limit) {
             return row;
@@ -104,7 +140,7 @@ public final class Banner {
             width += w;
         }
         String text = kept + "…";
-        // 截断后颜色没法保留，退回纯文本——保证框不歪比保留颜色重要
+        // 截断后颜色没法保留，退回纯文本——保证不错位比保留颜色重要
         return new Row(text, Ansi.dim(text));
     }
 
