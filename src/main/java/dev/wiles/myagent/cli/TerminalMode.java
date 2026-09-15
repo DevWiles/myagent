@@ -19,8 +19,8 @@ import java.nio.charset.StandardCharsets;
 public final class TerminalMode {
 
     private static final int DEFAULT_WIDTH = 80;
-    /** 超宽屏上把框拉满会很难看，也不利于阅读。 */
-    private static final int MAX_WIDTH = 100;
+    /** 只防御 stty 返回离谱值，正常情况下不截断——横线就该撑满屏幕。 */
+    private static final int MAX_WIDTH = 500;
 
     private String savedSettings;
 

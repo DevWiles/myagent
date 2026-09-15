@@ -57,7 +57,7 @@ public final class Banner {
 
     /** 大字招牌，套一个双线框。 */
     private static String drawLogoBox(String version, int terminalWidth) {
-        int inner = Math.max(Logo.WIDTH + 4, Math.min(terminalWidth - 4, 92));
+        int inner = Math.max(Logo.WIDTH + 4, terminalWidth - 4);
 
         List<Row> rows = new ArrayList<>();
         rows.add(Row.blank());

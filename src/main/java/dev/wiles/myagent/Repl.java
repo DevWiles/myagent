@@ -91,7 +91,7 @@ public final class Repl {
         this.width = TerminalMode.width();
         this.status = new StatusLine(System.out, raw && options.color());
         this.reader = new LineReader(System.in, System.out, raw)
-                .box(raw ? TerminalMode.width() : 0)
+                .width(TerminalMode.width())
                 .completions(SLASH_COMMANDS)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
@@ -450,21 +450,17 @@ public final class Repl {
                 options.planMode(), agent != null, width));
     }
 
-    /** 输入框的上下边框。 */
-    private String boxTop() {
-        return Ansi.dim("╭" + "─".repeat(Math.max(18, width - 2)) + "╮");
+    /** 输入框的上下横线，撑满整个终端宽度。 */
+    private String rule() {
+        return Ansi.dim("─".repeat(Math.max(20, width)));
     }
 
-    private String boxBottom() {
-        return Ansi.dim("╰" + "─".repeat(Math.max(18, width - 2)) + "╯");
-    }
-
-    /** 输入行的上下边框，外加一行上下文用量。 */
+    /** 输入行的上下横线，外加一行上下文用量。 */
     private InputFrame inputFrame() {
         if (agent == null) {
-            return new InputFrame(boxTop(), boxBottom(), null);
+            return new InputFrame(rule(), rule(), null);
         }
-        return new InputFrame(boxTop(), boxBottom(), ContextBar.render(
+        return new InputFrame(rule(), rule(), ContextBar.render(
                 agent.estimatedTokens(), agent.contextLimit(),
                 agent.history().size(), config.model()));
     }

@@ -263,33 +263,32 @@ class LineReaderTest {
     }
 
     @Test
-    @DisplayName("盒子模式下左右都有边框，内容靠空格顶到右边框")
-    void drawsBox() {
+    @DisplayName("输入行就是提示符加内容，不画左右边框")
+    void drawsPlainInputLine() {
         Ansi.setEnabled(false);
         try {
-            LineReader r = reader(keys("abc", ENTER)).box(30);
+            LineReader r = reader(keys("abc", ENTER)).width(30);
             r.readLine("> ", InputFrame.none());
 
             String screen = captured.toString(StandardCharsets.UTF_8);
-            assertTrue(screen.contains("│ > abc"), "左边框和内容: " + screen);
-            assertTrue(screen.contains("│"), "右边框");
+            assertTrue(screen.contains("> abc"));
+            assertFalse(screen.contains("│"), "不该有左右边框");
         } finally {
             Ansi.setEnabled(true);
         }
     }
 
     @Test
-    @DisplayName("盒子里的中文也要能正确定位光标——汉字占两列")
-    void boxHandlesWideCharacters() {
-        LineReader r = reader(keys("你好", ESC, '[', 'D', "x", ENTER)).box(40);
-        assertEquals("你x好", r.readLine("> ", InputFrame.none()),
-                "光标按字符数退格会插错位置");
+    @DisplayName("中文输入时光标定位按显示宽度算——汉字占两列")
+    void handlesWideCharacters() {
+        LineReader r = reader(keys("你好", ESC, '[', 'D', "x", ENTER)).width(40);
+        assertEquals("你x好", r.readLine("> ", InputFrame.none()));
     }
 
     @Test
     @DisplayName("提交后的那一行带底色，一眼能认出哪句是自己说的")
     void submittedLineIsHighlighted() {
-        LineReader r = reader(keys("问题", ENTER)).box(40);
+        LineReader r = reader(keys("问题", ENTER)).width(40);
         r.readLine("> ", new InputFrame("上", "下", null));
 
         String screen = captured.toString(StandardCharsets.UTF_8);

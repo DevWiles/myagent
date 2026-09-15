@@ -64,8 +64,8 @@ public final class LineReader {
     private Path historyFile;
 
     private InputFrame frame = InputFrame.none();
-    /** 画成带左右边框的盒子时的总宽度；0 表示不画盒子。 */
-    private int boxWidth;
+    /** 整行宽度，提交后铺底色要铺满这么宽；0 表示不知道宽度。 */
+    private int lineWidth;
     private StringBuilder buffer = new StringBuilder();
     private int cursor;                 // 光标在 buffer 中的字符下标
     private int historyIndex;           // 当前浏览到历史的第几条
@@ -83,13 +83,9 @@ public final class LineReader {
         return this;
     }
 
-    /**
-     * 把输入行画成一个带左右边框的盒子。
-     *
-     * @param width 盒子总宽度（含两侧边框）；传 0 退回朴素的一行提示符
-     */
-    public LineReader box(int width) {
-        this.boxWidth = width;
+    /** 告诉它终端有多宽，提交后那一行的底色要铺满整行才显眼。 */
+    public LineReader width(int width) {
+        this.lineWidth = width;
         return this;
     }
 
@@ -394,35 +390,20 @@ public final class LineReader {
      */
     private String submittedLine(String prompt) {
         String text = prompt + buffer;
-        int pad = Math.max(0, boxWidth - Ansi.displayWidth(text));
+        int pad = Math.max(0, lineWidth - Ansi.displayWidth(text));
         return Ansi.highlight(Ansi.cyan(prompt) + buffer + " ".repeat(pad));
     }
 
-    /**
-     * 输入行长什么样。首次铺开和之后每次重画都用它，
-     * 否则先画一版没有边框的再覆盖，屏幕会闪一下。
-     */
+    /** 输入行长什么样。首次铺开和之后每次重画共用，免得闪。 */
     private String inputLine(String prompt) {
-        if (boxWidth <= 0) {
-            return Ansi.cyan(prompt) + buffer;
-        }
-        // 盒子模式：左右各一道边框，中间填内容，不足的用空格顶到右边框
-        int inner = boxWidth - 4;                       // "│ " + 内容 + " │"
-        int contentWidth = Ansi.displayWidth(prompt) + Ansi.displayWidth(buffer.toString());
-        int pad = Math.max(0, inner - contentWidth);
-        return Ansi.dim("│ ") + Ansi.cyan(prompt) + buffer + " ".repeat(pad) + Ansi.dim(" │");
+        return Ansi.cyan(prompt) + buffer;
     }
 
-    /** 只重画输入行——上下的装饰不动。 */
+    /** 只重画输入行——上下的横线不动。 */
     private void redraw(String prompt) {
         out.print(Ansi.clearLine() + inputLine(prompt));
-
-        // 光标此刻停在行尾（盒子模式下是右边框之后），按显示宽度算着退回去
-        int cursorColumn = (boxWidth > 0 ? 2 : 0) + Ansi.displayWidth(prompt)
-                + Ansi.displayWidth(buffer.substring(0, cursor));
-        int lineEnd = boxWidth > 0 ? boxWidth
-                : Ansi.displayWidth(prompt) + Ansi.displayWidth(buffer.toString());
-        out.print(Ansi.left(lineEnd - cursorColumn));
+        // 光标此刻停在内容末尾，按显示宽度退回到该在的位置（汉字占两列）
+        out.print(Ansi.left(Ansi.displayWidth(buffer.substring(cursor))));
         out.flush();
     }
 
