@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 public final class TerminalMode {
 
     private static final int DEFAULT_WIDTH = 80;
+    private static final int DEFAULT_HEIGHT = 24;
     /** 只防御 stty 返回离谱值，正常情况下不截断——横线就该撑满屏幕。 */
     private static final int MAX_WIDTH = 500;
 
@@ -83,6 +84,23 @@ public final class TerminalMode {
             // 拿不到就用默认值
         }
         return DEFAULT_WIDTH;
+    }
+
+    /** 终端高度（行数）。取不到就退回 24。 */
+    public static int height() {
+        if (!isInteractive()) {
+            return DEFAULT_HEIGHT;
+        }
+        try {
+            String[] parts = exec("stty size < /dev/tty").trim().split("\\s+");
+            if (parts.length == 2) {
+                int rows = Integer.parseInt(parts[0]);
+                return rows > 5 ? rows : DEFAULT_HEIGHT;
+            }
+        } catch (Exception ignored) {
+            // 拿不到就用默认值
+        }
+        return DEFAULT_HEIGHT;
     }
 
     public void restore() {

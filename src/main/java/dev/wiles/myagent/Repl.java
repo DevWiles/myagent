@@ -95,6 +95,16 @@ public final class Repl {
     }
 
     private final List<ToolRecord> lastRunTools = new ArrayList<>();
+
+    /**
+     * 摘要行之后又打印了哪些内容。
+     *
+     * 「原地展开」靠的就是它：把光标退回摘要行的位置、清掉，
+     * 先打详情、再把这些内容原样重放一遍，看起来就是那一行展开了。
+     * 没有它只能把详情追加打印在最下面，那不叫展开，叫又打了一遍。
+     */
+    private final List<String> replayBuffer = new ArrayList<>();
+    private boolean recording;
     private String pendingToolName;
     private String pendingToolArgs;
 
@@ -200,6 +210,8 @@ public final class Repl {
         quietBuffer.setLength(0);
         lastRunTools.clear();
         pendingToolName = null;
+        replayBuffer.clear();
+        recording = false;
         // 立刻起转。等 Agent 发出第一个 Thinking 事件才转的话，
         // 中间那段（建连接、压缩上下文）屏幕上是死的，用户会以为程序挂了。
         status.start("思考中…");
@@ -239,7 +251,8 @@ public final class Repl {
         if (runToolCalls > 0) {
             sb.append(" · ").append(runToolCalls).append(" 次工具调用");
         }
-        System.out.println("\n" + Ansi.dim(sb.toString()));
+        emit("");
+        emit(Ansi.dim(sb.toString()));
     }
 
 
@@ -362,7 +375,7 @@ public final class Repl {
         } else if (event instanceof AgentEvent.Failed f) {
             collapseToolGroup();
             flushQuietBuffer();
-            System.out.println(Ansi.red("⚠ " + f.reason()));
+            emit(Ansi.red("⚠ " + f.reason()));
         }
     }
 
@@ -374,7 +387,7 @@ public final class Repl {
      */
     private void appendText(String delta) {
         if (!textStarted) {
-            System.out.println();         // 新一段文字和上面的内容隔开
+            emit("");                     // 新一段文字和上面的内容隔开
             textStarted = true;
         }
         pendingLine.append(delta);
@@ -382,7 +395,7 @@ public final class Repl {
         while ((newline = pendingLine.indexOf("\n")) >= 0) {
             String line = pendingLine.substring(0, newline);
             pendingLine.delete(0, newline + 1);
-            System.out.println(markdown.renderLine(line));
+            emit(markdown.renderLine(line));
         }
         System.out.flush();
     }
@@ -399,10 +412,27 @@ public final class Repl {
             System.out.println(Ansi.dim("最近一轮没有调用工具。"));
             return;
         }
-        System.out.println();
-        System.out.println(Ansi.dim("── 最近一轮的 " + lastRunTools.size() + " 次工具调用 ──"));
+        // 要退回去多少行：摘要行自己 1 行，加上它之后记下来的那些
+        int rewind = replayBuffer.size() + 1;
+        boolean inPlace = rawMode && recording && rewind < TerminalMode.height() - 3;
+
+        if (!inPlace) {
+            // 退不回去就只能追加打印：内容已经滚出屏幕，或者压根不在交互终端里。
+            // 硬退的话会把屏幕上别的东西啃掉。
+            printToolDetails();
+            return;
+        }
+        // 回到摘要行的位置，清掉它和它下面的一切，
+        // 先打详情、再把原来那些内容一行不差地重放——看起来就是这一行展开了
+        System.out.print(Ansi.up(rewind) + Ansi.toLineStart() + Ansi.clearToEnd());
+        printToolDetails();
+        replayBuffer.forEach(System.out::println);
+        recording = false;          // 已经是展开状态了，不用再记账
+    }
+
+    /** 把最近一轮每次工具调用的完整参数和输出打出来。 */
+    private void printToolDetails() {
         for (ToolRecord record : lastRunTools) {
-            System.out.println();
             System.out.println(Ansi.green("⏺ ") + Ansi.bold(record.tool()) + " "
                     + Ansi.dim(oneLine(record.arguments(), Math.max(20, width - 8))));
             String mark = record.ok() ? Ansi.dim("  ⎿ ") : Ansi.red("  ⎿ ✗ ");
@@ -416,7 +446,6 @@ public final class Repl {
                         + (lines.length - VERBOSE_OUTPUT_LINES) + " 行"));
             }
         }
-        System.out.println();
     }
 
     /** 精简模式攒下来的最终答案，到这一轮结束才打出来。 */
@@ -424,9 +453,9 @@ public final class Repl {
         if (quietBuffer.length() == 0) {
             return;
         }
-        System.out.println();
+        emit("");
         for (String line : quietBuffer.toString().split("\n", -1)) {
-            System.out.println(markdown.renderLine(line));
+            emit(markdown.renderLine(line));
         }
         quietBuffer.setLength(0);
     }
@@ -434,7 +463,7 @@ public final class Repl {
     /** 把攒着还没换行的最后半行吐出去。 */
     private void flushText() {
         if (pendingLine.length() > 0) {
-            System.out.println(markdown.renderLine(pendingLine.toString()));
+            emit(markdown.renderLine(pendingLine.toString()));
             pendingLine.setLength(0);
         }
         textStarted = false;
@@ -452,7 +481,7 @@ public final class Repl {
                 return;             // 成功的过程一概不显示
             }
             // 失败是必须让人看见的，否则用户完全不知道出了什么事
-            System.out.println(Ansi.red("⏺ " + event.tool() + " ✗ ")
+            emit(Ansi.red("⏺ " + event.tool() + " ✗ ")
                     + Ansi.dim(oneLine(event.output(), Math.max(20, width - 8))));
             return;
         }
@@ -471,6 +500,14 @@ public final class Repl {
         if (hidden > 0) {
             toolPrintln(Ansi.dim("    … 另有 " + hidden + " 行"
                     + (detail == OutputDetail.VERBOSE ? "" : "（/verbose 展开）")));
+        }
+    }
+
+    /** 打印一行；摘要行之后的内容要记下来，展开时原样重放。 */
+    private void emit(String line) {
+        System.out.println(line);
+        if (recording) {
+            replayBuffer.add(line);
         }
     }
 
@@ -501,6 +538,9 @@ public final class Repl {
         }
         System.out.print(erase);
         System.out.println(Ansi.green("⏺ ") + Ansi.dim(ToolSummary.describe(toolGroupCounts)));
+        // 从这里开始记账：展开时要把摘要行之后的内容原样重放
+        replayBuffer.clear();
+        recording = true;
         resetToolGroup();
     }
 
