@@ -23,6 +23,7 @@ public final class Cli {
         boolean planMode = false;
         boolean unsafe = "1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"));
         boolean color = true;
+        boolean spinner = true;
         boolean help = false;
         boolean version = false;
         List<String> rest = new ArrayList<>();
@@ -35,6 +36,7 @@ public final class Cli {
                 case "-p", "--plan" -> planMode = true;
                 case "--unsafe" -> unsafe = true;
                 case "--no-color" -> color = false;
+                case "--no-spinner" -> spinner = false;
                 case "-d", "--dir" -> {
                     requireValue(args, i, arg);
                     workspace = Path.of(args[++i]);
@@ -51,7 +53,7 @@ public final class Cli {
                 }
             }
         }
-        return new CliOptions(workspace, model, planMode, unsafe, color,
+        return new CliOptions(workspace, model, planMode, unsafe, color, spinner,
                 rest.isEmpty() ? null : String.join(" ", rest), help, version);
     }
 
@@ -75,6 +77,7 @@ public final class Cli {
                   -p, --plan           只读模式，只给它查看类工具，不能改文件和执行命令
                       --unsafe         跳过工作区安全检查（危险）
                       --no-color       关闭彩色输出
+                      --no-spinner     关闭转圈状态行（排查终端渲染问题用）
                   -h, --help           显示本帮助
                   -v, --version        显示版本
 

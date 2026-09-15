@@ -107,7 +107,7 @@ public final class Repl {
         boolean raw = terminal.enterRaw();
         this.rawMode = raw;
         this.width = TerminalMode.width();
-        this.status = new StatusLine(System.out, raw && options.color());
+        this.status = new StatusLine(System.out, raw && options.color() && options.spinner());
         this.reader = new LineReader(System.in, System.out, raw)
                 .width(TerminalMode.width())
                 .completions(SLASH_COMMANDS)

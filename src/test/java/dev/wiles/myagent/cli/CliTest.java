@@ -20,6 +20,13 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("--no-spinner 关掉转圈状态行")
+    void noSpinner() {
+        assertTrue(Cli.parse(new String[]{}).spinner());
+        assertFalse(Cli.parse(new String[]{"--no-spinner"}).spinner());
+    }
+
+    @Test
     @DisplayName("长短参数都认")
     void shortAndLongFlags() {
         assertTrue(Cli.parse(new String[]{"-h"}).help());
