@@ -57,6 +57,41 @@ class StatusLineTest {
     }
 
     @Test
+    @DisplayName("stop 返回后动画线程必须已经死透——否则它会把主线程打印的正文擦掉")
+    @Timeout(10)
+    void stopWaitsForAnimationToDie() throws Exception {
+        StatusLine status = new StatusLine(out, true);
+        status.start("思考中…");
+        Thread.sleep(250);          // 让它转起来
+
+        status.stop();
+        int sizeRightAfterStop = captured.size();
+
+        // 动画间隔是 100ms，这段时间足够它再画好几帧。
+        // 只要还有一个字节冒出来，就说明主线程接下来打印的正文会被 clearLine 抹掉。
+        Thread.sleep(400);
+
+        assertEquals(sizeRightAfterStop, captured.size(),
+                "stop 之后动画线程还在画，屏幕上什么都留不下");
+    }
+
+    @Test
+    @DisplayName("stop 之后打印的正文要原样留在输出里")
+    @Timeout(10)
+    void outputAfterStopSurvives() throws Exception {
+        StatusLine status = new StatusLine(out, true);
+        status.start("思考中…");
+        Thread.sleep(250);
+        status.stop();
+
+        out.println("这是模型的回答");
+        Thread.sleep(400);
+
+        assertTrue(screen().endsWith("这是模型的回答" + System.lineSeparator()),
+                "正文被动画线程覆盖了");
+    }
+
+    @Test
     @DisplayName("重复 stop 不出错")
     void stopIsIdempotent() {
         StatusLine status = new StatusLine(out, true);

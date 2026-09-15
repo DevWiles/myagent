@@ -14,9 +14,14 @@ import java.io.PrintStream;
  * 每 100ms 用 \r 回到行首重画一次。
  *
  * <h3>与正文输出的协调</h3>
- * 状态行和正文抢同一块屏幕，谁也不能压着谁。约定很简单：
+ * 状态行和正文抢同一块屏幕，谁也不能压着压。约定是：
  * <b>主线程要打印任何东西之前，先 stop() 把状态行擦掉</b>。
- * 这件事由 Repl 统一负责，所以这个类自己不用加锁。
+ *
+ * 这里有个必须处理的竞态：光把标志位设成 false 是不够的，
+ * 动画线程可能正卡在「检查完 running」和「执行 print」之间——
+ * 于是主线程刚打印出来的正文，会被随后醒来的动画线程一个 clearLine 抹掉。
+ * 每 100ms 一次，屏幕上就什么都留不下。
+ * 所以 stop() 必须 <b>中断并等待动画线程真正退出</b> 之后才能返回。
  */
 public final class StatusLine {
 
@@ -29,6 +34,7 @@ public final class StatusLine {
 
     private volatile String text = "";
     private volatile boolean running;
+    private volatile Thread thread;
     private long startedAt;
 
     public StatusLine(PrintStream out, boolean animated) {
@@ -47,9 +53,10 @@ public final class StatusLine {
         }
         running = true;
         startedAt = System.nanoTime();
-        Thread thread = new Thread(this::animate, "myagent-status");
-        thread.setDaemon(true);
-        thread.start();
+        Thread worker = new Thread(this::animate, "myagent-status");
+        worker.setDaemon(true);
+        thread = worker;
+        worker.start();
     }
 
     /** 换一句状态文字，计时继续。 */
@@ -57,12 +64,27 @@ public final class StatusLine {
         this.text = text;
     }
 
-    /** 停掉动画并把这一行擦干净，光标留在行首，后面可以直接打正文。 */
+    /**
+     * 停掉动画并把这一行擦干净，光标留在行首，后面可以直接打正文。
+     *
+     * 必须等动画线程真的退出再返回：否则它可能在主线程打印正文之后
+     * 才醒过来，一个 clearLine 就把正文抹掉了。
+     */
     public void stop() {
         if (!running) {
             return;
         }
         running = false;
+        Thread worker = thread;
+        if (worker != null) {
+            worker.interrupt();            // 把它从 sleep 里叫醒，不用干等 100ms
+            try {
+                worker.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            thread = null;
+        }
         out.print(Ansi.clearLine() + Ansi.showCursor());
         out.flush();
     }
@@ -75,6 +97,8 @@ public final class StatusLine {
         int frame = 0;
         out.print(Ansi.hideCursor());
         while (running) {
+            // 先画再睡。反过来的话，100ms 内就结束的任务会一帧都画不出来，
+            // 用户按完回车对着空屏幕，只能猜程序是不是死了。
             long seconds = (System.nanoTime() - startedAt) / 1_000_000_000L;
             out.print(Ansi.clearLine()
                     + Ansi.cyan(FRAMES[frame % FRAMES.length]) + " "

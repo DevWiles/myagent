@@ -149,6 +149,9 @@ public final class Repl {
      */
     private void runInterruptible(String prompt) {
         markdown.reset();          // 上一轮没闭合的代码块不能影响这一轮
+        // 立刻起转。等 Agent 发出第一个 Thinking 事件才转的话，
+        // 中间那段（建连接、压缩上下文）屏幕上是死的，用户会以为程序挂了。
+        status.start("思考中…");
         if (!rawMode) {
             agent.run(prompt);
             status.stop();
