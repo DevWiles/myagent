@@ -300,6 +300,8 @@ class LineReaderTest {
 
         String screen = captured.toString(StandardCharsets.UTF_8);
         assertTrue(screen.contains(Ansi.clearToEnd()), "没用 ED 清除下方内容");
+        assertTrue(screen.contains(Ansi.toLineStart() + Ansi.clearToEnd()),
+                "清除前必须先回到行首——ED 只清光标右边，左半截会残留");
         // 收起时只退一行到上边线；铺开时那次是 up(2)，不算在内。
         // 再多就是又在逐行挪光标了——终端的启发式会盯着频繁的光标移动。
         assertEquals(1, countOccurrences(screen, Ansi.up(1)),

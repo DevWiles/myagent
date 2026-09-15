@@ -383,7 +383,10 @@ public final class LineReader {
         if (frame.top() != null) {
             out.print(Ansi.up(1));
         }
-        out.print(Ansi.clearToEnd());
+        // 上移只改行不改列，光标此刻还停在原来那一列上。
+        // ED 是从光标位置往后清的，不先回到行首的话，
+        // 光标左边那半截（上边线的左半、底色块）会原样留在屏幕上。
+        out.print(Ansi.toLineStart() + Ansi.clearToEnd());
         out.println(finalLine);
     }
 

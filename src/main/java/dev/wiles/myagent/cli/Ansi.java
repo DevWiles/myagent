@@ -75,8 +75,17 @@ public final class Ansi {
         return enabled ? CSI + "1G" + CSI + "2K" : "\r";
     }
 
+    /** 把光标移到本行第 1 列（CHA），不清除任何内容。 */
+    public static String toLineStart() {
+        return enabled ? CSI + "1G" : "\r";
+    }
+
     /**
      * 清除从光标位置到屏幕末尾的全部内容（ED，ESC[0J）。
+     *
+     * 注意它是从<b>当前光标位置</b>开始清的，不是从行首。
+     * 所以用之前几乎总要先 {@link #toLineStart()} 回到第 1 列，
+     * 否则光标左边的内容会原样留在屏幕上。
      *
      * 要擦掉光标下方连续的好几行时，用它一次搞定，
      * 比「逐行下移 + 清行 + 再逐行上移」那种做法干净得多，
