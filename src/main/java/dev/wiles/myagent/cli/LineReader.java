@@ -394,7 +394,9 @@ public final class LineReader {
      */
     private String submittedLine(String prompt) {
         String text = prompt + buffer;
-        int pad = Math.max(0, lineWidth - Ansi.displayWidth(text));
+        // 补到 width-1 而不是 width：写满最后一列会让光标停在自动换行的临界点上，
+        // 终端在这个状态下对后续控制序列的处理各家不一，容易出怪东西。
+        int pad = Math.max(0, lineWidth - 1 - Ansi.displayWidth(text));
         // 注意不能在里面再套 Ansi.cyan()：那串颜色码是以「重置全部属性」收尾的，
         // 会把外层的背景色一起关掉，结果只有提示符那一小段有底色。
         return Ansi.highlight(text + " ".repeat(pad));
