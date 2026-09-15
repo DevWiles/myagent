@@ -62,9 +62,28 @@ public final class Ansi {
 
     // ---- 光标与清除，行编辑要用 ----
 
-    /** 回到行首并清掉整行。 */
+    /**
+     * 回到行首并清掉整行。
+     *
+     * 用 CHA（ESC[1G「光标移到第 1 列」）而不是回车符 \r。
+     * 两者效果一样，但 \r 是个古老的控制字符，终端的各种启发式
+     * （比如 macOS Terminal.app 的「自动标记提示符行」）天然会盯着它；
+     * 每 100ms 发一次 \r 重画，在它看来就像在反复重画命令提示符，
+     * 于是给那一行画上标记。CHA 的语义明确得多，不会被误读。
+     */
     public static String clearLine() {
-        return enabled ? "\r" + CSI + "2K" : "\r";
+        return enabled ? CSI + "1G" + CSI + "2K" : "\r";
+    }
+
+    /**
+     * 清除从光标位置到屏幕末尾的全部内容（ED，ESC[0J）。
+     *
+     * 要擦掉光标下方连续的好几行时，用它一次搞定，
+     * 比「逐行下移 + 清行 + 再逐行上移」那种做法干净得多，
+     * 发出去的控制序列也少一个数量级。
+     */
+    public static String clearToEnd() {
+        return enabled ? CSI + "0J" : "";
     }
 
     /** 光标上移 n 行。 */

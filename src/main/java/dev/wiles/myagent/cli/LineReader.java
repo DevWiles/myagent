@@ -374,17 +374,16 @@ public final class LineReader {
             out.println();
             return;
         }
-        // 先一路向下，把下方的装饰逐行擦掉
-        for (int i = 0; i < frame.linesBelow(); i++) {
-            out.print(Ansi.down(1) + Ansi.clearLine());
+        // 光标此刻在输入行。先退到上边线那一行，然后一次性清掉从这里
+        // 到屏幕末尾的所有内容——上边线、输入行、下边线、状态行全在里面。
+        //
+        // 之前是「逐行下移擦、再逐行上移擦」，十来个控制序列换来同样的效果，
+        // 还容易被终端的各种启发式盯上（macOS Terminal.app 会给这样的行
+        // 画上「提示符标记」）。ED 一条就够。
+        if (frame.top() != null) {
+            out.print(Ansi.up(1));
         }
-        // 再一路向上擦回去，每上一行擦一行。
-        // 注意必须逐行擦：只 up 到最顶上再 clearLine 的话，
-        // 夹在中间的输入行不会被清掉，它的旧内容会原样留在屏幕上。
-        int linesToErase = frame.linesBelow() + (frame.top() != null ? 1 : 0);
-        for (int i = 0; i < linesToErase; i++) {
-            out.print(Ansi.up(1) + Ansi.clearLine());
-        }
+        out.print(Ansi.clearToEnd());
         out.println(finalLine);
     }
 

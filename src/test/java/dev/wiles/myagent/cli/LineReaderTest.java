@@ -293,28 +293,29 @@ class LineReaderTest {
     }
 
     @Test
-    @DisplayName("收起时每一行都要擦，包括夹在中间的输入行——漏掉它旧内容会留在屏幕上")
-    void erasesEveryLineIncludingTheInputLine() {
+    @DisplayName("收起时用「清到屏幕末尾」一次擦干净，不再逐行来回移动光标")
+    void collapsesWithSingleEraseSequence() {
         LineReader r = reader(keys("x", ENTER));
         r.readLine("> ", new InputFrame("上", "下", "状态"));
 
         String screen = captured.toString(StandardCharsets.UTF_8);
-        // 下方两行 + 输入行 + 上边线 = 4 次清行（还有输入过程中的重画）
-        int clears = countOccurrences(screen, Ansi.clearLine());
-        assertTrue(clears >= 4, "清行次数不够，有行没被擦到: " + clears);
-        // 向上擦回去的次数 = 下方装饰 2 行 + 上边线 1 行
-        assertEquals(3, countOccurrences(screen, Ansi.up(1)),
-                "必须逐行向上擦，一次 up 到顶会漏掉中间的输入行");
+        assertTrue(screen.contains(Ansi.clearToEnd()), "没用 ED 清除下方内容");
+        // 收起时只退一行到上边线；铺开时那次是 up(2)，不算在内。
+        // 再多就是又在逐行挪光标了——终端的启发式会盯着频繁的光标移动。
+        assertEquals(1, countOccurrences(screen, Ansi.up(1)),
+                "光标移动次数应当降到最少");
     }
 
     @Test
-    @DisplayName("没有状态行时少擦一行")
-    void collapsesFrameWithoutStatus() {
-        LineReader r = reader(keys("x", ENTER));
-        r.readLine("> ", new InputFrame("上", "下", null));
+    @DisplayName("上边线之下的内容全被清掉，不留残行")
+    void leavesNothingBehind() {
+        LineReader r = reader(keys("你好", ENTER));
+        assertEquals("你好", r.readLine("> ", new InputFrame("上", "下", "状态")));
 
-        // 铺开时回到输入行用掉 1 次 up(1)（只有一行装饰），收起时向上擦 2 行
-        assertEquals(3, countOccurrences(captured.toString(StandardCharsets.UTF_8), Ansi.up(1)));
+        String screen = captured.toString(StandardCharsets.UTF_8);
+        assertTrue(screen.endsWith("> 你好" + System.lineSeparator())
+                        || screen.contains("> 你好"),
+                "收起后应当只剩这一行内容");
     }
 
     @Test
