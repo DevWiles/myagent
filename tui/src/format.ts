@@ -1,0 +1,129 @@
+/**
+ * 文案与格式化。
+ *
+ * 措辞刻意和 Java 版的 ToolSummary / Logo 保持一致——两套前端共用一个后端，
+ * 说法不一样会让人以为是两个程序。
+ */
+
+import type { ToolCall } from './store.ts'
+
+/** 工具名 → [动词, 量词]。没登记的退回通用说法。 */
+const WORDING: Record<string, [string, string]> = {
+  read_file: ['读取', '个文件'],
+  write_file: ['写入', '个文件'],
+  list_dir: ['列出', '个目录'],
+  bash: ['执行', '条命令'],
+  create_project: ['创建', '批文件'],
+}
+
+/**
+ * 把一组工具调用概括成一句话：「读取 3 个文件 · 执行 1 条命令」。
+ *
+ * 顺序按首次调用出现的先后，不排序——用户脑子里的顺序就是发生顺序。
+ */
+export function summarizeTools(calls: readonly ToolCall[]): string {
+  const counts = new Map<string, number>()
+  for (const call of calls) {
+    counts.set(call.tool, (counts.get(call.tool) ?? 0) + 1)
+  }
+  const parts: string[] = []
+  for (const [tool, count] of counts) {
+    const wording = WORDING[tool]
+    parts.push(wording ? `${wording[0]} ${count} ${wording[1]}` : `调用 ${count} 次 ${tool}`)
+  }
+  return parts.join(' · ')
+}
+
+/** 毫秒 → 人话。超过一分钟就不再显示小数了，没人关心。 */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}m${Math.round(seconds % 60)}s`
+}
+
+export function formatTokens(count: number): string {
+  return count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count)
+}
+
+/**
+ * 截到指定宽度，超出部分用 … 收尾。
+ *
+ * 按 code point 而不是 UTF-16 code unit 切，否则会把 emoji 劈成两半变成乱码。
+ * 注意这里没做东亚字符的双宽处理——中文会被算成 1 列，实际占 2 列。
+ * 对「一行摘要」这种场景够用，真要做对齐得引入字宽表。
+ */
+export function truncate(text: string, max: number): string {
+  const chars = [...text]
+  return chars.length <= max ? text : chars.slice(0, Math.max(0, max - 1)).join('') + '…'
+}
+
+/** 把多行内容压成一行，用于折叠显示。 */
+export function firstLine(text: string, max: number): string {
+  const line = text.split('\n').find(l => l.trim().length > 0) ?? ''
+  return truncate(line.trim(), max)
+}
+
+/**
+ * ASCII art 招牌。ANSI Shadow 风格，6 行，每行严格 64 列——
+ * 这些都是 Block Elements / Box Drawing 字符，每个占一列宽，差一个就错位。
+ */
+export const LOGO_LINES = [
+  '███╗   ███╗██╗   ██╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗',
+  '████╗ ████║╚██╗ ██╔╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝',
+  '██╔████╔██║ ╚████╔╝ ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ',
+  '██║╚██╔╝██║  ╚██╔╝  ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ',
+  '██║ ╚═╝ ██║   ██║   ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ',
+  '╚═╝     ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ',
+]
+
+export const LOGO_WIDTH = 64
+/** 窄于这个宽度就别画了，画出来会换行，比不画还难看。 */
+export const LOGO_MIN_WIDTH = LOGO_WIDTH + 8
+
+/** 转圈动词。等模型响应时轮换，让人知道程序还活着。 */
+export const SPINNER_VERBS = [
+  '思考中', '推敲中', '琢磨中', '盘算中', '梳理中',
+  '翻找中', '推理中', '斟酌中', '演算中', '构思中',
+]
+
+/**
+ * 把整段对话转成纯文本，退出时打印回主屏 scrollback 用。
+ *
+ * 全屏模式运行时内容在备用屏幕，退出即消失；这个函数让「退出后还能上拉回看」
+ * 成立——把对话摘要落回主终端。只保留结论性内容（用户问、模型答、工具摘要），
+ * 过程细节（thought、展开的工具输出）不落盘，免得刷屏。
+ */
+export function transcriptToText(
+  entries: ReadonlyArray<
+    | { kind: 'user'; text: string }
+    | { kind: 'assistant'; text: string }
+    | { kind: 'thought'; text: string }
+    | { kind: 'tools'; calls: ReadonlyArray<{ tool: string; ok?: boolean }> }
+    | { kind: 'notice'; level: string; text: string }
+    | { kind: 'compacted'; before: number; after: number; summarized: boolean }
+  >,
+): string {
+  const lines: string[] = []
+  for (const entry of entries) {
+    switch (entry.kind) {
+      case 'user':
+        lines.push('', `› ${entry.text}`)
+        break
+      case 'assistant':
+        lines.push(`✻ ${entry.text}`)
+        break
+      case 'tools': {
+        const failed = entry.calls.filter(c => c.ok === false).length
+        lines.push(`● ${summarizeTools(entry.calls as never)}${failed ? ` · ${failed} 个失败` : ''}`)
+        break
+      }
+      case 'notice':
+        lines.push(`${entry.level === 'error' ? '✗' : entry.level === 'warn' ? '⚠' : 'ℹ'} ${entry.text}`)
+        break
+      // thought / compacted 是过程噪声，退出后不落盘
+    }
+  }
+  return lines.join('\n').replace(/^\n/, '')
+}

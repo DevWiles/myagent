@@ -29,6 +29,8 @@ public final class Cli {
         boolean fullscreen = false;
         boolean help = false;
         boolean version = false;
+        boolean serve = false;
+        int port = 0;
         List<String> rest = new ArrayList<>();
 
         for (int i = 0; i < args.length; i++) {
@@ -43,6 +45,11 @@ public final class Cli {
                 case "--mouse" -> mouse = true;
                 case "--no-clear" -> clearScreen = false;
                 case "--fullscreen", "-f" -> fullscreen = true;
+                case "--serve" -> serve = true;
+                case "--port" -> {
+                    requireValue(args, i, arg);
+                    port = parsePort(args[++i]);
+                }
                 case "-d", "--dir" -> {
                     requireValue(args, i, arg);
                     workspace = Path.of(args[++i]);
@@ -61,7 +68,20 @@ public final class Cli {
         }
         return new CliOptions(workspace, model, planMode, unsafe, color, spinner, mouse,
                 clearScreen, fullscreen,
-                rest.isEmpty() ? null : String.join(" ", rest), help, version);
+                rest.isEmpty() ? null : String.join(" ", rest), help, version, serve, port);
+    }
+
+    private static int parsePort(String value) {
+        int port;
+        try {
+            port = Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("--port 要跟一个数字，收到: " + value);
+        }
+        if (port < 0 || port > 65535) {
+            throw new IllegalArgumentException("--port 超出范围: " + port);
+        }
+        return port;
     }
 
     private static void requireValue(String[] args, int i, String arg) {
@@ -92,6 +112,11 @@ public final class Cli {
                                        都会被程序接管，基本不可用，不建议开）
                   -h, --help           显示本帮助
                   -v, --version        显示版本
+
+                无头模式（供外部界面驱动，自己不画任何东西）:
+                      --serve          只监听 127.0.0.1 的 WebSocket，不进终端交互。
+                                       握手信息（端口 + 一次性 token）以一行 JSON 打在 stdout
+                      --port <端口>    无头模式监听端口，默认 0（系统分配，推荐）
 
                 配置:
                   ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-chat"}

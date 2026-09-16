@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# 一行命令把整个软件拉起来：按需 build 后端 jar、按需装前端依赖，然后起界面。
+#
+# 设计原则是「只做必要的事」——每次都重新 build 会让启动慢到没人愿意用这个脚本，
+# 所以两件事都带新鲜度判断，正常情况下直接跳过，启动时间和裸跑界面一样。
+#
+# 用法:
+#   ./myagent-tui                 在当前目录起界面
+#   ./myagent-tui -d ~/proj       指定工作区
+#   ./myagent-tui --rebuild       强制重新 build 后端
+#   ./myagent-tui --help          用法（不会触发 build）
+#
+set -euo pipefail
+
+# 从软链接调用也要能找到仓库，所以逐级解开
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+JAR="$ROOT/target/myagent.jar"
+TUI="$ROOT/tui"
+
+# 注意：全程不 cd。界面进程用 cwd 作为默认工作区，
+# 一旦 cd 进 tui/，用户在自己项目里敲这个命令就会跑到错的目录上去。
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "缺少 $1。$2"
+}
+
+# --- 参数预处理 -------------------------------------------------------------
+
+FORCE_REBUILD=0
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild) FORCE_REBUILD=1 ;;          # 自己消化掉，不传给界面
+    *) ARGS+=("$arg") ;;
+  esac
+done
+
+# --help 只是打印文字，没必要为它 build 一遍后端
+for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$arg" in
+    -h|--help)
+      need bun "装一个: curl -fsSL https://bun.sh/install | bash"
+      exec bun "$TUI/src/main.tsx" "${ARGS[@]}"
+      ;;
+  esac
+done
+
+need java "需要 JDK 17 或更高版本。"
+need bun  "装一个: curl -fsSL https://bun.sh/install | bash"
+
+# --- 1. 后端 jar ------------------------------------------------------------
+
+# 有任何一个源文件比 jar 新就重新 build。用 find -newer 而不是记时间戳文件，
+# 免得再多一个需要自己维护的状态。
+jar_is_stale() {
+  [ ! -f "$JAR" ] && return 0
+  [ -n "$(find "$ROOT/src/main" "$ROOT/pom.xml" -newer "$JAR" -print -quit 2>/dev/null)" ]
+}
+
+if [ "$FORCE_REBUILD" = 1 ] || jar_is_stale; then
+  need mvn "需要 Maven。也可以自己跑 mvn -DskipTests package 后再用 MYAGENT_JAR 指定 jar。"
+  if [ ! -f "$JAR" ]; then
+    echo "› 第一次运行，正在 build 后端…" >&2
+  else
+    echo "› 后端有改动，正在 build…" >&2
+  fi
+  # 跳过测试：这是启动路径，不是 CI。要跑测试用 mvn test。
+  mvn -q -f "$ROOT/pom.xml" -DskipTests package >&2 || die "后端 build 失败，上面有原因。"
+fi
+
+# --- 2. 前端依赖 ------------------------------------------------------------
+
+# 用一个安装完成标记来判断新鲜度，而不是直接比 node_modules 目录的时间：
+# bun install 自己会重写 bun.lock，于是 lock 永远比 node_modules 新，
+# 那样判断的结果是每次启动都重装一遍。标记在安装成功之后才落，就没这个问题。
+STAMP="$TUI/node_modules/.myagent-deps-stamp"
+if [ ! -f "$STAMP" ] \
+   || [ "$TUI/bun.lock" -nt "$STAMP" ] \
+   || [ "$TUI/package.json" -nt "$STAMP" ]; then
+  echo "› 正在装界面依赖…" >&2
+  (cd "$TUI" && bun install --silent) >&2 || die "bun install 失败。"
+  touch "$STAMP"
+fi
+
+# --- 3. 起界面 --------------------------------------------------------------
+
+# exec 把进程替换掉，这样 Ctrl-C 和退出码都直达界面，中间不隔一层 shell
+exec bun "$TUI/src/main.tsx" "${ARGS[@]+"${ARGS[@]}"}"

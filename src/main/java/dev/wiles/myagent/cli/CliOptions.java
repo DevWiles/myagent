@@ -18,6 +18,8 @@ import java.nio.file.Path;
  * @param initialPrompt 一次性执行的提示词；非空时跑完就退出，不进交互
  * @param help          打印用法
  * @param version       打印版本
+ * @param serve         无头模式：不画界面，起一个只听本机的 WebSocket，由外部界面驱动
+ * @param port          无头模式监听的端口。0 表示让系统随便挑一个（推荐，端口号会打在 stdout）
  */
 public record CliOptions(
         Path workspace,
@@ -31,6 +33,8 @@ public record CliOptions(
         boolean fullscreen,
         String initialPrompt,
         boolean help,
-        boolean version
+        boolean version,
+        boolean serve,
+        int port
 ) {
 }

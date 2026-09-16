@@ -103,4 +103,29 @@ class CliTest {
             assertTrue(usage.contains(flag), "帮助里漏了 " + flag);
         }
     }
+
+    @Test
+    @DisplayName("默认不进无头模式，--serve 才开")
+    void serveOffByDefault() {
+        assertFalse(Cli.parse(new String[]{}).serve());
+        assertTrue(Cli.parse(new String[]{"--serve"}).serve());
+    }
+
+    @Test
+    @DisplayName("无头模式默认端口 0——让系统分配，同时开两个界面不该打架")
+    void portDefaultsToEphemeral() {
+        assertEquals(0, Cli.parse(new String[]{"--serve"}).port());
+        assertEquals(8123, Cli.parse(new String[]{"--serve", "--port", "8123"}).port());
+    }
+
+    @Test
+    @DisplayName("端口不是数字或超范围，要当场报错而不是悄悄用默认值")
+    void rejectsBadPort() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--port", "abc"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--port", "70000"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--port"}));
+    }
 }

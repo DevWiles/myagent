@@ -1,0 +1,25 @@
+{
+  "name": "myagent-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "myagent 的终端界面：React + Ink，通过 WebSocket 驱动 Java 后端",
+  "bin": {
+    "myagent-tui": "./src/main.tsx"
+  },
+  "scripts": {
+    "dev": "bun run src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/node": "^22.20.3",
+    "@types/react": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}
