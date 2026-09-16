@@ -23,6 +23,30 @@ export function tildify(path: string): string {
 }
 
 /**
+ * 截断到 max 列，**保留开头**并在尾巴加省略号。
+ *
+ * 和 truncateStart 相反，用在「前面是重点」的文字上：动作名、原因说明。
+ * format.ts 里那个同名函数是按字符数算的，在有中文时会短一截，所以另写一个。
+ */
+export function truncateEnd(text: string, max: number): string {
+  if (max <= 0) return ""
+  if (width(text) <= max) return text
+  if (max <= 1) return "…"
+
+  const budget = max - 1
+  const chars = Array.from(text)
+  let used = 0
+  let i = 0
+  while (i < chars.length) {
+    const w = width(chars[i]!)
+    if (used + w > budget) break
+    used += w
+    i++
+  }
+  return chars.slice(0, i).join("") + "…"
+}
+
+/**
  * 截断到 max 列，**保留尾部**并在头上加省略号。
  *
  * 为什么保留尾部：路径越靠后信息量越大。

@@ -9,13 +9,16 @@
  * 事件规约逻辑两版共用，这里只管画。
  */
 
-import { useTerminalDimensions } from "@opentui/solid"
+import type { KeyEvent } from "@opentui/core"
+import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, For, Show } from "solid-js"
 import type { BackendOptions } from "../../../src/backend.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
+import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { EntryView } from "./EntryView.tsx"
+import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PromptInput } from "./PromptInput.tsx"
 import { StatusLine } from "./StatusLine.tsx"
 import { Welcome } from "./Welcome.tsx"
@@ -40,6 +43,33 @@ export function App(props: AppProps) {
   })
 
   const workspace = () => tildify(state().ready?.workspace ?? props.options.workspace)
+
+  /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
+  const pending = () => state().approval !== null || state().planConfirm !== null
+
+  // 确认框的按键在**这里**接，而不是在对话框组件里。
+  // 因为矮终端下那个框可能整个不渲染，而后端正卡着等回答——
+  // 按键要是跟着组件消失，会话就永久挂死了。这条纪律从 Ink 版继承。
+  useKeyboard((key: KeyEvent) => {
+    const approval = state().approval
+    if (approval) {
+      if (key.name === "y") return session.approve(approval.id, "yes")
+      if (key.name === "n" || key.name === "escape") return session.approve(approval.id, "no")
+      if (key.name === "a") return session.approve(approval.id, "always")
+      return
+    }
+
+    // 计划确认同一套道理。刻意没有 [a]——每份计划都不一样，不给一次性授权
+    const confirm = state().planConfirm
+    if (confirm) {
+      if (key.name === "y" || key.name === "return") return session.confirmPlan(confirm.id, true)
+      if (key.name === "n" || key.name === "escape") return session.confirmPlan(confirm.id, false)
+      return
+    }
+
+    // 没有确认框时，Esc 中断当前这一轮
+    if (key.name === "escape" && state().busy) session.cancel()
+  })
 
   return (
     <ThemeProvider value={dark}>
@@ -71,11 +101,35 @@ export function App(props: AppProps) {
           </box>
         </Show>
 
+        {/* 确认框。审批和计划确认永不同时出现（一个在执行中、一个在执行前），
+            但还是显式分优先级，免得协议将来变了两个一起来时叠在一起 */}
+        {/* flexShrink={0} 不能省：对话区是 flexGrow={1}，它会把所有可伸缩的兄弟
+            压扁。压扁的表现不是滚动条，而是**整行整行地消失**——
+            实测过一次，确认框只剩标题和「原因」，动作行和按钮行被吃掉了，
+            用户根本不知道能按什么键，而后端还卡在那儿等。 */}
+        <Show when={state().approval}>
+          {(approval) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <ApprovalDialog approval={approval()} columns={dimensions().width - 2} />
+            </box>
+          )}
+        </Show>
+        <Show when={!state().approval && state().planConfirm}>
+          <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+            <PlanConfirmDialog />
+          </box>
+        </Show>
+
         <PromptInput
           placeholder={
-            state().busy ? "正在跑…（Ctrl-C 中断）" : "交代一件事，比如「把 README 里的启动命令补全」"
+            pending()
+              ? "上面等你回答…"
+              : state().busy
+                ? "正在跑…（Esc 中断）"
+                : "交代一件事，比如「把 README 里的启动命令补全」"
           }
           busy={state().busy}
+          suspended={pending()}
           onSubmit={(value) => {
             if (state().busy) return
             // /plan 开头走规划模式，但后端没宣告 plan 能力时退回普通对话

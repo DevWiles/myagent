@@ -77,6 +77,9 @@ export function createSession(options: BackendOptions): Session {
       backend?.send({ t: "plan", goal })
     },
     approve(id, decision) {
+      // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，
+      // 这期间框不收掉，用户会对着一个已经答过的框发呆
+      store.clearApproval()
       backend?.send({ t: "approval_reply", id, decision })
     },
     confirmPlan(id, approved) {
