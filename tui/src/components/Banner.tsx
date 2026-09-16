@@ -14,8 +14,12 @@ import { LOGO_LINES, LOGO_MIN_WIDTH } from '../format.ts'
 import type { ReadyInfo } from '../store.ts'
 import { useTheme } from '../theme.ts'
 
-/** 招牌固定占的行数：边框 2 + logo 6 + 空 1 + 信息 2 + 空 1 + 提示 1 = 13 */
-export const BANNER_HEIGHT = 13
+/**
+ * 招牌固定占的行数：logo 6 + 信息 1 + 路径 1 + 提示 1 + 下横线 1 = 10。
+ *
+ * 必须是常数：App 拿它算视口高度，缩放时招牌忽高忽低会把下面的内容顶来顶去。
+ */
+export const BANNER_HEIGHT = 10
 
 type Props = {
   ready: ReadyInfo
@@ -25,17 +29,18 @@ type Props = {
 export function Banner({ ready, columns }: Props) {
   const theme = useTheme()
   const showLogo = columns >= LOGO_MIN_WIDTH
-  // 内容区宽度 = 总宽 - 左右边框 2 - 左右 padding 2
-  const inner = Math.max(10, columns - 4)
 
   return (
+    // 简约风：只有一根下横线收口，和输入框呼应，不用方框把界面切碎
     <Box
       flexDirection="column"
       width={columns}
       height={BANNER_HEIGHT}
-      borderStyle="round"
-      borderColor={theme.brand}
-      paddingX={1}
+      borderStyle="single"
+      borderColor={theme.inactive}
+      borderTop={false}
+      borderLeft={false}
+      borderRight={false}
       flexShrink={0}
     >
       {showLogo ? (
@@ -49,14 +54,13 @@ export function Banner({ ready, columns }: Props) {
           <Text color={theme.brand} bold>
             myagent
           </Text>
-          {/* 窄屏也占满 logo 的 6 行，保证招牌高度恒定 */}
+          {/* 窄屏也占满 logo 的 6 行，保证招牌高度恒定、缩放时下方内容不跳 */}
           {[1, 2, 3, 4, 5].map(i => (
             <Text key={i}> </Text>
           ))}
         </>
       )}
 
-      <Text> </Text>
       <Text color={theme.subtle} wrap="truncate">
         v{ready.version} · {ready.model} · {ready.tools.length} 个工具
         {ready.planMode ? ' · 只读模式' : ''}
@@ -65,9 +69,8 @@ export function Banner({ ready, columns }: Props) {
       <Text color={theme.inactive} wrap="truncate-start">
         {ready.workspace}
       </Text>
-      <Text> </Text>
       <Text color={theme.inactive} wrap="truncate">
-        {inner >= 60
+        {columns >= 64
           ? 'Enter 发送 · Esc 中断 · 点工具行或 Ctrl-O 展开 · /help 查看命令'
           : 'Enter 发送 · /help'}
       </Text>

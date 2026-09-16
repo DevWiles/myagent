@@ -63,6 +63,23 @@ export function App({ store, backend, mouseEmitter }: Props) {
   // 内容折行）跟着重算。直接读 process.stdout 是一次性快照，resize 后布局就错位了。
   const { columns, rows } = useWindowSize()
 
+  // resize 后必须自己清一次屏，否则会看到两个界面叠在一起。
+  //
+  // 原因：Ink 的增量渲染只重画「它认为变了的那些格子」。终端变窄/变矮时，
+  // 新画面占的区域比旧画面小，旧画面超出新边界的那部分（比如原来更宽的招牌
+  // 右半截、原来更靠下的行）不在 Ink 的重画范围内，就留在备用屏幕上不走了。
+  // 主屏模式下终端自己会滚掉这些残渣，备用屏幕没有滚动、谁都不管，只能我们清。
+  //
+  // 跳过首次：进备用屏幕时 main.tsx 已经清过一次，这里再清会白闪一下。
+  const firstLayout = useRef(true)
+  useEffect(() => {
+    if (firstLayout.current) {
+      firstLayout.current = false
+      return
+    }
+    process.stdout.write('\x1b[2J\x1b[H')
+  }, [columns, rows])
+
   useEffect(() => {
     const offEvent = backend.onEvent(event => store.apply(event))
     const offClose = backend.onClose(reason => {

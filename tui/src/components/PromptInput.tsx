@@ -107,21 +107,34 @@ export function PromptInput({ busy, isActive, columns, placeholder, onSubmit }: 
   const borderColor = busy ? theme.promptBorderBusy : theme.promptBorder
   const showPlaceholder = text.length === 0
 
+  // 简约风：只有上下两根横线，没有左右竖边。
+  // 用 borderStyle + borderLeft/Right={false} 而不是自己打一串 '─'，
+  // 是为了让宽度由 Yoga 算——自己打字符在 resize 时容易差一格。
   return (
-    <Box borderStyle="round" borderColor={borderColor} paddingX={1} width={columns}>
-      <Text color={busy ? theme.promptBorderBusy : theme.brand}>{'› '}</Text>
-      {showPlaceholder ? (
-        <>
-          <Cursor char=" " active={isActive} />
-          <Text color={theme.inactive}>{placeholder}</Text>
-        </>
-      ) : (
-        <Text color={theme.text}>
-          {text.slice(0, cursor)}
-          <Cursor char={text[cursor] ?? ' '} active={isActive} />
-          {text.slice(cursor + 1)}
-        </Text>
-      )}
+    <Box
+      flexDirection="column"
+      width={columns}
+      borderStyle="single"
+      borderColor={borderColor}
+      borderLeft={false}
+      borderRight={false}
+      flexShrink={0}
+    >
+      <Box>
+        <Text color={busy ? theme.promptBorderBusy : theme.brand}>{'› '}</Text>
+        {showPlaceholder ? (
+          <>
+            <Cursor char=" " active={isActive} />
+            <Text color={theme.inactive}>{placeholder}</Text>
+          </>
+        ) : (
+          <Text color={theme.text} wrap="truncate-start">
+            {text.slice(0, cursor)}
+            <Cursor char={text[cursor] ?? ' '} active={isActive} />
+            {text.slice(cursor + 1)}
+          </Text>
+        )}
+      </Box>
     </Box>
   )
 }
