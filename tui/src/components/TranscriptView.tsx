@@ -34,14 +34,6 @@ type Props = {
   header?: React.ReactNode
   handleRef?: Ref<TranscriptHandle>
   /**
-   * 上报对话内容（不含 header）的真实行数。
-   * App 用它决定「历史是否已铺满屏幕」，从而让固定在顶部的招牌让位。
-   * 之所以要排除 header：招牌显示与否会改变可用高度，若把它算进来，
-   * 「显示招牌 → 高度变小 → 判定溢出 → 隐藏招牌 → 高度变大 → 判定不溢出」
-   * 会来回抖。只看内容本身，这个量和招牌是否显示无关。
-   */
-  onEntriesHeight?: (rows: number) => void
-  /**
    * 变一次就重新测量一遍布局。resize 后 Yoga 的折行结果全变了，
    * 必须重测，否则 hitTest 用的还是旧行坐标（点击会点偏）。
    * 用 prop 而不是给本组件换 key：换 key 会让父组件持有的 ref 失效。
@@ -59,7 +51,6 @@ export function TranscriptView({
   columns,
   header,
   handleRef,
-  onEntriesHeight,
   repaintToken,
 }: Props) {
   const theme = useTheme()
@@ -68,8 +59,6 @@ export function TranscriptView({
   /** key → 该工具组的 wrapper 元素，用于 measureElement。 */
   const rowRefs = useRef(new Map<string, DOMElement>())
   const hitMap = useRef<HitSpan[]>([])
-  /** 上次上报给父组件的内容行数。只有真的变了才通知，避免无谓的 setState。 */
-  const lastReported = useRef(-1)
 
   const [offset, setOffset] = useState(0)
   const [contentHeight, setContentHeight] = useState(0)
@@ -105,14 +94,6 @@ export function TranscriptView({
       y += h
     }
     hitMap.current = spans
-
-    // 判等后再上报：父组件拿它做 setState，每帧无条件调用会把上面说的
-    // 自激循环坐实。数值没变就什么都不做。
-    const entriesHeight = y - headerH
-    if (entriesHeight !== lastReported.current) {
-      lastReported.current = entriesHeight
-      onEntriesHeight?.(entriesHeight)
-    }
   })
 
   const maxOffset = Math.max(0, contentHeight - height)

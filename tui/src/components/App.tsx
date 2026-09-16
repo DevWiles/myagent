@@ -23,7 +23,7 @@ import type { ApprovalDecision } from '../protocol.ts'
 import type { SessionStore } from '../store.ts'
 import { useTheme } from '../theme.ts'
 import { ApprovalDialog } from './ApprovalDialog.tsx'
-import { BANNER_HEIGHT, Banner } from './Banner.tsx'
+import { Banner } from './Banner.tsx'
 import { PromptInput } from './PromptInput.tsx'
 import { Spinner } from './Spinner.tsx'
 import { StatusLine } from './StatusLine.tsx'
@@ -53,12 +53,6 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const { exit } = useApp()
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const transcript = useRef<TranscriptHandle>(null)
-  /** 对话内容（不含招牌）的真实行数，由 TranscriptView 量好上报。 */
-  const [entriesRows, setEntriesRows] = useState(0)
-  /** 招牌是否还占着顶部。见下面的滞回判定。 */
-  const bannerVisible = useRef(true)
-  /** 对话视口的第一行在屏幕上的行号（招牌占了多少行）。鼠标命中测试要减掉它。 */
-  const viewportTopRef = useRef(0)
 
   // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
   // 窗口一变大变小就重渲染，整个布局（宽度撑满的 banner/输入框、视口高度、
@@ -109,22 +103,15 @@ export function App({ store, backend, mouseEmitter }: Props) {
 
   // 鼠标事件（已由 main.tsx 从 stdin 过滤出来）：滚轮滚动、点击工具行展开。
   //
-  // 坐标换算：SGR 报的是 1-based 的**整屏**行号，而 hitTest 要的是**视口内**
-  // 行号。招牌画在视口外、占着屏幕最上面若干行，所以必须把它的高度减掉。
-  // 少减这一项的后果很具体：招牌一出现（点全屏、屏幕够高时）点击就整体偏移
-  // BANNER_HEIGHT 行，表现成「小窗能点开，全屏就点不动」。
-  //
-  // 用 ref 读偏移量而不是写进依赖数组：这个 effect 只该在挂载时注册一次监听，
-  // 把布局量塞进依赖会让它随每次尺寸变化反复解绑重绑。
   useEffect(() => {
     const onMouse = (events: MouseEvent[]) => {
       for (const ev of events) {
         if (ev.type === 'wheel') {
           transcript.current?.scrollBy(ev.direction === 'up' ? 3 : -3)
         } else {
-          const viewportRow = ev.row - 1 - viewportTopRef.current
-          if (viewportRow < 0) continue // 点在招牌上，不是对话内容
-          const key = transcript.current?.hitTest(viewportRow)
+          // SGR 是 1-based，视口从屏幕第 0 行开始，所以减 1 即视口内行号。
+          // 招牌在滚动内容里，它的高度已由 hitMap 算进内容坐标。
+          const key = transcript.current?.hitTest(ev.row - 1)
           if (key) store.toggleEntry(key)
         }
       }
@@ -222,38 +209,26 @@ export function App({ store, backend, mouseEmitter }: Props) {
   /** 招牌 + 对话可用的总高度。 */
   const availRows = Math.max(3, rows - bottomRows)
 
-  // 招牌固定在顶部，直到对话内容多到铺满屏幕才让位给它。
+  // 招牌是**滚动内容的第一项**，不是固定头部。
   //
-  // 用 ref 存这个开关、在 render 里直接算，而不是 useState：它是从「内容行数」
-  // 推出来的派生值，用 state 就得在 render 阶段 setState（React 不喜欢）或多跑
-  // 一轮渲染。entriesRows 本身是 state，它一变就会重渲染，所以 ref 够了。
+  // 曾经把它做成视口外的固定头部、内容变长就整体隐藏——结果是「往上滚也滚不回
+  // 招牌」，它压根不在滚动轨道上。放回内容里，行为就自然了：对话短时它在最上面
+  // 看得见，对话变长被顶出视口，往上滚又能滚回来（和终端里翻历史一个直觉）。
   //
-  // 两个阈值（滞回）而不是一个：只用一个阈值时，内容正好卡在边界上会
-  // 「隐藏→空间变大→该显示→空间变小→该隐藏」每帧翻转，屏幕会疯狂闪。
-  // 隐藏后要等内容明显缩回去（留 2 行余量）才重新显示。
-  const roomWithBanner = availRows - BANNER_HEIGHT
-  if (bannerVisible.current && entriesRows > roomWithBanner) bannerVisible.current = false
-  else if (!bannerVisible.current && entriesRows <= roomWithBanner - 2) bannerVisible.current = true
-
-  // 终端太矮就不给招牌留位置了，对话优先
-  const showBanner =
-    state.ready !== null && bannerVisible.current && rows >= BANNER_HEIGHT + 6
-  const viewportRows = Math.max(3, availRows - (showBanner ? BANNER_HEIGHT : 0))
-  // 招牌在视口之上，视口顶行号 = 招牌高度（不显示时为 0）
-  viewportTopRef.current = showBanner ? BANNER_HEIGHT : 0
+  // 这样 viewportRows 就是整个可用高度，命中测试也不用再减招牌偏移——
+  // 招牌的高度已经算在滚动内容坐标里，由 TranscriptView 的 hitMap 统一处理。
+  const viewportRows = availRows
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      {showBanner && state.ready && <Banner ready={state.ready} columns={columns} />}
-
       <TranscriptView
         entries={state.entries}
         expanded={state.expanded}
         height={viewportRows}
         columns={columns}
         handleRef={transcript}
-        onEntriesHeight={setEntriesRows}
         repaintToken={epoch}
+        header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
       />
 
       {spinnerRows > 0 && <Spinner step={state.step} startedAt={state.startedAt} />}
