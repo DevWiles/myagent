@@ -1,6 +1,7 @@
 package dev.wiles.myagent;
 
 import dev.wiles.myagent.agent.Agent;
+import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.cli.Ansi;
@@ -20,6 +21,12 @@ import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
+import dev.wiles.myagent.plan.AgentTaskRunner;
+import dev.wiles.myagent.plan.Plan;
+import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanResult;
+import dev.wiles.myagent.plan.Planner;
+import dev.wiles.myagent.cli.PlanView;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
@@ -46,7 +53,7 @@ public final class Repl {
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/clear", "/tools", "/history", "/expand", "/quiet",
+            List.of("/help", "/plan", "/clear", "/tools", "/history", "/expand", "/quiet",
                     "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
@@ -60,6 +67,12 @@ public final class Repl {
     private final TerminalMode terminal = new TerminalMode();
     private final LineReader reader;
     private final Agent agent;
+    /** 规划器。没配 key 时和 agent 一样是 null。 */
+    private final Planner planner;
+    /** 审计轨迹，整个会话一份。 */
+    private final AuditLog audit = AuditLog.forNewRun();
+    /** 当前正在执行的任务 id；不在计划模式下是 null。工具调用靠它归到某个任务名下。 */
+    private String currentTaskId;
 
     /** 攒够一行再渲染：Markdown 的行内标记要整行到齐才能判断闭合。 */
     private final StringBuilder pendingLine = new StringBuilder();
@@ -151,13 +164,19 @@ public final class Repl {
                 .onScroll(fullscreen == null ? null : fullscreen::scroll)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
-        this.tools = options.planMode()
+        this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace)
-                : BuiltinTools.createDefault(workspace, new TerminalApproval(reader));
+                : BuiltinTools.createDefault(workspace,
+                        audit.audited(new TerminalApproval(reader)));
 
         this.agent = config.hasApiKey()
                 ? new Agent(newClient(), tools, SystemPrompt.forWorkspace(workspace.root()))
                         .onEvent(this::render)
+                : null;
+        // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），
+        // 共用一个客户端的话，取消一个会把另一个也掐了
+        this.planner = config.hasApiKey()
+                ? new Planner(newClient()).readOnly(options.readOnly())
                 : null;
     }
 
@@ -189,6 +208,7 @@ public final class Repl {
             }
             System.out.print(Ansi.mouseOff());            // 把文本选择还给终端
             terminal.restore();                          // 无论如何都要把终端还回去
+            audit.close();
         }
     }
 
@@ -309,6 +329,11 @@ public final class Repl {
             if (isExitCommand(line)) {
                 break;
             }
+            if (line.equals("/plan") || line.startsWith("/plan ")) {
+                runPlan(line.substring("/plan".length()).trim());
+                emit("");
+                continue;
+            }
             if (handleSlashCommand(line)) {
                 continue;
             }
@@ -380,6 +405,7 @@ public final class Repl {
             status.start("执行 " + t.tool() + "…");
 
         } else if (event instanceof AgentEvent.ToolFinished t) {
+            audit.toolCall(currentTaskId, t.tool(), pendingToolArgs, t.ok(), t.output());
             if (pendingToolName != null) {
                 lastRunTools.add(new ToolRecord(pendingToolName, pendingToolArgs,
                         t.output(), t.ok()));
@@ -696,6 +722,7 @@ public final class Repl {
             }
             case "/help" -> {
                 emit("""
+                          /plan 目标  先规划后执行：拆成任务依赖图，确认后逐个跑
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
@@ -719,10 +746,121 @@ public final class Repl {
         }
     }
 
+    /**
+     * 先规划后执行。
+     *
+     * <p>三幕：规划 → 让用户过目并确认 → 逐个任务跑。
+     * 中间那一幕是整个特性的价值所在——模型理解错了、拆得不合理，
+     * 在这儿毙掉只花一次规划的钱；放它跑完再发现，代价是十倍。
+     */
+    private void runPlan(String goal) {
+        if (agent == null) {
+            emit(noKeyMessage());
+            return;
+        }
+        if (goal.isEmpty()) {
+            emit(Ansi.dim("用法: /plan <要做的事>   例如  /plan 给 Task 加上重试能力"));
+            return;
+        }
+
+        Plan plan;
+        status.start("规划中…");
+        try {
+            plan = planner.plan(goal);
+        } catch (RuntimeException e) {
+            status.stop();
+            emit(Ansi.red("规划失败: ") + e.getMessage());
+            return;
+        } finally {
+            status.stop();
+        }
+
+        audit.planCreated(plan);
+        PlanView.plan(plan, width).forEach(this::emit);
+        emit("");
+        if (!confirmPlan()) {
+            plan.cancel();
+            audit.note("plan_rejected", "goal", plan.goal());
+            emit(Ansi.dim("已放弃这份计划。"));
+            return;
+        }
+        executePlan(plan);
+    }
+
+    /** 让用户拍板。看不懂的计划不该跑，跑错的代价比多问一句大得多。 */
+    private boolean confirmPlan() {
+        try {
+            String answer = reader.readLine("执行这份计划? [Y/n] ", InputFrame.none());
+            if (answer == null) {                       // Ctrl-D
+                return false;
+            }
+            String normalized = answer.trim().toLowerCase();
+            return !normalized.equals("n") && !normalized.equals("no") && !normalized.equals("否");
+        } catch (LineReader.Interrupted e) {            // Ctrl-C
+            return false;
+        }
+    }
+
+    private void executePlan(Plan plan) {
+        markdown.reset();
+        runStartedAt = System.nanoTime();
+        runSteps = 0;
+        runToolCalls = 0;
+
+        // 执行体的事件直接喂给现有的渲染器：工具调用、流式文本都照老样子显示，
+        // 只是外面多包了一层「现在在跑哪个任务」
+        AgentTaskRunner runner = new AgentTaskRunner(newClient(), tools, workspace.root())
+                .withPlanner(planner)
+                .onEvent((task, event) -> render(event));
+
+        PlanExecutor executor = new PlanExecutor(runner)
+                .onTaskStarted(task -> {
+                    currentTaskId = task.id();
+                    audit.taskStarted(task);
+                    status.stop();
+                    emit("");
+                    emit(PlanView.taskStarted(task));
+                    status.start("执行中…");
+                })
+                .onTasksAdded((parent, added) -> emit(Ansi.dim("  ↳ 拆出 " + added.size()
+                        + " 个子任务: " + added.stream().map(t -> t.id())
+                        .collect(java.util.stream.Collectors.joining(", ")))))
+                .onTaskFinished(task -> {
+                    audit.taskFinished(task);
+                    status.stop();
+                    flushText();
+                    collapseToolGroup();
+                    emit(PlanView.taskFinished(task));
+                });
+
+        PlanResult result;
+        if (!rawMode) {
+            result = executor.execute(plan);
+        } else {
+            // Ctrl-C 要同时叫停三处：调度器不再开新任务、执行体掐断正在跑的子循环、
+            // 规划器掐断可能正在进行的子规划请求。漏掉任何一处，按下去都像没反应
+            try (InterruptWatcher watcher = new InterruptWatcher(System.in, () -> {
+                executor.cancel();
+                runner.cancel();
+                planner.cancel();
+            })) {
+                watcher.start();
+                result = executor.execute(plan);
+            }
+        }
+
+        currentTaskId = null;
+        audit.planFinished(plan, result);
+        status.stop();
+        flushText();
+        flushQuietBuffer();
+        PlanView.summary(plan, result).forEach(this::emit);
+    }
+
     private void printBanner() {
         Banner.render(Cli.VERSION, config.model(), workspace.root(),
                         tools.all().stream().map(Tool::name).toList(),
-                        options.planMode(), agent != null, width)
+                        options.readOnly(), agent != null, width)
                 .lines().forEach(this::emit);
     }
 

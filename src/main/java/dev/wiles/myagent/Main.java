@@ -4,6 +4,10 @@ import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.server.AgentServer;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 /** 程序入口：解析参数，然后交给 Repl（自带界面）或 AgentServer（外部界面）。 */
 public final class Main {
 
@@ -25,10 +29,30 @@ public final class Main {
             return;
         }
         if (options.serve()) {
-            serve(options);
+            serve(options);      // 无头模式的日志继续走 stderr，由外部界面自己收
             return;
         }
+        redirectLogsToFile();
         new Repl(options).run();
+    }
+
+    /**
+     * 交互模式下把 slf4j 的输出从 stderr 挪到文件。
+     *
+     * <p>不挪的话，任何一条 info 日志都会直接打进终端界面——全屏模式下更是直接把画面搅乱。
+     * 必须在<b>第一次拿 Logger 之前</b>设置，slf4j-simple 是在首次初始化时读这个属性的，
+     * 之后再改没用。所以这件事只能在 main 里、Repl 构造之前做。
+     */
+    private static void redirectLogsToFile() {
+        try {
+            Path dir = Path.of(System.getProperty("user.home"), ".myagent", "logs");
+            Files.createDirectories(dir);
+            System.setProperty("org.slf4j.simpleLogger.logFile",
+                    dir.resolve("myagent.log").toString());
+        } catch (IOException | RuntimeException e) {
+            // 建不了目录就还走 stderr。日志去向不值得为它挡住启动
+            System.err.println("警告: 日志文件建不了，继续输出到终端: " + e.getMessage());
+        }
     }
 
     /** 无头模式。前台挂住，收到 SIGINT/SIGTERM 时把服务停干净。 */

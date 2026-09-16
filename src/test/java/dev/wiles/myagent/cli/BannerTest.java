@@ -40,9 +40,9 @@ class BannerTest {
         assertTrue(lines.get(lines.size() - 1).startsWith("╚"));
     }
 
-    private static String render(int width, boolean planMode, boolean hasKey, List<String> tools) {
+    private static String render(int width, boolean readOnly, boolean hasKey, List<String> tools) {
         return Banner.render("0.2.0", "deepseek-chat", Path.of("/tmp/demo"),
-                tools, planMode, hasKey, width);
+                tools, readOnly, hasKey, width);
     }
 
     @Test

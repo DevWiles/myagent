@@ -20,7 +20,7 @@ public final class Cli {
     public static CliOptions parse(String[] args) {
         Path workspace = Path.of("");
         String model = null;
-        boolean planMode = false;
+        boolean readOnly = false;
         boolean unsafe = "1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"));
         boolean color = true;
         boolean spinner = true;
@@ -38,7 +38,9 @@ public final class Cli {
             switch (arg) {
                 case "-h", "--help" -> help = true;
                 case "-v", "--version" -> version = true;
-                case "-p", "--plan" -> planMode = true;
+                // -p/--plan 是老名字，留着不打断肌肉记忆；帮助里只写 --readonly，
+                // 免得和「先规划后执行」的 /plan 命令混淆
+                case "-r", "--readonly", "-p", "--plan" -> readOnly = true;
                 case "--unsafe" -> unsafe = true;
                 case "--no-color" -> color = false;
                 case "--no-spinner" -> spinner = false;
@@ -66,7 +68,7 @@ public final class Cli {
                 }
             }
         }
-        return new CliOptions(workspace, model, planMode, unsafe, color, spinner, mouse,
+        return new CliOptions(workspace, model, readOnly, unsafe, color, spinner, mouse,
                 clearScreen, fullscreen,
                 rest.isEmpty() ? null : String.join(" ", rest), help, version, serve, port);
     }
@@ -101,7 +103,7 @@ public final class Cli {
                 选项:
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
-                  -p, --plan           只读模式，只给它查看类工具，不能改文件和执行命令
+                  -r, --readonly       只读模式，只给它查看类工具，不能改文件和执行命令
                       --unsafe         跳过工作区安全检查（危险）
                       --no-color       关闭彩色输出
                       --no-spinner     关闭转圈状态行（排查终端渲染问题用）
