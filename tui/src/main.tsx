@@ -8,12 +8,9 @@
 
 import { render } from 'ink'
 import { createElement } from 'react'
-import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
-import { PassThrough } from 'node:stream'
 import { startBackend, type Backend } from './backend.ts'
 import { App } from './components/App.tsx'
-import { extractMouseEvents, type MouseEvent } from './mouse.ts'
 import { SessionStore } from './store.ts'
 import { transcriptToText } from './format.ts'
 import { THEMES, ThemeProvider, pickTheme } from './theme.ts'
@@ -122,14 +119,21 @@ async function main(): Promise<void> {
 
   const theme = THEMES[pickTheme(args.theme)]
 
-  // 全屏（备用屏幕）+ 鼠标追踪，全部手动发——不用 Ink 的选项，那套有环境检测
-  // 会在真实终端里静默失效。手动发和 Java 版 FullScreenUi 一样确定。
+  // 全屏（备用屏幕）。手动发控制序列，不用 Ink 的选项——那套有环境检测，
+  // 在真实终端里会静默失效。
   //   1049h  切备用屏幕（退出 1049l 把主屏原样还回来）
   //   2J H   清屏 + 光标归左上，从 (0,0) 画
-  //   1000h+1006h  鼠标追踪（点击/滚轮，SGR 格式）——点击展开、滚轮滚动的前提
-  //                代价：终端原生滚轮/选中被接管，选中改按 option 拖拽走原生
-  const ENTER = '\x1b[?1049h\x1b[2J\x1b[H\x1b[?1000h\x1b[?1006h'
-  const EXIT = '\x1b[?1006l\x1b[?1000l\x1b[?1049l'
+  //   1007h  Alternate Scroll：备用屏幕里鼠标滚轮变成方向键上下
+  //
+  // **刻意不开鼠标追踪（1000/1006）**。一开它，终端就把鼠标事件全交给程序，
+  // 原生的拖拽选中随之失效。我们试过自己重做一套选中（选区状态机 + 反色覆盖层
+  // + 剪贴板三条通路），在社区 ink 上做不到可用的程度：没有格子级屏幕缓冲，
+  // 取字只能从数据侧重建、和屏幕内容对不齐。
+  //
+  // 取舍很明确：把鼠标整个让给终端，换回可靠的原生选中和复制；折叠详情改用
+  // 键盘 Ctrl-O。1007 不依赖鼠标追踪，所以滚轮照样能滚。
+  const ENTER = '\x1b[?1049h\x1b[2J\x1b[H\x1b[?1007h'
+  const EXIT = '\x1b[?1007l\x1b[?1049l'
   process.stdout.write(ENTER)
 
   let restored = false
@@ -144,39 +148,10 @@ async function main(): Promise<void> {
     process.exit(0)
   })
 
-  // 在数据进 ink 之前把鼠标序列挑走，否则 ink 会把 `\x1b[<0;5;10m` 当成一串
-  // 垃圾按键塞进输入框。做法：给 ink 传一个过滤后的 stdin——真实 stdin 的每块
-  // 数据先过 extractMouseEvents，鼠标事件走 mouseEmitter 给 App，剩下的正常
-  // 按键 write 进 PassThrough 交给 ink。PassThrough 不是 TTY，得把 ink 需要的
-  // 几个 TTY 方法代理到真实 stdin。
-  const mouseEmitter = new EventEmitter()
-  const inkStdin = new PassThrough() as PassThrough & {
-    isTTY: boolean
-    setRawMode: (mode: boolean) => void
-    ref: () => void
-    unref: () => void
-  }
-  inkStdin.isTTY = true
-  inkStdin.setRawMode = (mode: boolean) => {
-    process.stdin.setRawMode?.(mode)
-  }
-  inkStdin.ref = () => {}
-  inkStdin.unref = () => {}
-
-  process.stdin.setRawMode?.(true)
-  process.stdin.resume()
-  const onStdin = (chunk: Buffer | string) => {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-    const { events, rest } = extractMouseEvents(text)
-    if (events.length > 0) mouseEmitter.emit('mouse', events as MouseEvent[])
-    if (rest) inkStdin.write(rest)
-  }
-  process.stdin.on('data', onStdin)
 
   const instance = render(
-    createElement(ThemeProvider, { value: theme }, createElement(App, { store, backend, mouseEmitter })),
+    createElement(ThemeProvider, { value: theme }, createElement(App, { store, backend })),
     {
-      stdin: inkStdin as unknown as NodeJS.ReadStream,
       // Ctrl-C 自己处理：正在跑的时候它应该是「中断这一轮」而不是「退出程序」
       exitOnCtrlC: false,
     },

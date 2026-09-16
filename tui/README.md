@@ -119,22 +119,17 @@ src/
 负 marginTop 平移」自己做滚动，高度用 `measureElement` 每帧量。因为消息都活着，
 任何一条工具调用——包括很早以前的——都能点开或 Ctrl-O 展开。
 
-**2. 鼠标点击展开 + 自研文本选中：自己接管鼠标。**
-社区 ink 完全没有鼠标支持，所以我们自己开鼠标追踪（`1000h+1006h`）、自己从 stdin
-解析 SGR 序列（`mouse.ts`）、自己做命中测试。关键是**在数据进 ink 之前**把鼠标
-序列过滤掉（`main.tsx` 给 ink 传一个过滤后的 PassThrough stdin），否则 ink 会把
-`\x1b[<…m` 当垃圾按键塞进输入框。命中测试（`TranscriptView.hitTest`）把点击行号
-配合滚动偏移映射回是哪个工具组。开了鼠标追踪，终端原生的滚轮和拖拽选中就都没了，所以两样都得自己补回来：
-滚轮转成滚动；选中由 `selection.ts`（选区状态机 + 取字）+ 反色覆盖层 +
-`clipboard.ts`（pbcopy / tmux load-buffer / OSC 52 三条降级通路）实现，
-松手即写系统剪贴板。这和那份泄露版 Claude Code 的做法是同一条路
-（它的 `selection.ts` 918 行 + `useCopyOnSelect`），区别是它的渲染器自带格子级
-屏幕缓冲、能 `setCellStyleId` 逐格换背景，我们只能按行内列区间叠反色覆盖层。
+**2. 不接管鼠标：滚轮能滚，原生选中和复制全部保留。**
+进备用屏幕时只开 Alternate Scroll（`DECSET 1007`）——它把滚轮变成方向键，
+所以滚轮能滚 transcript；而我们**不开鼠标追踪（1000/1006）**，鼠标整个留给终端，
+拖拽选中、Cmd-C 复制都照常。折叠详情用键盘 `Ctrl-O`。
 
-取字这里踩过两个坑，都写进代码注释了：用 `renderToString` 拿屏幕文本走不通 ——
-在 render 里调是「渲染中触发嵌套渲染」React 直接退出，在 effect 里调则会另建一套
-Yoga 布局树、和运行中的 Ink 实例抢同一个 WASM 实例，崩在 `Out of bounds
-call_indirect`。最后改成从数据重建文本、按 `measureElement` 量到的真实行高对齐。
+这里走过一段弯路，值得留个记录：为了「鼠标点击折叠行展开」我们开过鼠标追踪，
+代价是原生选中失效；随后照那份泄露版 Claude Code 的路子自研了一套选中
+（选区状态机 + 反色覆盖层 + pbcopy/tmux/OSC 52 三条剪贴板通路），
+但在社区 ink 上做不到可用的程度——它没有格子级屏幕缓冲（Claude Code 自研的
+渲染器能 `setCellStyleId` 逐格换背景），取字只能从数据侧重建、和屏幕对不齐。
+最后按「鼠标让给终端、交互用键盘」收束：少一个点击手势，换回可靠的选中复制。
 
 **3. 退出把对话打回主屏 scrollback。**
 全屏内容随备用屏幕消失，退出时 `main.tsx` 用 `transcriptToText` 把对话摘要打回

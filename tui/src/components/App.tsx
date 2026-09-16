@@ -1,35 +1,19 @@
 /**
- * 全屏布局 + 鼠标。从上到下：
+ * 全屏布局。从上到下：
  *
  *   TranscriptView   自绘滚动的对话记录（占满剩余高度，所有消息都活着、可点）
  *   Spinner / 确认框  正在跑 / 需要确认时出现
  *   PromptInput      输入框（3 行）
  *   StatusLine       状态栏（1 行）
  *
- * 鼠标：我们自己开了鼠标追踪（main.tsx），这里从 raw stdin 里解析 SGR 事件。
- *   点击工具组折叠行 → 展开/收起那一条
- *   滚轮            → 滚动 transcript
- * 代价：终端原生滚轮和拖拽选中被接管，选中改按 option 拖拽走终端原生。
- *
- * 键盘同样能滚：↑/↓ 一行、PgUp/PgDn 一屏、Home/End 顶/底。输入历史走 Ctrl-P/N。
+ * 不接管鼠标：滚轮由终端的 Alternate Scroll 转成方向键（见 main.tsx），
+ * 拖拽选中、复制全部交回终端原生。折叠详情用 Ctrl-O。
+ * 滚动：↑/↓ 一行、PgUp/PgDn 一屏、Home/End 顶/底。输入历史走 Ctrl-P/N。
  */
 
 import { Box, Text, useApp, useInput, useWindowSize } from 'ink'
-import type { EventEmitter } from 'node:events'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Backend } from '../backend.ts'
-import { writeClipboard } from '../clipboard.ts'
-import type { MouseEvent } from '../mouse.ts'
-import {
-  EMPTY_SELECTION,
-  clearSelection,
-  endSelection,
-  extendSelection,
-  hasSelection,
-  selectedText,
-  startSelection,
-  type SelectionState,
-} from '../selection.ts'
 import type { ApprovalDecision } from '../protocol.ts'
 import type { SessionStore } from '../store.ts'
 import { useTheme } from '../theme.ts'
@@ -47,8 +31,8 @@ const HELP = [
   '/exit     退出',
   '',
   'Enter 发送 · Esc 中断当前这轮',
-  '展开过程详情：鼠标点工具行，或 Ctrl-O 整体展开/收起',
-  '选中复制：直接拖拽选文本，松手自动进剪贴板 · Esc 清除选区',
+  'Ctrl-O 展开/收起工具调用详情',
+  '选中复制：直接拖拽选文本（终端原生），Cmd-C 复制',
   '滚动：滚轮 / ↑↓ / PgUp PgDn / Home End',
   'Ctrl-P/Ctrl-N 翻输入历史 · Ctrl-W 删词 · Ctrl-U 删到行首 · Ctrl-C 退出',
 ].join('\n')
@@ -56,19 +40,13 @@ const HELP = [
 type Props = {
   store: SessionStore
   backend: Backend
-  /** main.tsx 过滤 stdin 后把鼠标事件从这里发过来。 */
-  mouseEmitter: EventEmitter
 }
 
-export function App({ store, backend, mouseEmitter }: Props) {
+export function App({ store, backend }: Props) {
   const theme = useTheme()
   const { exit } = useApp()
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const transcript = useRef<TranscriptHandle>(null)
-  /** 文本选区。自研的——开了鼠标追踪后终端原生拖选就没了，只能自己做。 */
-  const [selection, setSelection] = useState<SelectionState>(EMPTY_SELECTION)
-  /** 复制成功后短暂提示，让用户知道「选中的已经进剪贴板了」。 */
-  const [copied, setCopied] = useState<string | null>(null)
 
   // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
   // 窗口一变大变小就重渲染，整个布局（宽度撑满的 banner/输入框、视口高度、
@@ -117,65 +95,6 @@ export function App({ store, backend, mouseEmitter }: Props) {
     }
   }, [backend, store, exit])
 
-  // 鼠标事件（已由 main.tsx 从 stdin 过滤出来）：滚轮滚动、点击工具行展开。
-  //
-  useEffect(() => {
-    const onMouse = (events: MouseEvent[]) => {
-      for (const ev of events) {
-        if (ev.type === 'wheel') {
-          transcript.current?.scrollBy(ev.direction === 'up' ? 3 : -3)
-          continue
-        }
-        // SGR 是 1-based；视口从屏幕第 0 行开始，所以减 1 即视口内行号。
-        // 招牌在滚动内容里，它的高度已由 hitMap 算进内容坐标。
-        const viewRow = ev.row - 1
-        const viewCol = ev.col - 1
-
-        if (ev.type === 'down') {
-          // 按下先清掉旧高亮并记锚点。此时还不知道用户是想点击还是想拖选，
-          // 等松手时用「有没有移动过」来区分。
-          const at = transcript.current?.pointAt(viewCol, viewRow)
-          if (at) setSelection(startSelection(at))
-          continue
-        }
-        if (ev.type === 'drag') {
-          const at = transcript.current?.pointAt(viewCol, viewRow)
-          if (at) setSelection(cur => extendSelection(cur, at))
-          continue
-        }
-        // up：拖过了 → 当作选中并复制；没拖 → 当作点击去展开折叠行
-        setSelection(cur => {
-          const done = endSelection(cur)
-          if (hasSelection(done)) {
-            const lines = transcript.current?.getLines() ?? []
-            const text = selectedText(done, lines)
-            if (text) {
-              void writeClipboard(text).then(via => {
-                if (via) setCopied(`已复制 ${text.length} 字`)
-              })
-            }
-            return done
-          }
-          // 没有拖动 = 单击
-          const key = transcript.current?.hitTest(viewRow)
-          if (key) store.toggleEntry(key)
-          return clearSelection()
-        })
-      }
-    }
-    mouseEmitter.on('mouse', onMouse)
-    return () => {
-      mouseEmitter.off('mouse', onMouse)
-    }
-  }, [mouseEmitter, store])
-
-  // 「已复制」提示自动消失。依赖 copied 本身：每次新的复制都重开一个定时器。
-  useEffect(() => {
-    if (copied === null) return
-    const timer = setTimeout(() => setCopied(null), 1500)
-    return () => clearTimeout(timer)
-  }, [copied])
-
   const inputActive = state.approval === null && state.closed === null
 
   useInput((input, key) => {
@@ -186,16 +105,9 @@ export function App({ store, backend, mouseEmitter }: Props) {
     if (key.home) return transcript.current?.scrollToTop()
     if (key.end) return transcript.current?.scrollToBottom()
 
-    if (key.escape) {
-      // 有选区时 Esc 先清选区：用户刚选完想取消高亮，不该顺手把 agent 中断了
-      if (hasSelection(selection)) {
-        setSelection(clearSelection())
-        return
-      }
-      if (state.busy && state.approval === null) {
-        backend.send({ t: 'cancel' })
-        store.notice('warn', '已请求中断')
-      }
+    if (key.escape && state.busy && state.approval === null) {
+      backend.send({ t: 'cancel' })
+      store.notice('warn', '已请求中断')
       return
     }
     if (key.ctrl && input === 'o') {
@@ -289,7 +201,6 @@ export function App({ store, backend, mouseEmitter }: Props) {
         columns={columns}
         handleRef={transcript}
         repaintToken={epoch}
-        selection={selection}
         header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
       />
 
@@ -308,10 +219,7 @@ export function App({ store, backend, mouseEmitter }: Props) {
         placeholder={state.busy ? '正在处理…（Esc 中断）' : '说点什么，或 /help'}
         onSubmit={handleSubmit}
       />
-      <Box>
-        <StatusLine state={state} columns={columns} />
-        {copied && <Text color={theme.success}>{'  ✓ ' + copied}</Text>}
-      </Box>
+      <StatusLine state={state} columns={columns} />
     </Box>
   )
 }
