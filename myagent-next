@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#
+# 和 ./myagent-tui 一模一样的启动流程，只是起的是 OpenTUI + SolidJS 版界面（tui/next）。
+#
+# 迁移期两个脚本并存，用同一个后端 jar，可以随时对比两套界面的表现。
+# 等迁移完成，删掉这个脚本，让 ./myagent-tui 指向 tui/next 即可。
+#
+# 用法:
+#   ./myagent-next                 在当前目录起界面
+#   ./myagent-next -d ~/proj       指定工作区
+#   ./myagent-next --rebuild       强制重新 build 后端
+#   ./myagent-next --help          用法（不会触发 build）
+#
+set -euo pipefail
+
+# 从软链接调用也要能找到仓库，所以逐级解开
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+JAR="$ROOT/target/myagent.jar"
+TUI="$ROOT/tui/next"
+
+# 用户敲命令时所在的目录，就是 agent 要干活的工作区。必须在 cd 之前存下来。
+#
+# 为什么这版**必须** cd（和 ./myagent-tui 不同）：
+# Solid 的 JSX 靠 tui/next/bunfig.toml 里的 preload 插件转换，
+# 而 bun 是**按 cwd 找 bunfig.toml** 的。在仓库根目录跑 `bun tui/next/src/main.tsx`，
+# 那份 bunfig 根本不会被加载，JSX 不转换，界面起来就是一片空白然后立刻退出——
+# 没有任何报错，非常难查。
+# 所以这里换个办法保住工作区语义：先存下 cwd，cd 进界面目录，再用 -d 把它传回去。
+WORKSPACE="$PWD"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "缺少 $1。$2"
+}
+
+# --- 参数预处理 -------------------------------------------------------------
+
+FORCE_REBUILD=0
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild) FORCE_REBUILD=1 ;;          # 自己消化掉，不传给界面
+    *) ARGS+=("$arg") ;;
+  esac
+done
+
+# --help 只是打印文字，没必要为它 build 一遍后端
+for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$arg" in
+    -h|--help)
+      need bun "装一个: curl -fsSL https://bun.sh/install | bash"
+      cd "$TUI" && exec bun src/main.tsx "${ARGS[@]}"
+      ;;
+  esac
+done
+
+need java "需要 JDK 17 或更高版本。"
+need bun  "装一个: curl -fsSL https://bun.sh/install | bash"
+
+# --- 1. 后端 jar ------------------------------------------------------------
+
+# 有任何一个源文件比 jar 新就重新 build。用 find -newer 而不是记时间戳文件，
+# 免得再多一个需要自己维护的状态。
+jar_is_stale() {
+  [ ! -f "$JAR" ] && return 0
+  [ -n "$(find "$ROOT/src/main" "$ROOT/pom.xml" -newer "$JAR" -print -quit 2>/dev/null)" ]
+}
+
+if [ "$FORCE_REBUILD" = 1 ] || jar_is_stale; then
+  need mvn "需要 Maven。也可以自己跑 mvn -DskipTests package 后再用 MYAGENT_JAR 指定 jar。"
+  if [ ! -f "$JAR" ]; then
+    echo "› 第一次运行，正在 build 后端…" >&2
+  else
+    echo "› 后端有改动，正在 build…" >&2
+  fi
+  # 跳过测试：这是启动路径，不是 CI。要跑测试用 mvn test。
+  mvn -q -f "$ROOT/pom.xml" -DskipTests package >&2 || die "后端 build 失败，上面有原因。"
+fi
+
+# --- 2. 前端依赖 ------------------------------------------------------------
+
+# 用一个安装完成标记来判断新鲜度，而不是直接比 node_modules 目录的时间：
+# bun install 自己会重写 bun.lock，于是 lock 永远比 node_modules 新，
+# 那样判断的结果是每次启动都重装一遍。标记在安装成功之后才落，就没这个问题。
+STAMP="$TUI/node_modules/.myagent-deps-stamp"
+if [ ! -f "$STAMP" ] \
+   || [ "$TUI/bun.lock" -nt "$STAMP" ] \
+   || [ "$TUI/package.json" -nt "$STAMP" ]; then
+  echo "› 正在装界面依赖…" >&2
+  (cd "$TUI" && bun install --silent) >&2 || die "bun install 失败。"
+  touch "$STAMP"
+fi
+
+# --- 3. 起界面 --------------------------------------------------------------
+
+# 用户没自己指定工作区的话，把进 cd 之前存下的 cwd 传回去
+has_dir=0
+for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$arg" in
+    -d|--dir) has_dir=1 ;;
+  esac
+done
+[ "$has_dir" = 0 ] && ARGS+=(-d "$WORKSPACE")
+
+# cd 进界面目录是为了让 bunfig.toml 生效（原因见文件开头那段注释）
+cd "$TUI"
+
+# exec 把进程替换掉，这样 Ctrl-C 和退出码都直达界面，中间不隔一层 shell
+exec bun src/main.tsx "${ARGS[@]+"${ARGS[@]}"}"
