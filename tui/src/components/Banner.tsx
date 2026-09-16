@@ -17,9 +17,11 @@ import { useTheme } from '../theme.ts'
 /**
  * 招牌固定占的行数：logo 6 + 信息 1 + 路径 1 + 提示 1 + 下横线 1 = 10。
  *
- * 必须是常数：App 拿它算视口高度，缩放时招牌忽高忽低会把下面的内容顶来顶去。
+ * 必须是常数：招牌是滚动内容的第一项，缩放时它忽高忽低会让下面的对话跳。
+ * （以前这里 export 出去给 App 算视口高度用，现在视口高度由 Yoga 算，
+ *   没人再需要这个数，所以不 export。）
  */
-export const BANNER_HEIGHT = 10
+const BANNER_HEIGHT = 10
 
 type Props = {
   ready: ReadyInfo
@@ -71,7 +73,7 @@ export function Banner({ ready, columns }: Props) {
       </Text>
       <Text color={theme.inactive} wrap="truncate">
         {columns >= 64
-          ? 'Enter 发送 · Ctrl-O 展开详情 · 拖拽选中复制 · /help 查看命令'
+          ? 'Enter 发送 · Ctrl-O 展开详情 · 滚轮/↑↓ 滚动 · /help 查看命令'
           : 'Enter 发送 · /help'}
       </Text>
     </Box>

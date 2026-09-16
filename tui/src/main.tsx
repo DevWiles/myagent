@@ -6,12 +6,13 @@
  * 模型调用、工具执行、上下文管理全在 Java 后端里——它才是这个项目的本体。
  */
 
-import { render } from 'ink'
+import { render, type Instance } from 'ink'
 import { createElement } from 'react'
 import { resolve } from 'node:path'
 import { startBackend, type Backend } from './backend.ts'
 import { App } from './components/App.tsx'
 import { SessionStore } from './store.ts'
+import { installTeardown, markAltScreen, resolveFullscreen } from './terminal.ts'
 import { THEMES, ThemeProvider, pickTheme } from './theme.ts'
 
 const USAGE = `myagent-tui —— myagent 的终端界面（React + Ink）
@@ -26,7 +27,13 @@ const USAGE = `myagent-tui —— myagent 的终端界面（React + Ink）
       --unsafe         跳过工作区安全检查（危险）
       --theme <名称>   dark | light | ansi（默认按终端能力自动选）
       --jar <路径>     指定后端 jar（默认 ../target/myagent.jar，也可用 MYAGENT_JAR）
+      --no-fullscreen  不独占终端（对话留在终端 scrollback 里，可用 Cmd-F 搜）
+      --fullscreen     强制独占终端（默认就是，一般用不到）
   -h, --help           显示本帮助
+
+独占终端默认开启：运行时占满整屏、输入框钉在最后一行，退出后主屏原样恢复
+（你启动前的命令历史都还在，但和 agent 的这段对话不留在 scrollback 里）。
+也可以用环境变量 MYAGENT_FULLSCREEN=0 关掉。
 
 界面自己不跑 agent：它会拉起 \`java -jar myagent.jar --serve\`，
 通过本机 WebSocket 驱动它。后端逻辑一行都没有改。`
@@ -39,6 +46,8 @@ type Args = {
   theme?: string
   jar?: string
   help: boolean
+  /** undefined = 命令行没写，交给 resolveFullscreen 的后续规则。 */
+  fullscreen?: boolean
 }
 
 function parseArgs(argv: string[]): Args {
@@ -61,6 +70,13 @@ function parseArgs(argv: string[]): Args {
         break
       case '--unsafe':
         args.unsafe = true
+        break
+      // 后写的赢：`--fullscreen --no-fullscreen` 以最后那个为准
+      case '--fullscreen':
+        args.fullscreen = true
+        break
+      case '--no-fullscreen':
+        args.fullscreen = false
         break
       case '-d':
       case '--dir':
@@ -118,97 +134,75 @@ async function main(): Promise<void> {
 
   const theme = THEMES[pickTheme(args.theme)]
 
-  // 独占终端：进备用屏幕（alternate screen）。
-  //
-  // 这才是终端 agent 的形态（Claude Code 亦然）：运行时占满整屏，退出时主屏
-  // **原样恢复** —— 所以退出后你能看到启动前的命令历史（`% ./myagent-tui` 那行
-  // 还在），但和 agent 的对话不留在 scrollback 里，随备用屏一起消失。
-  //
-  //   1049h  切备用屏（退出一条 1049l 把主屏还回来）
-  //   2J H   清屏 + 光标归左上，从 (0,0) 开画
-  //
-  // 刻意不开鼠标追踪：那会夺走终端原生的拖拽选中。滚动/选中/复制全交给终端。
-  //
-  // **重要**：Terminal.app 的「允许应用程序使用备用屏幕」若没勾选，1049 会被
-  // 直接忽略，程序就退化成在主屏往下打印（表现为「没有独占」）。所以下面用
-  // DECRQM 查询终端是否真的接受了，没接受就明确告知用户怎么开，而不是静默失败。
-  const ENTER_ALT = '\x1b[?1049h\x1b[2J\x1b[H'
-  const EXIT_ALT = '\x1b[?1049l'
-
-  process.stdout.write(ENTER_ALT)
-  const altOk = await probeAltScreen()
-  if (!altOk) {
-    process.stdout.write(EXIT_ALT)
-    console.error(
-      '\n无法独占终端：你的终端忽略了备用屏幕（alternate screen）。\n' +
-        'macOS Terminal.app 请开启：\n' +
-        '  设置 → 描述文件 → 选中当前描述文件 → 高级 →\n' +
-        '  勾选「允许应用程序使用备用屏幕缓冲区」，然后**新开一个窗口**。\n' +
-        '（iTerm2 / Ghostty 默认已开启。tmux 需要 set -g alternate-screen on）\n',
-    )
-    process.exit(3)
-  }
-
-  let restored = false
-  const restore = () => {
-    if (restored) return
-    restored = true
-    process.stdout.write(EXIT_ALT)
-  }
-  process.on('exit', restore)
-  process.on('SIGTERM', () => {
-    restore()
-    process.exit(0)
+  const { fullscreen } = resolveFullscreen({
+    flag: args.fullscreen,
+    env: process.env,
+    isTTY: true, // 上面已经挡掉非 TTY 了
   })
 
-  const instance = render(
-    createElement(ThemeProvider, { value: theme }, createElement(App, { store, backend })),
+  await runTui({ store, backend, theme, fullscreen })
+}
+
+export type RunTuiOptions = {
+  store: SessionStore
+  backend: Backend
+  theme: (typeof THEMES)[keyof typeof THEMES]
+  fullscreen: boolean
+}
+
+/**
+ * 装恢复钩子 → 起 Ink → 等退出。
+ *
+ * 单独导出是为了让 PTY 验收测试能驱动**同一条**渲染/退出路径，而不用真去起
+ * 一个 java 后端、连 WebSocket、调真模型 —— 那样的测试既慢又不可复现。
+ * 测试传一个 stub backend 进来就行（`Backend` 就 4 个方法）。
+ */
+export async function runTui({ store, backend, theme, fullscreen }: RunTuiOptions): Promise<void> {
+  // 恢复钩子要在 render **之前**装：render 一旦返回屏幕就已经切走了，
+  // 这之间抛异常的话得有人把终端还回来。
+  let instance: Instance | null = null
+  installTeardown({ getInstance: () => instance })
+
+  // 独占终端交给 Ink 自己：`alternateScreen: true` 会在第 0 字节发 `1049h`、
+  // 配 `?25l` 藏光标，卸载时先 `?25h` 再 `1049l`，挂起/恢复也跟着进出备用屏。
+  // 手写这套转义反而更容易错——原来那版就压根没还光标。
+  //
+  // 顺带纠正一条曾经写在这里的错话：并没有「Terminal.app 要勾选允许备用屏」
+  // 这个开关（`defaults read com.apple.Terminal` 里只有颜色/字体/bell 之类）。
+  // 备用屏在 Terminal.app 里本来就无条件可用，vim 就是这么跑的。原来那段 DECRQM
+  // 探测是在测一个不存在的问题，代价是白等 300ms 并且吞掉用户开头敲的按键。
+  //
+  // `interactive: true` 是必需的：Ink 的 alternateScreen 要求 interactive，
+  // 而它的自动判定在 CI 有值时为假——实测 `CI=1` 时 `1049h` 计数为 0，加上这个
+  // 才为 1。真正该关的情形已经由 resolveFullscreen 挡掉了，所以这里强制打开
+  // 不会和「该不该全屏」的判断打架。
+  //
+  // **不开 `incrementalRendering`**：它走的 `createIncremental` 会逐行跳过
+  // 「和上一帧相同」的行。省字节，但接管鼠标那一期要靠「拦下完整帧」做选区，
+  // 增量重绘会让那条路直接走不通。闪烁本来已经由同步输出（`?2026`）兜住了。
+  instance = render(
+    createElement(
+      ThemeProvider,
+      { value: theme },
+      createElement(App, { store, backend, fullscreen }),
+    ),
     {
       // Ctrl-C 自己处理：正在跑的时候它应该是「中断这一轮」而不是「退出程序」
       exitOnCtrlC: false,
+      alternateScreen: fullscreen,
+      ...(fullscreen ? { interactive: true as const } : {}),
     },
   )
+  markAltScreen(fullscreen)
+
+  // 终端模式（Alternate Scroll 等）由 App 的 effect 开关，不在这里 ——
+  // React 的 cleanup 跑在 Ink 还主屏之前，那才是「先关模式、再还主屏」的正确接缝。
 
   try {
     await instance.waitUntilExit()
   } finally {
     backend.dispose()
   }
-}
-
-/**
- * 问终端：1049（备用屏）现在是什么状态？
- *
- * DECRQM：发 `ESC [ ? 1049 $ p`，终端回 `ESC [ ? 1049 ; <v> $ y`。
- *   v=1 已开启（我们刚发的 1049h 生效了）  v=2 未开启（被忽略）
- *   v=0 不支持这个模式
- * 不回应的终端也存在（不支持 DECRQM），那按「支持」处理——不能因为查不到
- * 就把能用的终端也挡掉。
- */
-function probeAltScreen(): Promise<boolean> {
-  return new Promise(resolve => {
-    if (!process.stdin.isTTY) return resolve(true)
-    let buf = ''
-    let settled = false
-    const finish = (ok: boolean) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      process.stdin.off('data', onData)
-      process.stdin.setRawMode?.(false)
-      resolve(ok)
-    }
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString('binary')
-      const m = /\x1b\[\?1049;(\d+)\$y/.exec(buf)
-      if (m) finish(m[1] === '1' || m[1] === '3')
-    }
-    process.stdin.setRawMode?.(true)
-    process.stdin.on('data', onData)
-    process.stdout.write('\x1b[?1049$p')
-    // 没回应 = 终端不支持状态查询，按能用处理
-    const timer = setTimeout(() => finish(true), 300)
-  })
 }
 
 /**
@@ -232,7 +226,15 @@ function primeReady(backend: Backend, store: SessionStore): Promise<void> {
   })
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+// 只有「被当成命令直接跑」的时候才执行 main()。
+//
+// 少了这个判断，任何 `import` 这个文件的人都会顺带把整个程序跑起来 ——
+// PTY 验收测试 import `runTui` 时就踩到了：它同时起了第二个 App（两个实例往同一个
+// stdout 画），还顺手 spawn 了一个真的 java 后端。表现是「--no-fullscreen 却发了
+// Alternate Scroll」，查了半天才定位到这里。
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}

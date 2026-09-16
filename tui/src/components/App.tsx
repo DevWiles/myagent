@@ -1,24 +1,47 @@
 /**
  * 全屏布局。从上到下：
  *
- *   TranscriptView   自绘滚动的对话记录（占满剩余高度，所有消息都活着、可点）
+ *   TranscriptView   自绘滚动的对话记录（吃掉所有剩余高度）
+ *   ─ 底部固定区 ─
  *   Spinner / 确认框  正在跑 / 需要确认时出现
- *   PromptInput      输入框（3 行）
- *   StatusLine       状态栏（1 行）
+ *   PromptInput      输入框
+ *   StatusLine       状态栏
  *
- * 不接管鼠标：滚轮由终端的 Alternate Scroll 转成方向键（见 main.tsx），
+ * ## 输入框是怎么钉在最后一行的
+ *
+ * 靠 Yoga，不靠算术。transcript 拿 `flexGrow={1} flexBasis={0}`，底部每一块都
+ * `flexShrink={0}` 且**高度写死**，于是「剩下多少给 transcript」是 Yoga 算的，
+ * 输入框的行号只由「底部放了哪几块」决定，和对话内容、滚动位置、折行全都无关。
+ *
+ * 以前这里是一串手算（`rows - spinnerRows - approvalRows - ... - 3 - 1`），
+ * 六七个漂移源：状态栏没 ready 时不渲染却照样记 1 行、spinner 和确认框按钮窄屏
+ * 折行、关闭原因太长折行……算多了就被 Yoga 悄悄从别人身上挤回来（实测 COLS=20
+ * 时输入框被挤成 4 行还多一个空行），算少了底部就空一行。
+ *
+ * `planBottomStack` 现在只干一件事：终端太矮时按固定顺序决定砍掉谁。它算出的
+ * `height` 只用于给 transcript 一个首帧 seed —— **算错也不会让输入框漂**。
+ *
+ * ## 根节点的 height 不能丢
+ *
+ * `height={layoutRows}` 是挡住闪屏的东西：Ink 的 `Output` 高度取的是根节点的
+ * computed height，一旦根节点没有显式高度，帧高就变成内容高，超过视口时
+ * `shouldClearTerminalForFrame` 会**每帧全清**（实测：去掉高度后帧 31 行、
+ * clearTerminal 出现；钉住高度则 10 行、不出现）。
+ *
+ * 不接管鼠标（这一期）：滚轮由终端的 Alternate Scroll 转成方向键（见 terminal.ts），
  * 拖拽选中、复制全部交回终端原生。折叠详情用 Ctrl-O。
- * 滚动：↑/↓ 一行、PgUp/PgDn 一屏、Home/End 顶/底。输入历史走 Ctrl-P/N。
  */
 
-import { Box, Text, useApp, useInput, useWindowSize } from 'ink'
+import { Box, useApp, useInput, useWindowSize } from 'ink'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Backend } from '../backend.ts'
+import { planBottomStack } from '../layout.ts'
 import type { ApprovalDecision } from '../protocol.ts'
 import type { SessionStore } from '../store.ts'
-import { useTheme } from '../theme.ts'
+import { MODE_ALT_SCROLL, disableModes, enableModes } from '../terminal.ts'
 import { ApprovalDialog } from './ApprovalDialog.tsx'
 import { Banner } from './Banner.tsx'
+import { ClosedLine } from './ClosedLine.tsx'
 import { PromptInput } from './PromptInput.tsx'
 import { Spinner } from './Spinner.tsx'
 import { StatusLine } from './StatusLine.tsx'
@@ -34,44 +57,41 @@ const HELP = [
   'Ctrl-O 展开/收起工具调用详情',
   '选中复制：直接拖拽选文本（终端原生），Cmd-C 复制',
   '滚动：滚轮 / ↑↓ / PgUp PgDn / Home End',
-  'Ctrl-P/Ctrl-N 翻输入历史 · Ctrl-W 删词 · Ctrl-U 删到行首 · Ctrl-C 退出',
+  'Ctrl-P/Ctrl-N 翻输入历史 · Ctrl-W 删词 · Ctrl-U 删到行首',
+  'Ctrl-C 退出（正在跑的时候按一下是中断）· Ctrl-D 空输入时退出',
 ].join('\n')
 
 type Props = {
   store: SessionStore
   backend: Backend
+  /**
+   * 是否独占终端。关掉时按 `rows - 1` 布局：Ink 卸载时若末帧高度 >= 视口会发
+   * `clearTerminal`，那里面含 `ESC[3J`，**会清掉用户真正的 scrollback**
+   * （实测：根高 rows 且不在备用屏 → 3J 出现 1 次；根高 rows-1 → 0 次）。
+   */
+  fullscreen: boolean
 }
 
-export function App({ store, backend }: Props) {
-  const theme = useTheme()
+export function App({ store, backend, fullscreen }: Props) {
   const { exit } = useApp()
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const transcript = useRef<TranscriptHandle>(null)
 
   // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
-  // 窗口一变大变小就重渲染，整个布局（宽度撑满的 banner/输入框、视口高度、
-  // 内容折行）跟着重算。直接读 process.stdout 是一次性快照，resize 后布局就错位了。
+  // 窗口一变大变小就重渲染，整个布局跟着重算。直接读 process.stdout 是一次性快照。
   const { columns, rows } = useWindowSize()
 
-  // resize 后：光标归位 + 触发一次重测量，用「全量覆写」清掉残影。
+  const layoutRows = fullscreen ? rows : Math.max(8, rows - 1)
+
+  // resize 后触发一次重测量。
   //
-  // 背景：实测 Ink **完全不发擦除序列**（没有 EL `ESC[K`，也没有 ED `ESC[J`），
-  // 它靠「用新字符覆盖旧字符」来更新画面。所以残影的成因是画面没被完整覆写：
-  // 缩放后新帧的起始行位置漂了，旧帧还留在上面，就出现两个界面叠着。
+  // 这里**不写任何控制序列**。以前有一句 `process.stdout.write('\x1b[H')`，
+  // 那是 bug：Ink 的帧是「相对当前光标」增删的（`log-update` 用
+  // `eraseLines(previousLineCount)`），外人插一句挪光标会让它算错要擦几行。
+  // resize 本来就由 Ink 自己处理——它在宽度变化时会 `clearTerminal` + 全量重画。
   //
-  // 这里刻意**不发 `ESC[2J` 清屏**。清屏会擦掉刚画好的那一帧，而 Ink 有 30fps
-  // 节流、且认为「内容没变」时不重画——一旦最后那次重绘被丢掉，屏幕就永久空白
-  // （这正是上一版 resize 后全黑的原因；Ink 的 instance.clear() 同理，它清完还会
-  // sync 帧缓存）。只发光标归位 `ESC[H` 是安全的：它不擦任何东西，最坏情况是
-  // 画面没变，绝不会变空。
-  //
-  // 除残影靠「全量覆写」：根节点 height={rows} + TranscriptView 用空格铺满
-  // 空白区，每一行都会被真实写入，旧字符无处存活。
-  //
-  // 这里**不能**用 key 去 remount 整棵树。之前那样做的后患很实在：
-  // TranscriptView 被换成新实例后，transcript.current 还指向已卸载的旧组件，
-  // hitTest 拿的是过期行坐标 —— 表现就是「放大之后点击折叠行没反应」。
-  // epoch 只用来强制 Ink 重算一帧（作为 prop 往下传，不当 key）。
+  // 也**不能**用 key 去 remount 整棵树：那样 transcript.current 会指向已卸载的
+  // 旧组件，命中测试拿到过期坐标（就是当年「放大之后点折叠行没反应」那个 bug）。
   const [epoch, setEpoch] = useState(0)
   const firstLayout = useRef(true)
   useEffect(() => {
@@ -79,9 +99,24 @@ export function App({ store, backend }: Props) {
       firstLayout.current = false
       return
     }
-    process.stdout.write('\x1b[H')
     setEpoch(e => e + 1)
   }, [columns, rows])
+
+  // 滚轮：Alternate Scroll 让终端把滚轮翻译成方向键，而 ↑/↓ 我们绑到了滚动上。
+  //
+  // 放在 effect 里而不是 main.tsx 里，是为了**退出时的字节顺序**：React 的 cleanup
+  // 跑在 Ink 写 `1049l` **之前**，所以能保证「先关模式、再还主屏」。放在 main.tsx
+  // 就只能靠 process.on('exit') 兜，那已经是 Ink 卸载之后了 —— 实测顺序会变成
+  // `1049l`(4817) 然后才 `1007r`(4837)。这一期是 Alternate Scroll，顺序反了也无害；
+  // 但下一期接管鼠标时，`1002/1006` 留在主屏上会让点击直接吐乱码，所以现在就把
+  // 这个接缝放对。崩溃路径跳过 React cleanup，那条由 terminal.ts 的兜底负责。
+  //
+  // 刻意不开鼠标追踪（1000/1002/1006）：那会夺走终端原生的拖拽选中。
+  useEffect(() => {
+    if (!fullscreen) return
+    enableModes(MODE_ALT_SCROLL)
+    return () => disableModes()
+  }, [fullscreen])
 
   useEffect(() => {
     const offEvent = backend.onEvent(event => store.apply(event))
@@ -97,15 +132,40 @@ export function App({ store, backend }: Props) {
 
   const inputActive = state.approval === null && state.closed === null
 
+  const plan = planBottomStack(layoutRows, {
+    busy: state.busy,
+    hasApproval: state.approval !== null,
+    hasClosed: state.closed !== null,
+  })
+
+  const handleDecision = useMemo(
+    () => (decision: ApprovalDecision) => {
+      if (!state.approval) return
+      backend.send({ t: 'approval_reply', id: state.approval.id, decision })
+    },
+    [backend, state.approval],
+  )
+
   useInput((input, key) => {
+    // 确认框的按键在**这里**接，而不是在 ApprovalDialog 里。
+    // 因为终端矮到放不下那个框时（plan.approval === 'none'）组件根本不渲染，
+    // 而后端此刻正卡在 approve() 上等回答——按键要是跟着组件消失，会话就挂死了。
+    if (state.approval) {
+      const answer = input.toLowerCase()
+      if (answer === 'y') return handleDecision('yes')
+      if (answer === 'n' || key.escape) return handleDecision('no')
+      if (answer === 'a') return handleDecision('always')
+      return
+    }
+
     if (key.upArrow) return transcript.current?.scrollBy(1)
     if (key.downArrow) return transcript.current?.scrollBy(-1)
-    if (key.pageUp) return transcript.current?.scrollBy(Math.max(1, rows - 6))
-    if (key.pageDown) return transcript.current?.scrollBy(-Math.max(1, rows - 6))
+    if (key.pageUp) return transcript.current?.scrollBy(Math.max(1, layoutRows - 6))
+    if (key.pageDown) return transcript.current?.scrollBy(-Math.max(1, layoutRows - 6))
     if (key.home) return transcript.current?.scrollToTop()
     if (key.end) return transcript.current?.scrollToBottom()
 
-    if (key.escape && state.busy && state.approval === null) {
+    if (key.escape && state.busy) {
       backend.send({ t: 'cancel' })
       store.notice('warn', '已请求中断')
       return
@@ -166,60 +226,50 @@ export function App({ store, backend }: Props) {
     [backend, store, exit, state.busy, state.ready],
   )
 
-  const handleDecision = useMemo(
-    () => (decision: ApprovalDecision) => {
-      if (!state.approval) return
-      backend.send({ t: 'approval_reply', id: state.approval.id, decision })
-    },
-    [backend, state.approval],
-  )
-
-  // 底部固定区高度 → 视口高度。确认框：边框2+标题1+空1+动作1+原因1+空1+按键1=8
-  const spinnerRows = state.busy && state.approval === null ? 1 : 0
-  const approvalRows = state.approval ? 8 : 0
-  const closedRows = state.closed ? 1 : 0
-  const bottomRows = spinnerRows + approvalRows + closedRows + 3 /* input */ + 1 /* status */
-  /** 招牌 + 对话可用的总高度。 */
-  const availRows = Math.max(3, rows - bottomRows)
-
   // 招牌是**滚动内容的第一项**，不是固定头部。
   //
   // 曾经把它做成视口外的固定头部、内容变长就整体隐藏——结果是「往上滚也滚不回
   // 招牌」，它压根不在滚动轨道上。放回内容里，行为就自然了：对话短时它在最上面
   // 看得见，对话变长被顶出视口，往上滚又能滚回来（和终端里翻历史一个直觉）。
-  //
-  // 这样 viewportRows 就是整个可用高度，命中测试也不用再减招牌偏移——
-  // 招牌的高度已经算在滚动内容坐标里，由 TranscriptView 的 hitMap 统一处理。
-  const viewportRows = availRows
-
   return (
-    <Box flexDirection="column" width={columns} height={rows}>
+    <Box flexDirection="column" width={columns} height={layoutRows}>
       <TranscriptView
         entries={state.entries}
         expanded={state.expanded}
-        height={viewportRows}
         columns={columns}
         handleRef={transcript}
         repaintToken={epoch}
+        seedHeight={Math.max(1, layoutRows - plan.height)}
         header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
       />
 
-      {spinnerRows > 0 && <Spinner step={state.step} startedAt={state.startedAt} />}
+      <Box flexDirection="column" flexShrink={0}>
+        {plan.spinner && (
+          <Spinner step={state.step} startedAt={state.startedAt} columns={columns} />
+        )}
 
-      {state.approval && (
-        <ApprovalDialog approval={state.approval} columns={columns} onDecide={handleDecision} />
-      )}
+        {plan.approval !== 'none' && state.approval && (
+          <ApprovalDialog
+            approval={state.approval}
+            columns={columns}
+            variant={plan.approval}
+          />
+        )}
 
-      {state.closed && <Text color={theme.error}>✗ {state.closed}</Text>}
+        {plan.closed && state.closed && <ClosedLine reason={state.closed} columns={columns} />}
 
-      <PromptInput
-        busy={state.busy}
-        isActive={inputActive}
-        columns={columns}
-        placeholder={state.busy ? '正在处理…（Esc 中断）' : '说点什么，或 /help'}
-        onSubmit={handleSubmit}
-      />
-      <StatusLine state={state} columns={columns} />
+        <PromptInput
+          busy={state.busy}
+          isActive={inputActive}
+          columns={columns}
+          bare={plan.input === 'bare'}
+          placeholder={state.busy ? '正在处理…（Esc 中断）' : '说点什么，或 /help'}
+          onSubmit={handleSubmit}
+          onRequestExit={exit}
+        />
+
+        {plan.status && <StatusLine state={state} columns={columns} />}
+      </Box>
     </Box>
   )
 }
