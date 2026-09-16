@@ -63,21 +63,31 @@ export function App({ store, backend, mouseEmitter }: Props) {
   // 内容折行）跟着重算。直接读 process.stdout 是一次性快照，resize 后布局就错位了。
   const { columns, rows } = useWindowSize()
 
-  // resize 后必须自己清一次屏，否则会看到两个界面叠在一起。
+  // resize 后：光标归位 + 强制整棵树重挂载，用「全量覆写」清掉残影。
   //
-  // 原因：Ink 的增量渲染只重画「它认为变了的那些格子」。终端变窄/变矮时，
-  // 新画面占的区域比旧画面小，旧画面超出新边界的那部分（比如原来更宽的招牌
-  // 右半截、原来更靠下的行）不在 Ink 的重画范围内，就留在备用屏幕上不走了。
-  // 主屏模式下终端自己会滚掉这些残渣，备用屏幕没有滚动、谁都不管，只能我们清。
+  // 背景：实测 Ink **完全不发擦除序列**（没有 EL `ESC[K`，也没有 ED `ESC[J`），
+  // 它靠「用新字符覆盖旧字符」来更新画面。所以残影的成因是画面没被完整覆写：
+  // 缩放后新帧的起始行位置漂了，旧帧还留在上面，就出现两个界面叠着。
   //
-  // 跳过首次：进备用屏幕时 main.tsx 已经清过一次，这里再清会白闪一下。
+  // 这里刻意**不发 `ESC[2J` 清屏**。清屏会擦掉刚画好的那一帧，而 Ink 有 30fps
+  // 节流、且认为「内容没变」时不重画——一旦最后那次重绘被丢掉，屏幕就永久空白
+  // （这正是上一版 resize 后全黑的原因；Ink 的 instance.clear() 同理，它清完还会
+  // sync 帧缓存）。只发光标归位 `ESC[H` 是安全的：它不擦任何东西，最坏情况是
+  // 画面没变，绝不会变空。
+  //
+  // 真正负责清残影的是 remount：epoch 当 key 让 React 整棵重建，新树没有历史
+  // 可 diff，Ink 必然从第 0 行起全量重写一遍；配合根节点 height={rows} 和
+  // TranscriptView 用空格铺满空白区，每一行都会被真实写入，旧字符无处存活。
+  // 代价：滚动位置回到底部——缩放后这是合理的落点。
+  const [epoch, setEpoch] = useState(0)
   const firstLayout = useRef(true)
   useEffect(() => {
     if (firstLayout.current) {
       firstLayout.current = false
       return
     }
-    process.stdout.write('\x1b[2J\x1b[H')
+    process.stdout.write('\x1b[H')
+    setEpoch(e => e + 1)
   }, [columns, rows])
 
   useEffect(() => {
@@ -217,7 +227,7 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const viewportRows = Math.max(3, availRows - (showBanner ? BANNER_HEIGHT : 0))
 
   return (
-    <Box flexDirection="column" width={columns} height={rows}>
+    <Box key={epoch} flexDirection="column" width={columns} height={rows}>
       {showBanner && state.ready && <Banner ready={state.ready} columns={columns} />}
 
       <TranscriptView

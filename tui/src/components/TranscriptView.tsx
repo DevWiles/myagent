@@ -91,6 +91,10 @@ export function TranscriptView({
   const maxOffset = Math.max(0, contentHeight - height)
   const clamped = Math.min(offset, maxOffset)
   const hiddenAbove = Math.max(0, contentHeight - height - clamped)
+  // 内容不够高时，剩下的行要用空格铺满。
+  // 空的 Box 不产生任何字符，Ink 就什么都不写，那些格子上一帧的字符会留着 ——
+  // 这正是缩放后出现残影的根源之一。铺上空格，画面就自带擦除能力。
+  const blankRows = Math.max(0, height - contentHeight)
 
   useImperativeHandle(handleRef, () => ({
     scrollBy(lines) {
@@ -133,6 +137,10 @@ export function TranscriptView({
           </Box>
         ))}
       </Box>
+      {blankRows > 0 &&
+        Array.from({ length: blankRows }, (_, i) => (
+          <Text key={`blank-${i}`}>{' '.repeat(Math.max(1, columns))}</Text>
+        ))}
       {clamped > 0 && (
         <Box position="absolute" marginTop={height - 1} width={columns} justifyContent="flex-end">
           <Text color={theme.warning}> ↓ 还有新内容 · End 回到底部 </Text>
