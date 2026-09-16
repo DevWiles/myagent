@@ -9,13 +9,7 @@
  * 宁可先全部可见且难看，也不要漏掉某一种让人以为事件丢了。
  */
 
-import {
-  StyledText,
-  TextAttributes,
-  TextRenderable,
-  type Renderable,
-  type RenderNodeContext,
-} from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
@@ -70,104 +64,6 @@ function UserEntry(props: { text: string }) {
   )
 }
 
-/** 无序列表的符号。OpenTUI 硬编码成 ASCII 的 `-`，看起来像没渲染。 */
-const BULLET = "•"
-
-/** 默认渲染出来的列表标记长这样：`"- "`（marker 宽度 1 + 一个空格）。 */
-const HYPHEN_MARKER = /^( *)- $/
-
-/** 已经装过改写钩子的 marker，别重复装。 */
-const PATCHED = Symbol("bullet-patched")
-
-/**
- * 把一次 content 赋值里的 `"- "` 改写成 `"• "`，其余原样放行。
- *
- * 颜色和属性从原 chunk 复制，只换文字；宽度不变（都占 1 列），缩进对齐不受影响。
- */
-function rewriteMarker(value: StyledText | string): StyledText | string {
-  if (typeof value === "string") return value
-  if (value.chunks.length !== 1) return value
-  const chunk = value.chunks[0]!
-  const match = HYPHEN_MARKER.exec(chunk.text)
-  if (!match) return value
-  return new StyledText([{ ...chunk, text: `${match[1]}${BULLET} ` }])
-}
-
-/**
- * 把列表符号从 `-` 换成 `•`。
- *
- * ## 为什么要这么绕
- *
- * OpenTUI 把无序列表的符号写死在 `Markdown.ts` 里（`token.ordered ? \`${n}.\` : "-"`），
- * 没有任何配置项。而渲染出来的 `-` 和原始 markdown 长得一模一样，
- * 看着就像整个列表压根没被解析。
- *
- * 好在不用自己重写列表：`renderNode` 的上下文给了 `defaultRender()`，
- * 能拿到官方排好版的结果（标记宽度、嵌套缩进、多行项的悬挂缩进都算好了）。
- *
- * ## 为什么是装 setter 而不是直接改
- *
- * 直接改**改不住**。实测在一次流式回复里 renderNode 被调 6 次、替换命中 9 次，
- * 屏幕上仍然是 `-`：库在 renderNode 返回之后还有一趟更新，
- * `applyListItemMarker` 看到标记文字不等于它心里的 `"- "` 就会写回去。
- *
- * 所以改成在 marker 实例上接管 `content` 的 setter：之后不管库什么时候、
- * 写多少次 `"- "`，都会被就地改写成 `"• "`。自愈，不用关心它的更新时序。
- *
- * ## 边界
- *
- * - 递归遍历，因为嵌套列表是在默认渲染内部展开的，renderNode 不会为它们再回调
- * - 只认完全匹配 `"- "` 的单 chunk 文本，不会误伤正文——正文走 CodeRenderable，
- *   压根不是 TextRenderable
- * - 有序列表的 `1. ` 不匹配，保持原样
- *
- * 这段代码依赖 OpenTUI 的内部结构（列表行的第一个子节点是 marker、content 是访问器），
- * 升级 OpenTUI 时如果列表符号变了样，第一个该怀疑的就是这里。
- */
-function bulletizeList(node: Renderable | null): Renderable | null {
-  if (!node) return null
-
-  const visit = (renderable: Renderable): void => {
-    if (renderable instanceof TextRenderable && !(PATCHED in renderable)) {
-      const chunk = renderable.chunks.length === 1 ? renderable.chunks[0] : undefined
-      if (chunk && HYPHEN_MARKER.test(chunk.text)) {
-        patchMarkerContent(renderable)
-      }
-    }
-    for (const child of renderable.getChildren()) visit(child)
-  }
-
-  visit(node)
-  return node
-}
-
-/** 在这个 TextRenderable 上接管 content 的 setter，并立刻把当前值改写一遍。 */
-function patchMarkerContent(marker: TextRenderable): void {
-  // content 是定义在原型上的访问器，得沿原型链找到它才能复用原来的读写逻辑
-  let proto: object | null = Object.getPrototypeOf(marker)
-  let descriptor: PropertyDescriptor | undefined
-  while (proto && !descriptor) {
-    descriptor = Object.getOwnPropertyDescriptor(proto, "content")
-    proto = Object.getPrototypeOf(proto)
-  }
-  if (!descriptor?.get || !descriptor.set) return
-
-  const { get, set } = descriptor
-  Object.defineProperty(marker, "content", {
-    configurable: true,
-    get(this: TextRenderable) {
-      return get.call(this)
-    },
-    set(this: TextRenderable, value: StyledText | string) {
-      set.call(this, rewriteMarker(value))
-    },
-  })
-  Object.defineProperty(marker, PATCHED, { value: true })
-
-  // 装完先把当前这一份改掉，别等下一次赋值
-  marker.content = marker.content
-}
-
 /**
  * 模型的回复，按 Markdown 渲染。
  *
@@ -190,16 +86,7 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
           去掉星号，**只是颜色全错**，非常难发现。
           （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
-      <markdown
-        syntaxStyle={syntaxStyleFor(theme)}
-        // token 的完整类型来自 marked（OpenTUI 的传递依赖）。只用到 type 一个字段，
-        // 不值得为它把 marked 提成直接依赖，这里用结构类型接住
-        renderNode={(token: { type: string }, ctx: RenderNodeContext) =>
-          token.type === "list" ? bulletizeList(ctx.defaultRender()) : null
-        }
-        content={props.text}
-        streaming={props.streaming}
-      />
+      <markdown syntaxStyle={syntaxStyleFor(theme)} content={props.text} streaming={props.streaming} />
     </box>
   )
 }
