@@ -223,6 +223,17 @@ export class SessionStore {
     this.set({ planConfirm: null })
   }
 
+  /**
+   * 回答完审批（发送由调用方负责），把框收掉。
+   *
+   * 不收会怎样：`approval` 原本只在 `busy` 转 false 时才清，也就是整轮结束才消失。
+   * 答完 y 之后工具开始跑，这期间框还挂在屏幕上——工具跑得久时（比如一条 bash）
+   * 用户会对着一个已经答过的框发呆，再按一次 y 还会给一个后端早已不等的 id 补发回复。
+   */
+  clearApproval(): void {
+    this.set({ approval: null })
+  }
+
   clearTranscript(): void {
     this.set({ entries: [], expanded: new Set(), step: 0 })
   }

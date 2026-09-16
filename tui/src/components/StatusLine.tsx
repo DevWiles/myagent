@@ -1,66 +1,59 @@
 /**
- * 底部状态栏。
+ * 最底下那行状态栏：模型、工作区、分支、上下文用量。
  *
- * 只放那些「随时想知道、但不值得打断阅读」的东西：模型、上下文占用、上轮耗时。
- * 上下文占用尤其重要——它快满的时候会触发压缩，早期细节就丢了，
- * 用户有权提前看到这件事正在逼近，而不是等压缩发生了才被通知。
+ * 只读、不可交互，存在的意义是**回答「我现在在哪、用的什么、还剩多少上下文」**——
+ * 前两个问题在 agent 改了你的文件之后会变得非常重要，第三个决定你还能聊几轮。
  *
- * **高度恒定 1 行**，而且 `ready` 还没到的时候也照样占那一行（画个空盒子）。
- * 以前这里是 `if (!ready) return null`，而 App 那边无条件给它记了 1 行，
- * 于是后端慢一点、`primeReady` 3 秒超时的时候，整个底部就会往下错一行。
- * 现在输入框的行号在 ready 到达之前就已经是常数了。
+ * 它必须**永远只占一行**。路径是不可控长度，放任它折行会把整个界面顶起来，
+ * 所以这里自己算预算、自己截断，不指望终端帮忙。
  */
 
-import { Box, Text } from 'ink'
-import { STATUS_ROWS } from '../layout.ts'
-import { formatDuration, formatTokens } from '../format.ts'
-import type { SessionState } from '../store.ts'
-import { useTheme } from '../theme.ts'
+import { createMemo } from "solid-js"
+import { formatTokens } from "../format.ts"
+import { truncateStart, width } from "../path.ts"
+import { useTheme } from "../theme.ts"
 
-/** 超过这个占用比例就变黄：提醒用户压缩快来了。 */
-const WARN_RATIO = 0.75
-
-type Props = {
-  state: SessionState
+export type StatusLineProps = {
+  model: string
+  /** 已经 tildify 过的路径 */
+  workspace: string
+  branch?: string
+  /** 终端列数，用来算路径能占多宽 */
   columns: number
+  busy?: boolean
+  tokens?: number
+  contextLimit?: number
 }
 
-export function StatusLine({ state, columns }: Props) {
+const SEPARATOR = "  │  "
+
+export function StatusLine(props: StatusLineProps) {
   const theme = useTheme()
-  const { ready, tokens, contextLimit, lastDurationMs } = state
 
-  const ratio = contextLimit > 0 ? tokens / contextLimit : 0
-  const contextColor = ratio >= WARN_RATIO ? theme.warning : theme.inactive
+  const usage = createMemo(() => {
+    if (!props.contextLimit || !props.tokens) return ""
+    const percent = Math.round((props.tokens / props.contextLimit) * 100)
+    return `  ${formatTokens(props.tokens)} (${percent}%)`
+  })
 
-  // height + overflow:hidden 是硬保证：窄屏下内容再长也只占一行，
-  // 不会折行去挤别人（这正是 COLS=20 时把输入框挤变形的那个 bug）。
+  // 路径能占的列数 = 总宽 - 左右内边距 - 各段固定内容。
+  // 每一项都用 width() 量，不能用 .length：模型名常含中文，一个字占两列。
+  const workspace = createMemo(() => {
+    const model = `[${props.model}]`
+    const branch = props.branch ? ` git:(${props.branch})` : ""
+    const budget =
+      props.columns - 2 - width(model) - width(SEPARATOR) - width(branch) - width(usage()) - 2
+    return truncateStart(props.workspace, budget)
+  })
+
   return (
-    <Box width={columns} height={STATUS_ROWS} flexShrink={0} overflow="hidden" paddingX={1}>
-      {ready && (
-        <>
-          <Text color={theme.inactive} wrap="truncate">
-            {ready.model}
-          </Text>
-          {ready.planMode && (
-            <Text color={theme.warning} wrap="truncate">
-              {' · 只读'}
-            </Text>
-          )}
-          {contextLimit > 0 && (
-            <Text color={contextColor} wrap="truncate">
-              {' · '}
-              {formatTokens(tokens)}/{formatTokens(contextLimit)}
-              {' ctx'}
-            </Text>
-          )}
-          {lastDurationMs !== null && (
-            <Text color={theme.inactive} wrap="truncate">
-              {' · 上轮 '}
-              {formatDuration(lastDurationMs)}
-            </Text>
-          )}
-        </>
-      )}
-    </Box>
+    <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
+      <text fg={props.busy ? theme.spinner : theme.user}>{props.busy ? "● " : ""}</text>
+      <text fg={theme.user}>[{props.model}]</text>
+      <text fg={theme.inactive}>{SEPARATOR}</text>
+      <text fg={theme.subtle}>{workspace()}</text>
+      {props.branch ? <text fg={theme.thought}> git:({props.branch})</text> : null}
+      {usage() ? <text fg={theme.inactive}>{usage()}</text> : null}
+    </box>
   )
 }
