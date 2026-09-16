@@ -11,8 +11,8 @@
  */
 
 import { createSignal, onCleanup, type Accessor } from "solid-js"
-import { startBackend, type Backend, type BackendOptions } from "../../src/backend.ts"
-import { SessionStore, type SessionState } from "../../src/store.ts"
+import { startBackend, type Backend, type BackendOptions } from "./backend.ts"
+import { SessionStore, type SessionState } from "./store.ts"
 
 export type Session = {
   /** 当前快照。Solid 的 signal，读它就会建立依赖。 */

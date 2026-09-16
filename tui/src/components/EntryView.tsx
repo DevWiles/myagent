@@ -1,227 +1,130 @@
 /**
- * 一条消息怎么画。
+ * 对话流里的一条记录。
  *
- * 每种 entry 都有一个固定的行首标记，扫一眼就知道这行是谁说的：
- * `›` 用户 · `✻` 模型 · `·` 模型的内心戏 · `●` 工具 · `⚠`/`✗` 提示。
- * 标记比颜色可靠——颜色会被终端主题吃掉，字符不会。
+ * Entry 的种类由 `tui/src/store.ts` 定义（和 Ink 版共用同一套），
+ * 这里只负责把每一种画成什么样子。
+ *
+ * 这一步先把七种 entry 都画出来但都画得朴素——
+ * 工具调用的展开/折叠、Markdown 渲染、计划图都是后面单独的步骤。
+ * 宁可先全部可见且难看，也不要漏掉某一种让人以为事件丢了。
  */
 
-import { Box, Text } from 'ink'
-import { firstLine, summarizeTools, truncate } from '../format.ts'
-import { Markdown } from '../markdown.tsx'
-import type { Entry, ToolCall } from '../store.ts'
-import { PlanPanel } from './PlanPanel.tsx'
-import { useTheme, type Theme } from '../theme.ts'
+import { TextAttributes } from "@opentui/core"
+import { For, Match, Switch } from "solid-js"
+import { firstLine, summarizeTools } from "../format.ts"
+import type { Entry, ToolCall } from "../store.ts"
+import { useTheme } from "../theme.ts"
 
-type Props = {
-  entry: Entry
-  expanded: boolean
-  columns: number
+export function EntryView(props: { entry: Entry }) {
+  return (
+    <Switch>
+      <Match when={props.entry.kind === "user" ? props.entry : null}>
+        {(entry) => <UserEntry text={entry().text} />}
+      </Match>
+      <Match when={props.entry.kind === "assistant" ? props.entry : null}>
+        {(entry) => <AssistantEntry text={entry().text} />}
+      </Match>
+      <Match when={props.entry.kind === "thought" ? props.entry : null}>
+        {(entry) => <ThoughtEntry text={entry().text} />}
+      </Match>
+      <Match when={props.entry.kind === "tools" ? props.entry : null}>
+        {(entry) => <ToolsEntry calls={entry().calls} />}
+      </Match>
+      <Match when={props.entry.kind === "notice" ? props.entry : null}>
+        {(entry) => <NoticeEntry level={entry().level} text={entry().text} />}
+      </Match>
+      <Match when={props.entry.kind === "compacted" ? props.entry : null}>
+        {(entry) => <CompactedEntry before={entry().before} after={entry().after} />}
+      </Match>
+      <Match when={props.entry.kind === "plan" ? props.entry : null}>
+        {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
+      </Match>
+    </Switch>
+  )
 }
 
-export function EntryView({ entry, expanded, columns }: Props) {
+function UserEntry(props: { text: string }) {
   const theme = useTheme()
-
-  switch (entry.kind) {
-    case 'user':
-      return (
-        <Box marginTop={1}>
-          <Text color={theme.user} bold>
-            {'› '}
-          </Text>
-          <Text color={theme.user}>{entry.text}</Text>
-        </Box>
-      )
-
-    case 'assistant':
-      return (
-        <Box marginTop={1} flexDirection="row">
-          <Text color={theme.brand}>{'✻ '}</Text>
-          <Box flexGrow={1}>
-            <Markdown markdown={entry.text} />
-          </Box>
-        </Box>
-      )
-
-    case 'thought':
-      return (
-        <Box marginTop={1}>
-          <Text color={theme.thought}>{'· '}</Text>
-          <Text color={theme.thought} italic>
-            {entry.text}
-          </Text>
-        </Box>
-      )
-
-    case 'tools':
-      return <ToolGroup calls={entry.calls} expanded={expanded} columns={columns} theme={theme} />
-
-    case 'plan':
-      return <PlanPanel plan={entry.plan} columns={columns} />
-
-    case 'compacted':
-      return (
-        <Box marginTop={1}>
-          <Text color={theme.warning}>
-            {'⋯ 上下文已压缩 '}
-            {entry.before} → {entry.after} tokens
-            {entry.summarized ? '（早期细节已归纳为摘要）' : ''}
-          </Text>
-        </Box>
-      )
-
-    case 'notice': {
-      const color =
-        entry.level === 'error' ? theme.error : entry.level === 'warn' ? theme.warning : theme.subtle
-      const mark = entry.level === 'error' ? '✗ ' : entry.level === 'warn' ? '⚠ ' : 'ℹ '
-      return (
-        <Box marginTop={1}>
-          <Text color={color}>{mark}</Text>
-          <Text color={color}>{entry.text}</Text>
-        </Box>
-      )
-    }
-  }
+  return (
+    <box flexDirection="row" paddingTop={1}>
+      <text fg={theme.brand}>{"› "}</text>
+      <text fg={theme.user}>{props.text}</text>
+    </box>
+  )
 }
 
-/**
- * 一组工具调用。
- *
- * 跑的时候逐条显示——用户需要知道它在干什么。
- * 跑完收成一行概括：细节留着只会把结论挤出屏幕。想看再 Ctrl-O 展开。
- */
-function ToolGroup({
-  calls,
-  expanded,
-  columns,
-  theme,
-}: {
-  calls: readonly ToolCall[]
-  expanded: boolean
-  columns: number
-  theme: Theme
-}) {
-  const running = calls.some(call => call.running)
-  const failed = calls.filter(call => call.ok === false).length
+function AssistantEntry(props: { text: string }) {
+  const theme = useTheme()
+  // text_delta 是增量推送，这个组件每来一个字就重渲染一次。
+  // 能这么写是因为 OpenTUI 的绘制在原生层做脏区，不是每帧重拼整屏字符串。
+  return (
+    <box paddingTop={1}>
+      <text fg={theme.text}>{props.text}</text>
+    </box>
+  )
+}
 
-  if (!running && !expanded) {
-    // 失败的第一条原因即便在折叠态也要露出来：出错了还要按一下 Ctrl-O 才知道
-    // 发生了什么，等于把问题藏起来。
-    const firstFailure = calls.find(call => call.ok === false)
-    return (
-      <Box marginTop={1} flexDirection="column">
-        <Box>
-          <Text color={failed > 0 ? theme.error : theme.success}>{failed > 0 ? '✗ ' : '● '}</Text>
-          <Text color={theme.subtle}>
-            {summarizeTools(calls)}
-            {failed > 0 ? ` · ${failed} 个失败` : ''}
-          </Text>
-        </Box>
-        {firstFailure?.output && (
-          <Box marginLeft={2}>
-            <Text color={theme.error}>
-              {firstLine(firstFailure.output, Math.max(10, columns - 4))}
-            </Text>
-          </Box>
+function ThoughtEntry(props: { text: string }) {
+  const theme = useTheme()
+  return (
+    <box paddingTop={1}>
+      <text fg={theme.thought} attributes={TextAttributes.ITALIC}>
+        {props.text}
+      </text>
+    </box>
+  )
+}
+
+function ToolsEntry(props: { calls: ToolCall[] }) {
+  const theme = useTheme()
+  return (
+    <box flexDirection="column" paddingTop={1}>
+      <text fg={theme.subtle}>{summarizeTools(props.calls)}</text>
+      <For each={props.calls}>
+        {(call) => (
+          <box flexDirection="row">
+            <text fg={call.running ? theme.spinner : call.ok ? theme.success : theme.error}>
+              {call.running ? "  ◐ " : call.ok ? "  ✓ " : "  ✗ "}
+            </text>
+            <text fg={theme.toolName}>{call.tool}</text>
+            <text fg={theme.toolArgs}> {firstLine(call.args, 60)}</text>
+          </box>
         )}
-      </Box>
-    )
-  }
-
-  // 展开时整组**共享**一个行数预算，而不是每条各自截 20 行。
-  // 之前是后者：一次读 4 个文件、每条 20 行，展开后一下吐出 80+ 行，
-  // 把招牌和对话全冲出视口。预算按条数均摊，至少保证每条能露 3 行。
-  const perCall = expanded ? perCallBudget(calls.length) : 1
-
-  return (
-    <Box marginTop={1} flexDirection="column">
-      {calls.map(call => (
-        <ToolLine
-          key={call.id}
-          call={call}
-          expanded={expanded}
-          maxOutputLines={perCall}
-          columns={columns}
-          theme={theme}
-        />
-      ))}
-    </Box>
+      </For>
+    </box>
   )
 }
 
-function ToolLine({
-  call,
-  expanded,
-  maxOutputLines,
-  columns,
-  theme,
-}: {
-  call: ToolCall
-  expanded: boolean
-  maxOutputLines: number
-  columns: number
-  theme: Theme
-}) {
-  const mark = call.running ? '◐ ' : call.ok ? '● ' : '✗ '
-  const markColor = call.running ? theme.spinner : call.ok ? theme.success : theme.error
-  // 预留行首标记、工具名和一点余量，剩下的给参数
-  const argsWidth = Math.max(10, columns - call.tool.length - 8)
-
+function NoticeEntry(props: { level: "info" | "warn" | "error"; text: string }) {
+  const theme = useTheme()
+  const color = () =>
+    props.level === "error" ? theme.error : props.level === "warn" ? theme.warning : theme.subtle
   return (
-    <Box flexDirection="column">
-      <Box>
-        <Text color={markColor}>{mark}</Text>
-        <Text color={theme.toolName}>{call.tool}</Text>
-        <Text color={theme.toolArgs}> {truncate(compactArgs(call.args), argsWidth)}</Text>
-      </Box>
-      {expanded && call.output !== undefined && (
-        <Box marginLeft={2} flexDirection="column">
-          {outputPreview(call.output, maxOutputLines).map((line, i) => (
-            <Text key={i} color={theme.inactive}>
-              {truncate(line, Math.max(10, columns - 4))}
-            </Text>
-          ))}
-        </Box>
-      )}
-      {!expanded && call.output !== undefined && !call.ok && (
-        // 失败的原因无论如何都要露一行，否则用户只看到一个 ✗ 不知道发生了什么
-        <Box marginLeft={2}>
-          <Text color={theme.error}>{firstLine(call.output, Math.max(10, columns - 4))}</Text>
-        </Box>
-      )}
-    </Box>
+    <box paddingTop={1}>
+      <text fg={color()}>{props.text}</text>
+    </box>
   )
 }
 
-/** 工具参数是 JSON 串，压成一行显示，太长的值也截掉。 */
-function compactArgs(raw: string): string {
-  try {
-    const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object') {
-      return Object.entries(parsed)
-        .map(([key, value]) => `${key}=${truncate(String(value).replace(/\s+/g, ' '), 60)}`)
-        .join(' ')
-    }
-  } catch {
-    /* 不是 JSON 就原样显示 */
-  }
-  return raw.replace(/\s+/g, ' ')
+function CompactedEntry(props: { before: number; after: number }) {
+  const theme = useTheme()
+  return (
+    <box paddingTop={1}>
+      <text fg={theme.subtle}>
+        — 上下文已压缩 {props.before} → {props.after} tokens —
+      </text>
+    </box>
+  )
 }
 
-/**
- * 一组工具调用展开后总共最多显示这么多行输出。
- * 是**整组的**预算，不是每条的——见 ToolGroup 里的均摊。
- * 完整内容始终原样发给了模型，这里只是给人看的。
- */
-export const EXPANDED_OUTPUT_BUDGET = 24
-
-/** 整组预算按条数均摊，至少保证每条能露 3 行。 */
-export function perCallBudget(callCount: number): number {
-  return Math.max(3, Math.floor(EXPANDED_OUTPUT_BUDGET / Math.max(1, callCount)))
-}
-
-export function outputPreview(output: string, limit: number): string[] {
-  const lines = output.split('\n')
-  if (lines.length <= limit) return lines
-  return [...lines.slice(0, limit), `… 还有 ${lines.length - limit} 行`]
+function PlanEntry(props: { goal: string; status: string }) {
+  const theme = useTheme()
+  return (
+    <box flexDirection="column" paddingTop={1} border={["left"]} borderColor={theme.border} paddingLeft={1}>
+      <text fg={theme.heading} attributes={TextAttributes.BOLD}>
+        计划：{props.goal}
+      </text>
+      <text fg={theme.subtle}>状态 {props.status}（计划面板是后面的步骤）</text>
+    </box>
+  )
 }

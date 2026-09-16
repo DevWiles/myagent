@@ -25,8 +25,15 @@ ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 JAR="$ROOT/target/myagent.jar"
 TUI="$ROOT/tui"
 
-# 注意：全程不 cd。界面进程用 cwd 作为默认工作区，
-# 一旦 cd 进 tui/，用户在自己项目里敲这个命令就会跑到错的目录上去。
+# 用户敲命令时所在的目录，就是 agent 要干活的工作区。必须在 cd 之前存下来。
+#
+# 为什么必须 cd：
+# Solid 的 JSX 靠 tui/bunfig.toml 里的 preload 插件转换，
+# 而 bun 是**按 cwd 找 bunfig.toml** 的。在仓库根目录跑 `bun tui/src/main.tsx`，
+# 那份 bunfig 根本不会被加载，JSX 不转换，界面起来就是一片空白然后立刻退出——
+# 没有任何报错，非常难查。
+# 所以这里换个办法保住工作区语义：先存下 cwd，cd 进界面目录，再用 -d 把它传回去。
+WORKSPACE="$PWD"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -50,7 +57,7 @@ for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
   case "$arg" in
     -h|--help)
       need bun "装一个: curl -fsSL https://bun.sh/install | bash"
-      exec bun "$TUI/src/main.tsx" "${ARGS[@]}"
+      cd "$TUI" && exec bun src/main.tsx "${ARGS[@]}"
       ;;
   esac
 done
@@ -94,5 +101,17 @@ fi
 
 # --- 3. 起界面 --------------------------------------------------------------
 
+# 用户没自己指定工作区的话，把进 cd 之前存下的 cwd 传回去
+has_dir=0
+for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$arg" in
+    -d|--dir) has_dir=1 ;;
+  esac
+done
+[ "$has_dir" = 0 ] && ARGS+=(-d "$WORKSPACE")
+
+# cd 进界面目录是为了让 bunfig.toml 生效（原因见文件开头那段注释）
+cd "$TUI"
+
 # exec 把进程替换掉，这样 Ctrl-C 和退出码都直达界面，中间不隔一层 shell
-exec bun "$TUI/src/main.tsx" "${ARGS[@]+"${ARGS[@]}"}"
+exec bun src/main.tsx "${ARGS[@]+"${ARGS[@]}"}"

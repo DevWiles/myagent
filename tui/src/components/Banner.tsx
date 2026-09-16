@@ -1,81 +1,69 @@
 /**
- * 启动招牌。
+ * 蓝色 MYAGENT 招牌。
  *
- * 两个布局约束（对齐 Claude Code 的手感）：
- * - **宽度撑满屏幕**：`width={columns}`，终端拉宽拉窄边框跟着走
- * - **高度固定**：无论宽窄都是同样的行数，缩放时不会忽高忽低把下面的内容顶来顶去
+ * 字模**复用 Ink 版的** `tui/src/format.ts`，不在这里复制一份——
+ * 招牌宽度（64）和高度（6）在 Ink 版里已经调好并被布局代码依赖，
+ * 抄一份出来迟早两边对不上。那个文件是纯 TS、零依赖，跨包 import 是安全的。
  *
- * 宽度不够画大字招牌时退化成一行文字，但**高度保持不变**（用空行补齐），
- * 这样从宽屏拖窄的过程里 transcript 不会跳。
+ * 上色规则：字形里 `█` 是实心笔画、`╗╝║═╔╚` 是描边线。
+ * 两者分别用 brand / brandDim，深浅一拉就有了立体感——
+ * 同一个颜色画完整张图会糊成一坨蓝斑，这是终端里画大字最常见的翻车点。
  */
 
-import { Box, Text } from 'ink'
-import { LOGO_LINES, LOGO_MIN_WIDTH } from '../format.ts'
-import type { ReadyInfo } from '../store.ts'
-import { useTheme } from '../theme.ts'
+import { TextAttributes } from "@opentui/core"
+import { For } from "solid-js"
+import { LOGO_LINES } from "../format.ts"
+import { useTheme } from "../theme.ts"
+
+/** 实心笔画的字符。除它以外的非空格字符都算描边。 */
+const FILL = "█"
 
 /**
- * 招牌固定占的行数：logo 6 + 信息 1 + 路径 1 + 提示 1 + 下横线 1 = 10。
+ * 招牌固定占的行数（= LOGO_LINES.length）。
  *
- * 必须是常数：招牌是滚动内容的第一项，缩放时它忽高忽低会让下面的对话跳。
- * （以前这里 export 出去给 App 算视口高度用，现在视口高度由 Yoga 算，
- *   没人再需要这个数，所以不 export。）
+ * 必须是常数：招牌是首屏第一项，缩放时它忽高忽低会让下面的内容跳。
  */
-const BANNER_HEIGHT = 10
+export const BANNER_HEIGHT = LOGO_LINES.length
 
-type Props = {
-  ready: ReadyInfo
-  columns: number
-}
+/** 窄于这个宽度就别画大字了，画出来会折行，比不画还难看。 */
+export const BANNER_MIN_WIDTH = 68
 
-export function Banner({ ready, columns }: Props) {
+export function Banner() {
   const theme = useTheme()
-  const showLogo = columns >= LOGO_MIN_WIDTH
 
   return (
-    // 简约风：只有一根下横线收口，和输入框呼应，不用方框把界面切碎
-    <Box
-      flexDirection="column"
-      width={columns}
-      height={BANNER_HEIGHT}
-      borderStyle="single"
-      borderColor={theme.inactive}
-      borderTop={false}
-      borderLeft={false}
-      borderRight={false}
-      flexShrink={0}
-    >
-      {showLogo ? (
-        LOGO_LINES.map((line, i) => (
-          <Text key={i} color={theme.brand} wrap="truncate">
-            {line}
-          </Text>
-        ))
-      ) : (
-        <>
-          <Text color={theme.brand} bold>
-            myagent
-          </Text>
-          {/* 窄屏也占满 logo 的 6 行，保证招牌高度恒定、缩放时下方内容不跳 */}
-          {[1, 2, 3, 4, 5].map(i => (
-            <Text key={i}> </Text>
-          ))}
-        </>
-      )}
+    <box flexDirection="column" flexShrink={0}>
+      <For each={LOGO_LINES}>
+        {(line) => (
+          // 一行内要两种颜色，只能拆成字符级的 <text>。
+          // OpenTUI 底层是原生绘制，这点碎片化开销可以忽略——
+          // 真正贵的是每帧重建节点树，而招牌是静态的，Solid 只会建一次。
+          <box flexDirection="row">
+            <For each={Array.from(line)}>
+              {(char) => <text fg={char === FILL ? theme.brand : theme.brandDim}>{char}</text>}
+            </For>
+          </box>
+        )}
+      </For>
+    </box>
+  )
+}
 
-      <Text color={theme.subtle} wrap="truncate">
-        v{ready.version} · {ready.model} · {ready.tools.length} 个工具
-        {ready.planMode ? ' · 只读模式' : ''}
-      </Text>
-      {/* 路径可能很长，截断而不是折行——折行会把招牌撑高，破坏固定高度 */}
-      <Text color={theme.inactive} wrap="truncate-start">
-        {ready.workspace}
-      </Text>
-      <Text color={theme.inactive} wrap="truncate">
-        {columns >= 64
-          ? 'Enter 发送 · Ctrl-O 展开详情 · 滚轮/↑↓ 滚动 · /help 查看命令'
-          : 'Enter 发送 · /help'}
-      </Text>
-    </Box>
+/**
+ * 窄屏退化版：画不下大字时只写一行小字，但**行数补齐到和大字一样**。
+ *
+ * 为什么要补空行：从宽屏拖窄的过程中招牌高度若变化，下方内容会整体上下跳，
+ * 观感上像是界面在抽搐。宁可留白也要把高度钉死。
+ */
+export function BannerCompact() {
+  const theme = useTheme()
+
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <text fg={theme.brand} attributes={TextAttributes.BOLD}>
+        myagent
+      </text>
+      <For each={Array.from({ length: BANNER_HEIGHT - 1 })}>{() => <text> </text>}</For>
+    </box>
   )
 }
