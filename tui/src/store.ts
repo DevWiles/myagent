@@ -16,7 +16,7 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
-import type { ServerEvent, ToolInfo } from './protocol.ts'
+import type { PlanTaskWire, ServerEvent, ToolInfo } from './protocol.ts'
 
 export type ToolCall = {
   id: number
@@ -27,6 +27,44 @@ export type ToolCall = {
   output?: string
 }
 
+/** 计划里的一个任务 + 它的执行进度。界面自己的形态，不直接用线上类型。 */
+export type PlanTask = {
+  id: string
+  type: string
+  description: string
+  /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
+  status: string
+  parentId: string | null
+  dependsOn: string[]
+  durationMs?: number
+  error?: string
+}
+
+export type PlanSummary = {
+  succeeded: number
+  failed: number
+  skipped: number
+  durationMs: number
+}
+
+/**
+ * 一份计划的完整状态，作为一条 entry 活在 transcript 里。
+ *
+ * 为什么进 transcript 而不是钉在底部：计划面板要能往回滚、能和执行过程的
+ * 流式输出交错着看，这正是「transcript 里全是活的 React 元素」这个渲染模型
+ * 的用武之地。执行期间它被原地更新（✓/✗ 逐个点亮），滚上去随时能看进度。
+ */
+export type PlanData = {
+  goal: string
+  /** 服务端顺序；plan_tasks_added 的子任务插在父任务（和先来的兄弟）后面。 */
+  tasks: PlanTask[]
+  /** 拓扑分层，服务端算好的。只含创建时的根任务。 */
+  layers: string[][]
+  /** CREATED | RUNNING | COMPLETED | FAILED | CANCELLED */
+  status: string
+  summary?: PlanSummary
+}
+
 export type Entry =
   | { kind: 'user'; key: string; text: string }
   | { kind: 'assistant'; key: string; text: string }
@@ -34,6 +72,7 @@ export type Entry =
   | { kind: 'tools'; key: string; calls: ToolCall[] }
   | { kind: 'notice'; key: string; level: 'info' | 'warn' | 'error'; text: string }
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
+  | { kind: 'plan'; key: string; plan: PlanData }
 
 export type Approval = { id: number; action: string; detail: string; reason: string }
 
@@ -44,6 +83,8 @@ export type ReadyInfo = {
   planMode: boolean
   hasApiKey: boolean
   tools: ToolInfo[]
+  /** 后端宣告的可选能力。'plan' 在里面才放出 /plan 入口。 */
+  features: string[]
   workspaceWarning?: string
 }
 
@@ -57,6 +98,8 @@ export type SessionState = {
   /** 当前跑到第几轮（ReAct step）。 */
   step: number
   approval: Approval | null
+  /** 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。 */
+  planConfirm: { id: number } | null
   tokens: number
   contextLimit: number
   /** 上一轮耗时，画在状态栏上。 */
@@ -73,6 +116,7 @@ const EMPTY_STATE: SessionState = {
   busy: false,
   step: 0,
   approval: null,
+  planConfirm: null,
   tokens: 0,
   contextLimit: 0,
   lastDurationMs: null,
@@ -117,6 +161,29 @@ export class SessionStore {
     this.set({ entries: next })
   }
 
+  /** 当前计划面板的 key。执行期间流式输出会排在它后面，所以不能用 replaceTail。 */
+  private planKey: string | null = null
+
+  /** 原地改当前计划面板。计划面板多半不在队尾——按 key 找，不管它滚到哪儿了。 */
+  private updatePlan(update: (plan: PlanData) => PlanData): void {
+    const key = this.planKey
+    if (!key) return
+    this.set({
+      entries: this.state.entries.map(entry =>
+        entry.kind === 'plan' && entry.key === key
+          ? { ...entry, plan: update(entry.plan) }
+          : entry,
+      ),
+    })
+  }
+
+  private patchTask(taskId: string, patch: Partial<PlanTask>): void {
+    this.updatePlan(plan => ({
+      ...plan,
+      tasks: plan.tasks.map(task => (task.id === taskId ? { ...task, ...patch } : task)),
+    }))
+  }
+
   // ------------------------------------------------------------ 用户动作
 
   submitPrompt(text: string): void {
@@ -151,6 +218,22 @@ export class SessionStore {
     this.set({ expanded: allExpanded ? new Set() : new Set(keys) })
   }
 
+  /** 回答完计划确认（发送由调用方负责），把框收掉。 */
+  clearPlanConfirm(): void {
+    this.set({ planConfirm: null })
+  }
+
+  /**
+   * 回答完审批（发送由调用方负责），把框收掉。
+   *
+   * 不收会怎样：`approval` 原本只在 `busy` 转 false 时才清，也就是整轮结束才消失。
+   * 答完 y 之后工具开始跑，这期间框还挂在屏幕上——工具跑得久时（比如一条 bash）
+   * 用户会对着一个已经答过的框发呆，再按一次 y 还会给一个后端早已不等的 id 补发回复。
+   */
+  clearApproval(): void {
+    this.set({ approval: null })
+  }
+
   clearTranscript(): void {
     this.set({ entries: [], expanded: new Set(), step: 0 })
   }
@@ -172,6 +255,7 @@ export class SessionStore {
             planMode: event.planMode,
             hasApiKey: event.hasApiKey,
             tools: event.tools,
+            features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
           },
           busy: event.busy,
@@ -291,6 +375,7 @@ export class SessionStore {
         this.set({
           busy: event.busy,
           approval: event.busy ? this.state.approval : null,
+          planConfirm: event.busy ? this.state.planConfirm : null,
           step: event.busy ? this.state.step : 0,
           tokens: event.tokens ?? this.state.tokens,
           contextLimit: event.contextLimit ?? this.state.contextLimit,
@@ -308,8 +393,81 @@ export class SessionStore {
         this.notice('error', event.message)
         return
 
+      case 'plan_created': {
+        const key = this.nextKey('plan')
+        this.planKey = key
+        this.append({
+          kind: 'plan',
+          key,
+          plan: {
+            goal: event.goal,
+            tasks: event.tasks.map(fromWire),
+            layers: event.layers,
+            status: 'CREATED',
+          },
+        })
+        return
+      }
+
+      case 'plan_confirm_request':
+        this.set({ planConfirm: { id: event.id } })
+        return
+
+      case 'plan_task_started':
+        this.updatePlan(plan => ({ ...plan, status: 'RUNNING' }))
+        this.patchTask(event.taskId, { status: 'RUNNING' })
+        return
+
+      case 'plan_task_finished':
+        this.patchTask(event.taskId, {
+          status: event.status,
+          durationMs: event.durationMs,
+          error: event.error ?? undefined,
+        })
+        return
+
+      case 'plan_tasks_added': {
+        // 就地插到父任务（和先到的兄弟）后面，别 push 到末尾——
+        // 面板按数组顺序渲染，子任务排到别人家底下会看不懂
+        this.updatePlan(plan => {
+          const tasks = [...plan.tasks]
+          let at = tasks.findIndex(task => task.id === event.parentId)
+          if (at < 0) return { ...plan, tasks: [...tasks, ...event.tasks.map(fromWire)] }
+          while (at + 1 < tasks.length && tasks[at + 1]?.parentId === event.parentId) at++
+          tasks.splice(at + 1, 0, ...event.tasks.map(fromWire))
+          return { ...plan, tasks }
+        })
+        return
+      }
+
+      case 'plan_finished': {
+        const summary =
+          event.succeeded !== undefined
+            ? {
+                succeeded: event.succeeded,
+                failed: event.failed ?? 0,
+                skipped: event.skipped ?? 0,
+                durationMs: event.durationMs ?? 0,
+              }
+            : undefined
+        this.updatePlan(plan => ({ ...plan, status: event.status, summary }))
+        this.set({ planConfirm: null })
+        return
+      }
+
       case 'pong':
         return
     }
+  }
+}
+
+function fromWire(task: PlanTaskWire): PlanTask {
+  return {
+    id: task.id,
+    type: task.type,
+    description: task.description,
+    status: task.status,
+    parentId: task.parentId ?? null,
+    dependsOn: task.dependsOn ?? [],
   }
 }

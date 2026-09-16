@@ -1,275 +1,172 @@
 /**
- * 全屏布局。从上到下：
+ * 顶层界面。
  *
- *   TranscriptView   自绘滚动的对话记录（吃掉所有剩余高度）
- *   ─ 底部固定区 ─
- *   Spinner / 确认框  正在跑 / 需要确认时出现
- *   PromptInput      输入框
- *   StatusLine       状态栏
+ * 布局自上而下：欢迎框 → 对话区 → 输入框 → 状态栏。
+ * 伸缩交给 Yoga 算，不自己数行数——自己算视口高度是 Ink 版早期踩过的坑，
+ * 终端一缩放就错位。
  *
- * ## 输入框是怎么钉在最后一行的
- *
- * 靠 Yoga，不靠算术。transcript 拿 `flexGrow={1} flexBasis={0}`，底部每一块都
- * `flexShrink={0}` 且**高度写死**，于是「剩下多少给 transcript」是 Yoga 算的，
- * 输入框的行号只由「底部放了哪几块」决定，和对话内容、滚动位置、折行全都无关。
- *
- * 以前这里是一串手算（`rows - spinnerRows - approvalRows - ... - 3 - 1`），
- * 六七个漂移源：状态栏没 ready 时不渲染却照样记 1 行、spinner 和确认框按钮窄屏
- * 折行、关闭原因太长折行……算多了就被 Yoga 悄悄从别人身上挤回来（实测 COLS=20
- * 时输入框被挤成 4 行还多一个空行），算少了底部就空一行。
- *
- * `planBottomStack` 现在只干一件事：终端太矮时按固定顺序决定砍掉谁。它算出的
- * `height` 只用于给 transcript 一个首帧 seed —— **算错也不会让输入框漂**。
- *
- * ## 根节点的 height 不能丢
- *
- * `height={layoutRows}` 是挡住闪屏的东西：Ink 的 `Output` 高度取的是根节点的
- * computed height，一旦根节点没有显式高度，帧高就变成内容高，超过视口时
- * `shouldClearTerminalForFrame` 会**每帧全清**（实测：去掉高度后帧 31 行、
- * clearTerminal 出现；钉住高度则 10 行、不出现）。
- *
- * 不接管鼠标（这一期）：滚轮由终端的 Alternate Scroll 转成方向键（见 terminal.ts），
- * 拖拽选中、复制全部交回终端原生。折叠详情用 Ctrl-O。
+ * 状态全部来自 `createSession()`：那是 Ink 版那套 SessionStore 的 Solid 封装，
+ * 事件规约逻辑两版共用，这里只管画。
  */
 
-import { Box, useApp, useInput, useWindowSize } from 'ink'
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { Backend } from '../backend.ts'
-import { planBottomStack } from '../layout.ts'
-import type { ApprovalDecision } from '../protocol.ts'
-import type { SessionStore } from '../store.ts'
-import { MODE_ALT_SCROLL, disableModes, enableModes } from '../terminal.ts'
-import { ApprovalDialog } from './ApprovalDialog.tsx'
-import { Banner } from './Banner.tsx'
-import { ClosedLine } from './ClosedLine.tsx'
-import { PromptInput } from './PromptInput.tsx'
-import { Spinner } from './Spinner.tsx'
-import { StatusLine } from './StatusLine.tsx'
-import { TranscriptView, type TranscriptHandle } from './TranscriptView.tsx'
+import type { KeyEvent } from "@opentui/core"
+import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
+import { createEffect, For, Show } from "solid-js"
+import type { BackendOptions } from "../backend.ts"
+import { tildify } from "../path.ts"
+import { createSession } from "../session.ts"
+import { dark, ThemeProvider } from "../theme.ts"
+import { ApprovalDialog } from "./ApprovalDialog.tsx"
+import { EntryView } from "./EntryView.tsx"
+import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
+import { PromptInput } from "./PromptInput.tsx"
+import { StatusLine } from "./StatusLine.tsx"
+import { Welcome } from "./Welcome.tsx"
 
-const HELP = [
-  '/help     显示本帮助',
-  '/tools    列出可用工具',
-  '/clear    清空对话（后端的上下文也会清）',
-  '/exit     退出',
-  '',
-  'Enter 发送 · Esc 中断当前这轮',
-  'Ctrl-O 展开/收起工具调用详情',
-  '选中复制：直接拖拽选文本（终端原生），Cmd-C 复制',
-  '滚动：滚轮 / ↑↓ / PgUp PgDn / Home End',
-  'Ctrl-P/Ctrl-N 翻输入历史 · Ctrl-W 删词 · Ctrl-U 删到行首',
-  'Ctrl-C 退出（正在跑的时候按一下是中断）· Ctrl-D 空输入时退出',
-].join('\n')
-
-type Props = {
-  store: SessionStore
-  backend: Backend
-  /**
-   * 是否独占终端。关掉时按 `rows - 1` 布局：Ink 卸载时若末帧高度 >= 视口会发
-   * `clearTerminal`，那里面含 `ESC[3J`，**会清掉用户真正的 scrollback**
-   * （实测：根高 rows 且不在备用屏 → 3J 出现 1 次；根高 rows-1 → 0 次）。
-   */
-  fullscreen: boolean
+export type AppProps = {
+  options: BackendOptions
+  branch?: string
+  /** 后端没了就调它，由入口决定怎么退出（要还原终端）。 */
+  onClosed: (reason: string) => void
 }
 
-export function App({ store, backend, fullscreen }: Props) {
-  const { exit } = useApp()
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
-  const transcript = useRef<TranscriptHandle>(null)
+export function App(props: AppProps) {
+  const dimensions = useTerminalDimensions()
+  const session = createSession(props.options)
+  const state = session.state
 
-  // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
-  // 窗口一变大变小就重渲染，整个布局跟着重算。直接读 process.stdout 是一次性快照。
-  const { columns, rows } = useWindowSize()
-
-  const layoutRows = fullscreen ? rows : Math.max(8, rows - 1)
-
-  // resize 后触发一次重测量。
-  //
-  // 这里**不写任何控制序列**。以前有一句 `process.stdout.write('\x1b[H')`，
-  // 那是 bug：Ink 的帧是「相对当前光标」增删的（`log-update` 用
-  // `eraseLines(previousLineCount)`），外人插一句挪光标会让它算错要擦几行。
-  // resize 本来就由 Ink 自己处理——它在宽度变化时会 `clearTerminal` + 全量重画。
-  //
-  // 也**不能**用 key 去 remount 整棵树：那样 transcript.current 会指向已卸载的
-  // 旧组件，命中测试拿到过期坐标（就是当年「放大之后点折叠行没反应」那个 bug）。
-  const [epoch, setEpoch] = useState(0)
-  const firstLayout = useRef(true)
-  useEffect(() => {
-    if (firstLayout.current) {
-      firstLayout.current = false
-      return
-    }
-    setEpoch(e => e + 1)
-  }, [columns, rows])
-
-  // 滚轮：Alternate Scroll 让终端把滚轮翻译成方向键，而 ↑/↓ 我们绑到了滚动上。
-  //
-  // 放在 effect 里而不是 main.tsx 里，是为了**退出时的字节顺序**：React 的 cleanup
-  // 跑在 Ink 写 `1049l` **之前**，所以能保证「先关模式、再还主屏」。放在 main.tsx
-  // 就只能靠 process.on('exit') 兜，那已经是 Ink 卸载之后了 —— 实测顺序会变成
-  // `1049l`(4817) 然后才 `1007r`(4837)。这一期是 Alternate Scroll，顺序反了也无害；
-  // 但下一期接管鼠标时，`1002/1006` 留在主屏上会让点击直接吐乱码，所以现在就把
-  // 这个接缝放对。崩溃路径跳过 React cleanup，那条由 terminal.ts 的兜底负责。
-  //
-  // 刻意不开鼠标追踪（1000/1002/1006）：那会夺走终端原生的拖拽选中。
-  useEffect(() => {
-    if (!fullscreen) return
-    enableModes(MODE_ALT_SCROLL)
-    return () => disableModes()
-  }, [fullscreen])
-
-  useEffect(() => {
-    const offEvent = backend.onEvent(event => store.apply(event))
-    const offClose = backend.onClose(reason => {
-      if (reason) store.markClosed(reason)
-      exit()
-    })
-    return () => {
-      offEvent()
-      offClose()
-    }
-  }, [backend, store, exit])
-
-  const inputActive = state.approval === null && state.closed === null
-
-  const plan = planBottomStack(layoutRows, {
-    busy: state.busy,
-    hasApproval: state.approval !== null,
-    hasClosed: state.closed !== null,
+  // 后端挂了就退出。不能在这儿直接 process.exit：终端还在 altscreen 模式里，
+  // 得让入口先把 renderer destroy 掉，否则用户的终端会留在没有回显的状态
+  createEffect(() => {
+    const closed = state().closed
+    if (closed) props.onClosed(closed)
   })
 
-  const handleDecision = useMemo(
-    () => (decision: ApprovalDecision) => {
-      if (!state.approval) return
-      backend.send({ t: 'approval_reply', id: state.approval.id, decision })
-    },
-    [backend, state.approval],
-  )
+  const workspace = () => tildify(state().ready?.workspace ?? props.options.workspace)
 
-  useInput((input, key) => {
-    // 确认框的按键在**这里**接，而不是在 ApprovalDialog 里。
-    // 因为终端矮到放不下那个框时（plan.approval === 'none'）组件根本不渲染，
-    // 而后端此刻正卡在 approve() 上等回答——按键要是跟着组件消失，会话就挂死了。
-    if (state.approval) {
-      const answer = input.toLowerCase()
-      if (answer === 'y') return handleDecision('yes')
-      if (answer === 'n' || key.escape) return handleDecision('no')
-      if (answer === 'a') return handleDecision('always')
-      return
+  /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
+  const pending = () => state().approval !== null || state().planConfirm !== null
+
+  // 确认框的按键在**这里**接，而不是在对话框组件里。
+  // 因为矮终端下那个框可能整个不渲染，而后端正卡着等回答——
+  // 按键要是跟着组件消失，会话就永久挂死了。这条纪律从 Ink 版继承。
+  useKeyboard((key: KeyEvent) => {
+    /**
+     * 「这个键我消费了」。
+     *
+     * 不调用它会怎样：OpenTUI 的派发顺序是**全局 handler 先跑、renderable 后跑**，
+     * 而我们在全局 handler 里答完确认框就把 pending 清掉，输入框同一瞬间重新获得焦点，
+     * 于是紧接着的 renderable 派发把同一个按键又交给了输入框——
+     * 按 y 同意之后，输入框里凭空多出一个 y。
+     * preventDefault() 正好卡在两段派发之间（InternalKeyHandler.emitWithPriority）。
+     */
+    const consume = () => key.preventDefault()
+
+    const approval = state().approval
+    if (approval) {
+      if (key.name === "y") return consume(), session.approve(approval.id, "yes")
+      if (key.name === "n" || key.name === "escape")
+        return consume(), session.approve(approval.id, "no")
+      if (key.name === "a") return consume(), session.approve(approval.id, "always")
+      // 确认框挂着时，其余按键一律吞掉：此刻不该有任何别的操作
+      return consume()
     }
 
-    if (key.upArrow) return transcript.current?.scrollBy(1)
-    if (key.downArrow) return transcript.current?.scrollBy(-1)
-    if (key.pageUp) return transcript.current?.scrollBy(Math.max(1, layoutRows - 6))
-    if (key.pageDown) return transcript.current?.scrollBy(-Math.max(1, layoutRows - 6))
-    if (key.home) return transcript.current?.scrollToTop()
-    if (key.end) return transcript.current?.scrollToBottom()
+    // 计划确认同一套道理。刻意没有 [a]——每份计划都不一样，不给一次性授权
+    const confirm = state().planConfirm
+    if (confirm) {
+      if (key.name === "y" || key.name === "return")
+        return consume(), session.confirmPlan(confirm.id, true)
+      if (key.name === "n" || key.name === "escape")
+        return consume(), session.confirmPlan(confirm.id, false)
+      return consume()
+    }
 
-    if (key.escape && state.busy) {
-      backend.send({ t: 'cancel' })
-      store.notice('warn', '已请求中断')
-      return
-    }
-    if (key.ctrl && input === 'o') {
-      store.toggleExpanded()
-      return
-    }
-    if (key.ctrl && input === 'c') {
-      if (state.busy) {
-        backend.send({ t: 'cancel' })
-        store.notice('warn', '已请求中断（再按一次 Ctrl-C 退出）')
-      } else {
-        exit()
-      }
+    // 没有确认框时，Esc 中断当前这一轮
+    if (key.name === "escape" && state().busy) {
+      consume()
+      session.cancel()
     }
   })
 
-  const handleSubmit = useMemo(
-    () => (text: string) => {
-      const command = text.trim()
-
-      if (command === '/exit' || command === '/quit' || command === '/q') {
-        exit()
-        return
-      }
-      if (command === '/help') {
-        store.submitPrompt(text)
-        store.notice('info', HELP)
-        transcript.current?.scrollToBottom()
-        return
-      }
-      if (command === '/tools') {
-        const tools = state.ready?.tools ?? []
-        store.submitPrompt(text)
-        store.notice(
-          'info',
-          tools.length === 0
-            ? '（没有可用工具）'
-            : tools.map(t => `${t.name}\n  ${t.description}`).join('\n'),
-        )
-        transcript.current?.scrollToBottom()
-        return
-      }
-      if (command === '/clear') {
-        backend.send({ t: 'reset' })
-        return
-      }
-      if (state.busy) {
-        store.notice('warn', '正在处理上一条，先等它结束或按 Esc 中断')
-        return
-      }
-
-      store.submitPrompt(command)
-      transcript.current?.scrollToBottom()
-      backend.send({ t: 'prompt', text: command })
-    },
-    [backend, store, exit, state.busy, state.ready],
-  )
-
-  // 招牌是**滚动内容的第一项**，不是固定头部。
-  //
-  // 曾经把它做成视口外的固定头部、内容变长就整体隐藏——结果是「往上滚也滚不回
-  // 招牌」，它压根不在滚动轨道上。放回内容里，行为就自然了：对话短时它在最上面
-  // 看得见，对话变长被顶出视口，往上滚又能滚回来（和终端里翻历史一个直觉）。
   return (
-    <Box flexDirection="column" width={columns} height={layoutRows}>
-      <TranscriptView
-        entries={state.entries}
-        expanded={state.expanded}
-        columns={columns}
-        handleRef={transcript}
-        repaintToken={epoch}
-        seedHeight={Math.max(1, layoutRows - plan.height)}
-        header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
-      />
-
-      <Box flexDirection="column" flexShrink={0}>
-        {plan.spinner && (
-          <Spinner step={state.step} startedAt={state.startedAt} columns={columns} />
-        )}
-
-        {plan.approval !== 'none' && state.approval && (
-          <ApprovalDialog
-            approval={state.approval}
-            columns={columns}
-            variant={plan.approval}
-          />
-        )}
-
-        {plan.closed && state.closed && <ClosedLine reason={state.closed} columns={columns} />}
-
-        <PromptInput
-          busy={state.busy}
-          isActive={inputActive}
-          columns={columns}
-          bare={plan.input === 'bare'}
-          placeholder={state.busy ? '正在处理…（Esc 中断）' : '说点什么，或 /help'}
-          onSubmit={handleSubmit}
-          onRequestExit={exit}
+    <ThemeProvider value={dark}>
+      <box flexDirection="column" width="100%" height="100%" paddingTop={1}>
+        <Welcome
+          info={{
+            version: state().ready?.version ?? "…",
+            model: state().ready?.model ?? "连接后端中…",
+            toolCount: state().ready?.tools.length ?? 0,
+            workspace: workspace(),
+            user: "Chris",
+          }}
+          columns={dimensions().width}
         />
 
-        {plan.status && <StatusLine state={state} columns={columns} />}
-      </Box>
-    </Box>
+        {/* 对话区。flexGrow 吃掉剩余高度，把输入框压到底部。
+            scrollbox 是 OpenTUI 的原生滚动容器——Ink 版这里要自己算视口切片，
+            这套不用，滚动在原生层做。 */}
+        <box flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
+          <scrollbox stickyScroll stickyStart="bottom">
+            <For each={state().entries}>{(entry) => <EntryView entry={entry} />}</For>
+          </scrollbox>
+        </box>
+
+        {/* 没有 API key 时先说清楚，否则用户发一句话才看到报错 */}
+        <Show when={state().ready && !state().ready!.hasApiKey}>
+          <box paddingLeft={1}>
+            <text fg={dark.warning}>没检测到 API key，发出去的请求会失败。</text>
+          </box>
+        </Show>
+
+        {/* 确认框。审批和计划确认永不同时出现（一个在执行中、一个在执行前），
+            但还是显式分优先级，免得协议将来变了两个一起来时叠在一起 */}
+        {/* flexShrink={0} 不能省：对话区是 flexGrow={1}，它会把所有可伸缩的兄弟
+            压扁。压扁的表现不是滚动条，而是**整行整行地消失**——
+            实测过一次，确认框只剩标题和「原因」，动作行和按钮行被吃掉了，
+            用户根本不知道能按什么键，而后端还卡在那儿等。 */}
+        <Show when={state().approval}>
+          {(approval) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <ApprovalDialog approval={approval()} columns={dimensions().width - 2} />
+            </box>
+          )}
+        </Show>
+        <Show when={!state().approval && state().planConfirm}>
+          <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+            <PlanConfirmDialog />
+          </box>
+        </Show>
+
+        <PromptInput
+          placeholder={
+            pending()
+              ? "上面等你回答…"
+              : state().busy
+                ? "正在跑…（Esc 中断）"
+                : "交代一件事，比如「把 README 里的启动命令补全」"
+          }
+          busy={state().busy}
+          suspended={pending()}
+          onSubmit={(value) => {
+            if (state().busy) return
+            // /plan 开头走规划模式，但后端没宣告 plan 能力时退回普通对话
+            const planGoal = value.startsWith("/plan ") ? value.slice(6).trim() : null
+            if (planGoal && state().ready?.features.includes("plan")) session.plan(planGoal)
+            else session.prompt(value)
+          }}
+        />
+
+        <StatusLine
+          model={state().ready?.model ?? "未连接"}
+          workspace={workspace()}
+          branch={props.branch}
+          columns={dimensions().width}
+          busy={state().busy}
+          tokens={state().tokens}
+          contextLimit={state().contextLimit}
+        />
+      </box>
+    </ThemeProvider>
   )
 }

@@ -12,6 +12,16 @@ export const PROTOCOL_VERSION = 1
 
 export type ToolInfo = { name: string; description: string }
 
+/** 计划里的一个任务，线上形态。status/parentId 在 plan_created 里分别是 PENDING/null。 */
+export type PlanTaskWire = {
+  id: string
+  type: string
+  description: string
+  status: string
+  parentId: string | null
+  dependsOn: string[]
+}
+
 export type ServerEvent =
   /** 首帧。画第一屏要的静态信息一次给全，省掉一轮往返。 */
   | {
@@ -23,6 +33,8 @@ export type ServerEvent =
       planMode: boolean
       hasApiKey: boolean
       busy: boolean
+      /** 后端支持的可选能力。老后端没有这个字段——界面据此决定画不画对应入口。 */
+      features?: string[]
       tokens?: number
       contextLimit?: number
       workspaceWarning?: string
@@ -47,6 +59,31 @@ export type ServerEvent =
   | { t: 'reset_done' }
   | { t: 'error'; message: string }
   | { t: 'pong' }
+  // ---- 先规划后执行（feature: 'plan'），时序见 docs/protocol.md 第 5 节 ----
+  /** 规划产出。layers 是服务端算好的拓扑分层——界面直接照着画，别自己按 dependsOn 再推一遍。 */
+  | { t: 'plan_created'; goal: string; tasks: PlanTaskWire[]; layers: string[][] }
+  /** 等界面确认。必须回 plan_confirm_reply，900 秒不回按否决。 */
+  | { t: 'plan_confirm_request'; id: number }
+  | { t: 'plan_task_started'; taskId: string; taskType: string; description: string }
+  | {
+      t: 'plan_task_finished'
+      taskId: string
+      status: string
+      durationMs: number
+      result: string | null
+      error: string | null
+    }
+  /** PLANNING 任务拆出了子任务，图长大了。就地插到父任务下面，别重画整张图。 */
+  | { t: 'plan_tasks_added'; parentId: string; tasks: PlanTaskWire[] }
+  /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
+  | {
+      t: 'plan_finished'
+      status: string
+      succeeded?: number
+      failed?: number
+      skipped?: number
+      durationMs?: number
+    }
 
 // ------------------------------------------------------------ 客户端 → 服务端
 
@@ -54,6 +91,8 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 
 export type ClientCommand =
   | { t: 'prompt'; text: string }
+  | { t: 'plan'; goal: string }
+  | { t: 'plan_confirm_reply'; id: number; approved: boolean }
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }
   | { t: 'reset' }

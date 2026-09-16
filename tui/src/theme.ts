@@ -1,14 +1,15 @@
 /**
- * 主题层：界面里不允许出现字面颜色，只能引用这里的语义 token。
+ * 主题层（OpenTUI 版）。
  *
- * 好处不是「好看」，是**可换**：终端千奇百怪，浅色背景、只支持 16 色、
- * 甚至完全不支持颜色的都有。颜色一旦散落在各个组件里，这些情况就没法统一应对。
+ * token 名**刻意和 Ink 版 `tui/src/theme.ts` 保持一致**——迁移期两套界面并存，
+ * 同名 token 意味着搬组件时只改标签（<Text color=> → <text fg=>），不用重新想颜色叫什么。
  *
- * token 命名刻意带用途（`toolName` 而不是 `cyan`），因为颜色的含义比色值重要得多——
- * 改配色时你要回答的是「工具名该用什么颜色」，而不是「这个青色是干嘛的」。
+ * 和 Ink 版的两处差别：
+ * 1. `brand` 从橙色改成蓝色（Ink 版沿用 Claude Code 的橙，这版要蓝色 MYAGENT）
+ * 2. 多了 `brandDim` / `border` / `panel` 三个 token，前者给招牌描边用，后两个给欢迎框用
  */
 
-import { createContext, useContext } from 'react'
+import { createContext, useContext } from "solid-js"
 
 export type Theme = {
   /** 正文 */
@@ -20,6 +21,15 @@ export type Theme = {
 
   /** 品牌色，用在招牌和 agent 的身份标识上 */
   brand: string
+  /**
+   * 品牌色的暗调。
+   *
+   * 招牌字形是 `███╗` 这种「实心块 + 描边线」的组合，两者用同一个颜色会糊成一片。
+   * 实心块用 brand、描边线用 brandDim，等于白捡一层立体感——
+   * 这是 opencode 用 tint() 混阴影的同一个思路，只是我们的字形自带描边，不用另算混色。
+   */
+  brandDim: string
+
   /** 用户输入的回显 */
   user: string
   /** 模型在调用工具前说的话（ReAct 的 Thought） */
@@ -42,6 +52,11 @@ export type Theme = {
   /** 转圈动画 */
   spinner: string
 
+  /** 面板边框（欢迎框、分栏竖线） */
+  border: string
+  /** 面板底色，比正文背景略亮一档 */
+  panel: string
+
   /** Markdown：行内代码 */
   inlineCode: string
   /** Markdown：代码块正文 */
@@ -51,103 +66,64 @@ export type Theme = {
 }
 
 /** 深色背景（绝大多数终端的默认）。 */
-const dark: Theme = {
-  text: '#e6e6e6',
-  subtle: '#8a8a8a',
-  inactive: '#5c5c5c',
-  brand: '#d77757',
-  user: '#7f9fd8',
-  thought: '#9b82c8',
-  success: '#5cb85c',
-  error: '#e06c75',
-  warning: '#d9a441',
-  toolName: '#56b6c2',
-  toolArgs: '#8a8a8a',
-  promptBorder: '#5c5c5c',
-  promptBorderBusy: '#d77757',
-  approvalBorder: '#d9a441',
-  spinner: '#d77757',
-  inlineCode: '#e5c07b',
-  codeBlock: '#98c379',
-  heading: '#61afef',
+export const dark: Theme = {
+  text: "#e6e6e6",
+  subtle: "#8a8a8a",
+  inactive: "#5c5c5c",
+  brand: "#5b9dfb",
+  brandDim: "#2f5d9e",
+  user: "#7f9fd8",
+  thought: "#9b82c8",
+  success: "#5cb85c",
+  error: "#e06c75",
+  warning: "#d9a441",
+  toolName: "#56b6c2",
+  toolArgs: "#8a8a8a",
+  promptBorder: "#5c5c5c",
+  promptBorderBusy: "#5b9dfb",
+  approvalBorder: "#d9a441",
+  spinner: "#5b9dfb",
+  border: "#3d4757",
+  panel: "#1b1f27",
+  inlineCode: "#e5c07b",
+  codeBlock: "#98c379",
+  heading: "#5b9dfb",
 }
 
 /** 浅色背景。不是把深色调亮，是各自独立配的——亮底上灰色要更深才看得清。 */
-const light: Theme = {
-  text: '#1a1a1a',
-  subtle: '#666666',
-  inactive: '#9a9a9a',
-  brand: '#c2410c',
-  user: '#2563eb',
-  thought: '#7c3aed',
-  success: '#15803d',
-  error: '#b91c1c',
-  warning: '#a16207',
-  toolName: '#0e7490',
-  toolArgs: '#666666',
-  promptBorder: '#9a9a9a',
-  promptBorderBusy: '#c2410c',
-  approvalBorder: '#a16207',
-  spinner: '#c2410c',
-  inlineCode: '#92400e',
-  codeBlock: '#166534',
-  heading: '#1d4ed8',
-}
-
-/**
- * 只用 16 色 ANSI。给不支持真彩色的终端——注意这是一套独立映射，
- * 不是把 RGB 自动量化过去：自动量化经常把两个语义不同的颜色压成同一个。
- */
-const ansi: Theme = {
-  text: 'white',
-  subtle: 'gray',
-  inactive: 'gray',
-  brand: 'yellow',
-  user: 'blue',
-  thought: 'magenta',
-  success: 'green',
-  error: 'red',
-  warning: 'yellow',
-  toolName: 'cyan',
-  toolArgs: 'gray',
-  promptBorder: 'gray',
-  promptBorderBusy: 'yellow',
-  approvalBorder: 'yellow',
-  spinner: 'yellow',
-  inlineCode: 'yellow',
-  codeBlock: 'green',
-  heading: 'blueBright',
-}
-
-export const THEMES = { dark, light, ansi } as const
-export type ThemeName = keyof typeof THEMES
-
-/**
- * 挑一套主题。优先级：显式指定 > 环境变量 > 终端能力推断。
- *
- * COLORFGBG 是 iTerm2/rxvt 一类终端导出的「前景;背景」色号，背景 >= 8 说明是亮底。
- * 探测不到就按深色走——深色主题在亮底上尚可辨认，反过来基本没法看。
- */
-export function pickTheme(explicit?: string): ThemeName {
-  if (explicit && explicit in THEMES) return explicit as ThemeName
-  const fromEnv = process.env['MYAGENT_THEME']
-  if (fromEnv && fromEnv in THEMES) return fromEnv as ThemeName
-
-  const depth = process.stdout.isTTY ? (process.stdout.getColorDepth?.() ?? 8) : 4
-  if (depth < 8) return 'ansi'
-
-  const colorfgbg = process.env['COLORFGBG']
-  if (colorfgbg) {
-    const background = Number(colorfgbg.split(';').pop())
-    if (Number.isFinite(background) && background >= 8) return 'light'
-  }
-  return 'dark'
+export const light: Theme = {
+  text: "#1a1a1a",
+  subtle: "#666666",
+  inactive: "#9a9a9a",
+  brand: "#1d4ed8",
+  brandDim: "#93b4ec",
+  user: "#2563eb",
+  thought: "#7c3aed",
+  success: "#15803d",
+  error: "#b91c1c",
+  warning: "#a16207",
+  toolName: "#0e7490",
+  toolArgs: "#666666",
+  promptBorder: "#9a9a9a",
+  promptBorderBusy: "#1d4ed8",
+  approvalBorder: "#a16207",
+  spinner: "#1d4ed8",
+  border: "#c4ccd8",
+  panel: "#f2f4f8",
+  inlineCode: "#92400e",
+  codeBlock: "#166534",
+  heading: "#1d4ed8",
 }
 
 const ThemeContext = createContext<Theme>(dark)
 
 export const ThemeProvider = ThemeContext.Provider
 
+/**
+ * 组件里取颜色的唯一入口。
+ *
+ * 和 Ink 版同名同签名，是为了让搬过来的组件这一行不用改。
+ */
 export function useTheme(): Theme {
   return useContext(ThemeContext)
 }
