@@ -68,6 +68,8 @@ export function TranscriptView({
   /** key → 该工具组的 wrapper 元素，用于 measureElement。 */
   const rowRefs = useRef(new Map<string, DOMElement>())
   const hitMap = useRef<HitSpan[]>([])
+  /** 上次上报给父组件的内容行数。只有真的变了才通知，避免无谓的 setState。 */
+  const lastReported = useRef(-1)
 
   const [offset, setOffset] = useState(0)
   const [contentHeight, setContentHeight] = useState(0)
@@ -80,6 +82,11 @@ export function TranscriptView({
 
   // 每次 commit 后：量内容总高，并重建 hitMap（每个工具组的视口行区间）。
   // 依赖数组留空是刻意的——折行随宽度变，内容没变宽度变了高度也变，每次都量。
+  //
+  // 这个 effect 每次 commit 都跑，所以**任何 setState 都必须先判等再调**。
+  // 否则就是「渲染 → 测量 → setState → 渲染」的自激循环：流式文本一秒几十次
+  // 更新，叠上这个循环会直接撞穿 React 的嵌套更新上限
+  // （Maximum update depth exceeded），进程崩掉。
   useEffect(() => {
     if (contentRef.current) {
       const measured = measureElement(contentRef.current).height
@@ -98,7 +105,14 @@ export function TranscriptView({
       y += h
     }
     hitMap.current = spans
-    onEntriesHeight?.(y - headerH)
+
+    // 判等后再上报：父组件拿它做 setState，每帧无条件调用会把上面说的
+    // 自激循环坐实。数值没变就什么都不做。
+    const entriesHeight = y - headerH
+    if (entriesHeight !== lastReported.current) {
+      lastReported.current = entriesHeight
+      onEntriesHeight?.(entriesHeight)
+    }
   })
 
   const maxOffset = Math.max(0, contentHeight - height)
