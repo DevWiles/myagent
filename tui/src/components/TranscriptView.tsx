@@ -60,13 +60,22 @@ export function TranscriptView({
   const rowRefs = useRef(new Map<string, DOMElement>())
   const hitMap = useRef<HitSpan[]>([])
 
-  const [offset, setOffset] = useState(0)
+  /**
+   * 滚动锚点。null = 贴底跟随（新内容来了自动滚到最新）；
+   * 数字 = 用户主动滚上去了，值是「视口顶对应内容的第几行」。
+   *
+   * 为什么不用「距底部多少行」来存：流式输出时内容每秒长高几十行，
+   * 同一个「距底部」值对应的内容位置一直在漂，视野就被不断拽回底部 ——
+   * 表现就是「流式输出时没法往上滚，只能等它输完」。
+   * 锚在内容顶部的绝对行号上，下方怎么长都不影响已经看到的位置。
+   */
+  const [anchor, setAnchor] = useState<number | null>(null)
   const [contentHeight, setContentHeight] = useState(0)
 
-  // 尺寸变了：回到底部。折行全变了，旧的 offset 对应不到原来的位置，
-  // 与其停在一个错位的地方，不如落到「最新内容」这个确定的锚点。
+  // 尺寸变了：回到贴底跟随。折行全变了，旧锚点对应不到原来的位置，
+  // 与其停在一个错位的地方，不如落到「最新内容」这个确定的位置。
   useEffect(() => {
-    setOffset(0)
+    setAnchor(null)
   }, [repaintToken, columns, height])
 
   // 每次 commit 后：量内容总高，并重建 hitMap（每个工具组的视口行区间）。
@@ -96,9 +105,9 @@ export function TranscriptView({
     hitMap.current = spans
   })
 
-  const maxOffset = Math.max(0, contentHeight - height)
-  const clamped = Math.min(offset, maxOffset)
-  const hiddenAbove = Math.max(0, contentHeight - height - clamped)
+  const maxHidden = Math.max(0, contentHeight - height)
+  // 贴底跟随时隐藏最多；锚住时按锚点算，并钳进合法范围
+  const hiddenAbove = anchor === null ? maxHidden : Math.max(0, Math.min(anchor, maxHidden))
   // 内容不够高时，剩下的行要用空格铺满。
   // 空的 Box 不产生任何字符，Ink 就什么都不写，那些格子上一帧的字符会留着 ——
   // 这正是缩放后出现残影的根源之一。铺上空格，画面就自带擦除能力。
@@ -106,13 +115,19 @@ export function TranscriptView({
 
   useImperativeHandle(handleRef, () => ({
     scrollBy(lines) {
-      setOffset(cur => Math.max(0, Math.min(maxOffset, cur + lines)))
+      // lines > 0 是往上看。从当前实际位置出发，避免第一次上滚时跳一下。
+      setAnchor(cur => {
+        const from = cur === null ? maxHidden : Math.min(cur, maxHidden)
+        const next = from - lines
+        // 滚回底部就恢复跟随，否则新消息不会自动进入视野
+        return next >= maxHidden ? null : Math.max(0, next)
+      })
     },
     scrollToTop() {
-      setOffset(maxOffset)
+      setAnchor(0)
     },
     scrollToBottom() {
-      setOffset(0)
+      setAnchor(null)
     },
     hitTest(screenRow) {
       // 屏幕行 → 内容坐标：加回被平移隐藏的高度
@@ -122,7 +137,7 @@ export function TranscriptView({
       }
       return null
     },
-  }), [maxOffset, hiddenAbove])
+  }), [maxHidden, hiddenAbove])
 
   return (
     <Box flexDirection="column" height={height} overflow="hidden">
@@ -149,7 +164,7 @@ export function TranscriptView({
         Array.from({ length: blankRows }, (_, i) => (
           <Text key={`blank-${i}`}>{' '.repeat(Math.max(1, columns))}</Text>
         ))}
-      {clamped > 0 && (
+      {anchor !== null && hiddenAbove < maxHidden && (
         <Box position="absolute" marginTop={height - 1} width={columns} justifyContent="flex-end">
           <Text color={theme.warning}> ↓ 还有新内容 · End 回到底部 </Text>
         </Box>
