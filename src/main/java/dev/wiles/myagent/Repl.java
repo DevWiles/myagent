@@ -138,7 +138,7 @@ public final class Repl {
         boolean raw = terminal.enterRaw();
         this.rawMode = raw;
         this.width = TerminalMode.width();
-        this.fullscreen = options.fullscreen() && raw ? new FullScreenUi(System.out, System.in) : null;
+        this.fullscreen = options.fullscreen() && raw ? new FullScreenUi(System.out) : null;
         // 全屏模式下转圈会和整屏重绘打架，状态直接写在底部状态栏里更稳
         this.status = new StatusLine(System.out,
                 raw && options.color() && options.spinner() && fullscreen == null);

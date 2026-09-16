@@ -1,10 +1,7 @@
 package dev.wiles.myagent.cli;
 
-import java.io.InputStream;
 import java.io.PrintStream;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 全屏模式：占住整个终端，自己画每一行。
@@ -38,7 +35,6 @@ public final class FullScreenUi {
     private static final int CHROME_HEIGHT = 4;
 
     private final PrintStream out;
-    private final InputStream in;
     private final ScreenBuffer buffer = new ScreenBuffer();
 
     private int width;
@@ -46,9 +42,8 @@ public final class FullScreenUi {
     private String status = "";
     private boolean active;
 
-    public FullScreenUi(PrintStream out, InputStream in) {
+    public FullScreenUi(PrintStream out) {
         this.out = out;
-        this.in = in;
         this.width = TerminalMode.width();
         this.height = Math.max(CHROME_HEIGHT + 2, TerminalMode.height());
     }
@@ -63,66 +58,9 @@ public final class FullScreenUi {
      * 办法是把光标挪到一个大得离谱的位置（终端会自动夹到右下角），
      * 再问它光标在哪，回来的就是真实的行列数。
      */
-    private void detectSize() {
-        out.print(Ansi.moveTo(999, 999) + Ansi.queryCursor());
-        out.flush();
-
-        String reply = readReply();
-        if (System.getenv("MYAGENT_DEBUG_SIZE") != null) {
-            System.err.println("[size] 收到回复: "
-                    + reply.replace(String.valueOf(Ansi.ESC), "<ESC>"));
-        }
-        Matcher m = Pattern.compile("\\[(\\d+);(\\d+)").matcher(reply);
-        if (m.find()) {
-            int rows = Integer.parseInt(m.group(1));
-            int columns = Integer.parseInt(m.group(2));
-            if (rows > CHROME_HEIGHT + 1 && columns > 20) {
-                this.height = rows;
-                this.width = columns;
-            }
-        }
-    }
-
-    /**
-     * 读终端对光标查询的回复，最多等 400ms。
-     *
-     * 不能用 available() 轮询：pty 上它经常一直返回 0，即使数据已经在路上，
-     * 轮到超时也读不出一个字节来。所以老老实实阻塞读，
-     * 只是把它挪到另一个线程里，好给主线程留条超时的退路
-     * （阻塞中的 read 打断不了，所以那个线程设成 daemon，随进程一起走）。
-     */
-    private String readReply() {
-        StringBuilder reply = new StringBuilder();
-        Thread reader = new Thread(() -> {
-            try {
-                int b;
-                while ((b = in.read()) != -1 && b != 'R') {
-                    synchronized (reply) {
-                        reply.append((char) b);
-                    }
-                }
-            } catch (Exception ignored) {
-                // 读不动就算了，沿用 stty 那份尺寸
-            }
-        }, "myagent-size-probe");
-        reader.setDaemon(true);
-        reader.start();
-        try {
-            reader.join(400);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        synchronized (reply) {
-            return reply.toString();
-        }
-    }
-
     public void enter() {
         active = true;
-        out.print(Ansi.enterFullScreen());
-        out.flush();
-        detectSize();               // 进了备用屏幕再问，量到的才是这块画布的尺寸
-        out.print(Ansi.clearScreen());
+        out.print(Ansi.enterFullScreen() + Ansi.clearScreen());
         out.flush();
     }
 
