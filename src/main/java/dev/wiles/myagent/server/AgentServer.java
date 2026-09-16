@@ -360,6 +360,9 @@ public final class AgentServer extends WebSocketServer {
         n.put("model", config.model());
         n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
         n.put("hasApiKey", config.hasApiKey());
+        // 能力清单：界面据此决定要不要放出「先规划后执行」的入口
+        ArrayNode features = n.putArray("features");
+        Protocol.FEATURES.forEach(features::add);
         n.put("busy", busy.get());
         if (agent != null) {
             n.put("tokens", agent.estimatedTokens());

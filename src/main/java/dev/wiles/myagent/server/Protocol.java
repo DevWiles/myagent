@@ -45,8 +45,23 @@ import dev.wiles.myagent.agent.AgentEvent;
  */
 public final class Protocol {
 
-    /** 协议版本。两边对不上时应当直接拒绝连接，而不是带着半懂不懂往下跑。 */
+    /**
+     * 协议版本。两边对不上时应当直接拒绝连接，而不是带着半懂不懂往下跑。
+     *
+     * <p>什么时候升：<b>只有破坏性改动才升</b>——删字段、改字段含义、改一条消息的时序。
+     * 新增消息类型、新增字段都不升，前端本来就必须忽略不认识的 {@code t} 和字段。
+     * 「先规划后执行」那一批消息就是纯新增，所以还是 1。
+     */
     public static final int VERSION = 1;
+
+    /**
+     * 服务端支持的可选能力，随 ready 帧发给界面。
+     *
+     * <p>为什么要有它而不是靠版本号：新增能力如果靠升版本来宣告，老界面会因为版本对不上
+     * 直接拒连——明明它只是用不了新功能，却连旧功能也没得用了。
+     * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
+     */
+    public static final List<String> FEATURES = List.of("plan");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
