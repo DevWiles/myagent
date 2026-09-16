@@ -2,7 +2,13 @@ package dev.wiles.myagent.server;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.wiles.myagent.plan.Plan;
+import dev.wiles.myagent.plan.PlanResult;
+import dev.wiles.myagent.plan.Task;
+
+import java.util.List;
 import dev.wiles.myagent.agent.AgentEvent;
 
 /**
@@ -17,7 +23,24 @@ import dev.wiles.myagent.agent.AgentEvent;
  *   服务端 → 客户端   ready / thinking / text_delta / thought / tool_started
  *                     tool_finished / compacted / done / failed
  *                     approval_request / busy / error / pong
+ *                     plan_created / plan_confirm_request / plan_task_started
+ *                     plan_task_finished / plan_tasks_added / plan_finished
  *   客户端 → 服务端   prompt / cancel / approval_reply / reset / ping
+ *                     plan / plan_confirm_reply</pre>
+ *
+ * <p>「先规划后执行」的一轮长这样:
+ * <pre>
+ *   客户端 {"t":"plan","goal":"给 Task 加重试"}
+ *   服务端 {"t":"busy","busy":true}
+ *          {"t":"plan_created","goal":...,"tasks":[...],"layers":[["t1","t2"],["t3"]]}
+ *          {"t":"plan_confirm_request","id":1}
+ *   客户端 {"t":"plan_confirm_reply","id":1,"approved":true}
+ *   服务端 {"t":"plan_task_started","taskId":"t1",...}
+ *          ...执行期间照常发 thinking / text_delta / tool_started 等事件...
+ *          {"t":"plan_task_finished","taskId":"t1","status":"SUCCEEDED",...}
+ *          {"t":"plan_tasks_added",...}        (PLANNING 任务拆出子任务时才有)
+ *          {"t":"plan_finished","status":"COMPLETED","succeeded":5,...}
+ *          {"t":"busy","busy":false}
  * </pre>
  */
 public final class Protocol {
@@ -99,6 +122,83 @@ public final class Protocol {
         }
         // sealed interface 保证走不到这里，但 Java 17 的 instanceof 链没法让编译器确信
         throw new IllegalStateException("未知事件类型: " + event.getClass());
+    }
+
+    /**
+     * 一份新鲜出炉的计划。
+     *
+     * <p>{@code layers} 是拓扑分层的结果，直接把「哪几步互不依赖」算好给前端——
+     * 让前端自己按 dependsOn 推一遍，等于把同一套图算法在两种语言里各实现一次，
+     * 迟早会有一边算错。
+     */
+    public static ObjectNode encodePlan(Plan plan) {
+        ObjectNode n = event("plan_created");
+        n.put("goal", plan.goal());
+        ArrayNode tasks = n.putArray("tasks");
+        for (Task task : plan.graph().tasks()) {
+            tasks.add(encodeTask(task));
+        }
+        ArrayNode layers = n.putArray("layers");
+        for (List<Task> layer : plan.graph().layers()) {
+            ArrayNode ids = layers.addArray();
+            layer.forEach(task -> ids.add(task.id()));
+        }
+        return n;
+    }
+
+    /** PLANNING 任务拆出了新任务，图长大了。前端要能就地插进去，而不是重画整张图。 */
+    public static ObjectNode encodeAddedTasks(String parentId, List<Task> added) {
+        ObjectNode n = event("plan_tasks_added");
+        n.put("parentId", parentId);
+        ArrayNode tasks = n.putArray("tasks");
+        added.forEach(task -> tasks.add(encodeTask(task)));
+        return n;
+    }
+
+    public static ObjectNode encodeTaskStarted(Task task) {
+        ObjectNode n = event("plan_task_started");
+        n.put("taskId", task.id());
+        n.put("taskType", task.type().name());
+        n.put("description", task.description());
+        return n;
+    }
+
+    public static ObjectNode encodeTaskFinished(Task task) {
+        ObjectNode n = event("plan_task_finished");
+        n.put("taskId", task.id());
+        n.put("status", task.status().name());
+        n.put("durationMs", task.durationMillis());
+        n.put("result", task.result());
+        n.put("error", task.error());
+        return n;
+    }
+
+    public static ObjectNode encodePlanFinished(Plan plan, PlanResult result) {
+        ObjectNode n = event("plan_finished");
+        n.put("status", plan.status().name());
+        n.put("succeeded", result.succeeded());
+        n.put("failed", result.failed());
+        n.put("skipped", result.skipped());
+        n.put("durationMs", plan.durationMillis());
+        return n;
+    }
+
+    private static ObjectNode encodeTask(Task task) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("id", task.id());
+        item.put("type", task.type().name());
+        item.put("description", task.description());
+        item.put("status", task.status().name());
+        item.put("parentId", task.parentId());
+        ArrayNode deps = item.putArray("dependsOn");
+        task.dependencies().forEach(deps::add);
+        return item;
+    }
+
+    /** 取布尔字段。前端漏传或者传了别的类型，都退回默认值，不让服务端崩。 */
+    public static boolean bool(JsonNode node, String field, boolean fallback) {
+        JsonNode v = node.get(field);
+        return v == null || v.isNull() ? fallback : v.asBoolean(fallback);
     }
 
     /** 取字符串字段，缺了就返回默认值——前端传什么过来都不该让服务端崩。 */

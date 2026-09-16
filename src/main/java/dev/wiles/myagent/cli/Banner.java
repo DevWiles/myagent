@@ -41,7 +41,7 @@ public final class Banner {
     }
 
     public static String render(String version, String model, Path workspace,
-                                List<String> toolNames, boolean planMode, boolean hasApiKey,
+                                List<String> toolNames, boolean readOnly, boolean hasApiKey,
                                 int terminalWidth) {
         StringBuilder sb = new StringBuilder("\n");
         if (Logo.fitsIn(terminalWidth)) {
@@ -51,7 +51,7 @@ public final class Banner {
                     .append(Ansi.bold("myagent " + version)).append('\n');
         }
         sb.append('\n');
-        sb.append(info(version, model, workspace, toolNames, planMode, hasApiKey, terminalWidth));
+        sb.append(info(version, model, workspace, toolNames, readOnly, hasApiKey, terminalWidth));
         return sb.toString();
     }
 
@@ -85,14 +85,14 @@ public final class Banner {
 
     /** 运行信息，不画框——信息块画框反而显得吵。 */
     private static String info(String version, String model, Path workspace,
-                               List<String> toolNames, boolean planMode, boolean hasApiKey,
+                               List<String> toolNames, boolean readOnly, boolean hasApiKey,
                                int terminalWidth) {
         List<Row> rows = new ArrayList<>();
         if (!hasApiKey) {
             rows.add(labelled("模型", "未配置 API key", Ansi.red("未配置 API key")));
         } else {
-            rows.add(labelled("模型", model + (planMode ? "   [只读模式]" : ""),
-                    model + (planMode ? "   " + Ansi.yellow("[只读模式]") : "")));
+            rows.add(labelled("模型", model + (readOnly ? "   [只读模式]" : ""),
+                    model + (readOnly ? "   " + Ansi.yellow("[只读模式]") : "")));
         }
         rows.add(labelled("工作区", shorten(workspace), shorten(workspace)));
         String tools = toolNames.isEmpty() ? "无" : String.join(" · ", toolNames);

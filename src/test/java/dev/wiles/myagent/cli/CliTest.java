@@ -14,7 +14,7 @@ class CliTest {
     void defaults() {
         CliOptions o = Cli.parse(new String[]{});
         assertNull(o.initialPrompt());
-        assertFalse(o.planMode());
+        assertFalse(o.readOnly());
         assertTrue(o.color());
         assertEquals(Path.of(""), o.workspace());
     }
@@ -53,8 +53,12 @@ class CliTest {
     void shortAndLongFlags() {
         assertTrue(Cli.parse(new String[]{"-h"}).help());
         assertTrue(Cli.parse(new String[]{"--help"}).help());
-        assertTrue(Cli.parse(new String[]{"-p"}).planMode());
-        assertTrue(Cli.parse(new String[]{"--plan"}).planMode());
+        assertTrue(Cli.parse(new String[]{"-r"}).readOnly());
+        assertTrue(Cli.parse(new String[]{"--readonly"}).readOnly());
+        // -p/--plan 是只读模式的老名字，仍然认，但帮助里不再宣传——
+        // 那个名字现在很容易和「先规划后执行」的 /plan 命令混淆
+        assertTrue(Cli.parse(new String[]{"-p"}).readOnly());
+        assertTrue(Cli.parse(new String[]{"--plan"}).readOnly());
         assertFalse(Cli.parse(new String[]{"--no-color"}).color());
     }
 
@@ -77,7 +81,7 @@ class CliTest {
     @DisplayName("选项和提示词可以混着写")
     void mixedOptionsAndPrompt() {
         CliOptions o = Cli.parse(new String[]{"-p", "这个项目怎么组织的"});
-        assertTrue(o.planMode());
+        assertTrue(o.readOnly());
         assertEquals("这个项目怎么组织的", o.initialPrompt());
     }
 
@@ -99,7 +103,7 @@ class CliTest {
     @DisplayName("帮助文本要把所有选项都列出来")
     void usageListsEverything() {
         String usage = Cli.usage();
-        for (String flag : new String[]{"--dir", "--model", "--plan", "--unsafe", "--no-color", "--help"}) {
+        for (String flag : new String[]{"--dir", "--model", "--readonly", "--unsafe", "--no-color", "--help"}) {
             assertTrue(usage.contains(flag), "帮助里漏了 " + flag);
         }
     }

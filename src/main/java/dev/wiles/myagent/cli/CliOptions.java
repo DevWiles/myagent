@@ -7,7 +7,8 @@ import java.nio.file.Path;
  *
  * @param workspace     工作区目录，默认当前目录
  * @param model         覆盖配置里的模型名
- * @param planMode      只读模式：不注册写文件和执行命令的工具
+ * @param readOnly      只读模式：不注册写文件和执行命令的工具。
+ *                      注意别和「先规划后执行」（/plan 命令）搞混，那是两回事
  * @param unsafe        跳过工作区安全检查
  * @param color         是否输出颜色
  * @param spinner       是否显示转圈的状态行
@@ -24,7 +25,7 @@ import java.nio.file.Path;
 public record CliOptions(
         Path workspace,
         String model,
-        boolean planMode,
+        boolean readOnly,
         boolean unsafe,
         boolean color,
         boolean spinner,
