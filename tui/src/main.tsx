@@ -12,7 +12,6 @@ import { resolve } from 'node:path'
 import { startBackend, type Backend } from './backend.ts'
 import { App } from './components/App.tsx'
 import { SessionStore } from './store.ts'
-import { transcriptToText } from './format.ts'
 import { THEMES, ThemeProvider, pickTheme } from './theme.ts'
 
 const USAGE = `myagent-tui —— myagent 的终端界面（React + Ink）
@@ -119,34 +118,19 @@ async function main(): Promise<void> {
 
   const theme = THEMES[pickTheme(args.theme)]
 
-  // 全屏（备用屏幕）。手动发控制序列，不用 Ink 的选项——那套有环境检测，
-  // 在真实终端里会静默失效。
-  //   1049h  切备用屏幕（退出 1049l 把主屏原样还回来）
-  //   2J H   清屏 + 光标归左上，从 (0,0) 画
-  //   1007h  Alternate Scroll：备用屏幕里鼠标滚轮变成方向键上下
+  // inline 渲染：**不进备用屏幕、不清屏**。
   //
-  // **刻意不开鼠标追踪（1000/1006）**。一开它，终端就把鼠标事件全交给程序，
-  // 原生的拖拽选中随之失效。我们试过自己重做一套选中（选区状态机 + 反色覆盖层
-  // + 剪贴板三条通路），在社区 ink 上做不到可用的程度：没有格子级屏幕缓冲，
-  // 取字只能从数据侧重建、和屏幕内容对不齐。
+  // 这是终端 agent 的正确形态（Claude Code 亦然）：内容直接打进主屏往下增长，
+  // 输入框和状态栏由 Ink 钉在底部实时重画，看着像独占，实际全部留在 scrollback。
+  // 由此得到三件事，都是备用屏方案做不到的：
+  //   · 退出后整段对话留在终端历史里，可以往上翻、可以复制
+  //   · 反复启动多次，每次的记录叠在一起，一条都不丢
+  //   · fn+滚动（或滚轮）直接翻终端 scrollback，能翻回招牌上方
   //
-  // 取舍很明确：把鼠标整个让给终端，换回可靠的原生选中和复制；折叠详情改用
-  // 键盘 Ctrl-O。1007 不依赖鼠标追踪，所以滚轮照样能滚。
-  const ENTER = '\x1b[?1049h\x1b[2J\x1b[H\x1b[?1007h'
-  const EXIT = '\x1b[?1007l\x1b[?1049l'
-  process.stdout.write(ENTER)
-
-  let restored = false
-  const restore = () => {
-    if (restored) return
-    restored = true
-    process.stdout.write(EXIT)
-  }
-  process.on('exit', restore)
-  process.on('SIGTERM', () => {
-    restore()
-    process.exit(0)
-  })
+  // 也因此不依赖任何终端设置 —— 备用屏那条路要求 Terminal.app 勾上
+  // 「允许应用程序使用备用屏幕」，没勾就整个失效，而这条路没有这个前提。
+  //
+  // 鼠标同样不接管：拖拽选中、Cmd-C 复制全部是终端原生行为。
 
 
   const instance = render(
@@ -160,14 +144,7 @@ async function main(): Promise<void> {
   try {
     await instance.waitUntilExit()
   } finally {
-    restore()
     backend.dispose()
-    // 退出后把对话摘要打回主屏 scrollback——全屏内容随备用屏消失了，
-    // 这一步让「退出后还能上拉回看这次聊了什么」成立（对齐 Claude Code 的手感）。
-    const { entries } = store.getSnapshot()
-    if (entries.length > 0) {
-      process.stdout.write(transcriptToText(entries) + '\n')
-    }
   }
 }
 
