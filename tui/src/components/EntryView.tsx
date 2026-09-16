@@ -124,10 +124,22 @@ function ToolGroup({
     )
   }
 
+  // 展开时整组**共享**一个行数预算，而不是每条各自截 20 行。
+  // 之前是后者：一次读 4 个文件、每条 20 行，展开后一下吐出 80+ 行，
+  // 把招牌和对话全冲出视口。预算按条数均摊，至少保证每条能露 3 行。
+  const perCall = expanded ? perCallBudget(calls.length) : 1
+
   return (
     <Box marginTop={1} flexDirection="column">
       {calls.map(call => (
-        <ToolLine key={call.id} call={call} expanded={expanded} columns={columns} theme={theme} />
+        <ToolLine
+          key={call.id}
+          call={call}
+          expanded={expanded}
+          maxOutputLines={perCall}
+          columns={columns}
+          theme={theme}
+        />
       ))}
     </Box>
   )
@@ -136,11 +148,13 @@ function ToolGroup({
 function ToolLine({
   call,
   expanded,
+  maxOutputLines,
   columns,
   theme,
 }: {
   call: ToolCall
   expanded: boolean
+  maxOutputLines: number
   columns: number
   theme: Theme
 }) {
@@ -158,7 +172,7 @@ function ToolLine({
       </Box>
       {expanded && call.output !== undefined && (
         <Box marginLeft={2} flexDirection="column">
-          {outputPreview(call.output, expanded).map((line, i) => (
+          {outputPreview(call.output, maxOutputLines).map((line, i) => (
             <Text key={i} color={theme.inactive}>
               {truncate(line, Math.max(10, columns - 4))}
             </Text>
@@ -190,12 +204,20 @@ function compactArgs(raw: string): string {
   return raw.replace(/\s+/g, ' ')
 }
 
-/** 展开时最多显示这么多行。完整内容始终原样发给了模型，这里只是给人看的。 */
-const EXPANDED_OUTPUT_LINES = 20
+/**
+ * 一组工具调用展开后总共最多显示这么多行输出。
+ * 是**整组的**预算，不是每条的——见 ToolGroup 里的均摊。
+ * 完整内容始终原样发给了模型，这里只是给人看的。
+ */
+export const EXPANDED_OUTPUT_BUDGET = 24
 
-function outputPreview(output: string, expanded: boolean): string[] {
+/** 整组预算按条数均摊，至少保证每条能露 3 行。 */
+export function perCallBudget(callCount: number): number {
+  return Math.max(3, Math.floor(EXPANDED_OUTPUT_BUDGET / Math.max(1, callCount)))
+}
+
+export function outputPreview(output: string, limit: number): string[] {
   const lines = output.split('\n')
-  const limit = expanded ? EXPANDED_OUTPUT_LINES : 1
   if (lines.length <= limit) return lines
   return [...lines.slice(0, limit), `… 还有 ${lines.length - limit} 行`]
 }
