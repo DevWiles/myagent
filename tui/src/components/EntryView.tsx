@@ -13,16 +13,27 @@ import { TextAttributes } from "@opentui/core"
 import { For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
-import { useTheme } from "../theme.ts"
+import { syntaxStyleFor, useTheme } from "../theme.ts"
 
-export function EntryView(props: { entry: Entry }) {
+export type EntryViewProps = {
+  entry: Entry
+  /**
+   * 这条是不是正在流式接收。
+   *
+   * 由上层判断而不是组件自己猜：判据是「它是最后一条 + 会话还忙着」，
+   * 这两个条件组件都看不到。
+   */
+  streaming?: boolean
+}
+
+export function EntryView(props: EntryViewProps) {
   return (
     <Switch>
       <Match when={props.entry.kind === "user" ? props.entry : null}>
         {(entry) => <UserEntry text={entry().text} />}
       </Match>
       <Match when={props.entry.kind === "assistant" ? props.entry : null}>
-        {(entry) => <AssistantEntry text={entry().text} />}
+        {(entry) => <AssistantEntry text={entry().text} streaming={props.streaming ?? false} />}
       </Match>
       <Match when={props.entry.kind === "thought" ? props.entry : null}>
         {(entry) => <ThoughtEntry text={entry().text} />}
@@ -53,13 +64,29 @@ function UserEntry(props: { text: string }) {
   )
 }
 
-function AssistantEntry(props: { text: string }) {
+/**
+ * 模型的回复，按 Markdown 渲染。
+ *
+ * 用 OpenTUI 内置的 `<markdown>`，不自己解析：它内部走 TreeSitter，
+ * 连代码块的语法高亮一起给了，自己写一个解析器只会得到一个更差的版本。
+ *
+ * `streaming` 这个 prop 是关键。text_delta 是一个字一个字推过来的，
+ * 中途的文本必然有半截语法——`**加粗` 还没收尾、代码围栏只开了没关。
+ * 打开 streaming 时它会把**最后一个块**当作未定稿处理，不急着解析成型；
+ * 流完再置回 false 定稿。不这么做的话，每来一个字符末尾就会在
+ * 「普通文本」和「加粗/代码块」之间反复横跳，看起来像屏幕在抽搐。
+ */
+function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
-  // text_delta 是增量推送，这个组件每来一个字就重渲染一次。
-  // 能这么写是因为 OpenTUI 的绘制在原生层做脏区，不是每帧重拼整屏字符串。
   return (
     <box paddingTop={1}>
-      <text fg={theme.text}>{props.text}</text>
+      {/* ⚠️ syntaxStyle 必须写在 content **前面**。
+          Solid 的 reconciler 按 JSX 里的书写顺序依次调 setter，而设置 content 会
+          立刻触发一次解析；syntaxStyle 还没赋值的话，那一趟解析查不到任何配色，
+          整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
+          去掉星号，**只是颜色全错**，非常难发现。
+          （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
+      <markdown syntaxStyle={syntaxStyleFor(theme)} content={props.text} streaming={props.streaming} />
     </box>
   )
 }

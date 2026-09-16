@@ -9,6 +9,7 @@
  * 2. 多了 `brandDim` / `border` / `panel` 三个 token，前者给招牌描边用，后两个给欢迎框用
  */
 
+import { SyntaxStyle, type ThemeTokenStyle } from "@opentui/core"
 import { createContext, useContext } from "solid-js"
 
 export type Theme = {
@@ -113,6 +114,79 @@ export const light: Theme = {
   inlineCode: "#92400e",
   codeBlock: "#166534",
   heading: "#1d4ed8",
+}
+
+/**
+ * 把主题翻译成 OpenTUI 的语法配色表。
+ *
+ * `<markdown>` 和 `<code>` 两个原生组件都要这个东西：它们内部用 TreeSitter 把文本
+ * 切成带作用域（scope）的片段，再来这张表里查该用什么颜色。
+ *
+ * 两类 scope：
+ * - `markup.*` 是 Markdown 自身的结构（标题、加粗、列表、行内代码…）
+ * - 其余是代码块内部的语法高亮（关键字、字符串、注释…）
+ *
+ * 不用把 scope 列全——查不到的会退回 `default`。这里只覆盖中文技术对话里
+ * 真正常见的那些，剩下的交给默认色，免得维护一张永远对不齐的大表。
+ */
+function syntaxRules(theme: Theme): ThemeTokenStyle[] {
+  return [
+    { scope: ["default"], style: { foreground: theme.text } },
+
+    // --- Markdown 结构 ---
+    //
+    // 标题要把 1~6 级**逐个列出**，不能只写 markup.heading。
+    // 渲染器内部有两条路径：行内 chunk 用 "markup.heading"，而块级文本走 TreeSitter
+    // 的 markdown 语法，那边给出的是带级别的 "markup.heading.2"。
+    // 查不到时的兜底只会砍到**第一段**（"markup"），不会退到 "markup.heading"，
+    // 所以少写一个后缀，整行标题就掉回默认色。
+    { scope: ["markup"], style: { foreground: theme.text } },
+    { scope: ["markup.heading"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.1"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.2"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.3"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.4"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.5"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.heading.6"], style: { foreground: theme.heading, bold: true } },
+    { scope: ["markup.bold", "markup.strong"], style: { foreground: theme.text, bold: true } },
+    { scope: ["markup.italic"], style: { foreground: theme.text, italic: true } },
+    { scope: ["markup.list"], style: { foreground: theme.brand } },
+    { scope: ["markup.quote"], style: { foreground: theme.subtle, italic: true } },
+    // 行内代码和围栏代码块都走 markup.raw——渲染器没有区分两者的 scope，
+    // 想让它们不同色得自己改 renderNode，暂时不值得
+    { scope: ["markup.raw"], style: { foreground: theme.inlineCode } },
+    { scope: ["markup.strikethrough"], style: { foreground: theme.inactive } },
+    { scope: ["markup.link", "markup.link.label"], style: { foreground: theme.user } },
+    { scope: ["markup.link.url"], style: { foreground: theme.subtle, underline: true } },
+
+    // --- 代码块内部 ---
+    { scope: ["comment", "comment.documentation"], style: { foreground: theme.inactive, italic: true } },
+    { scope: ["string", "string.escape", "symbol"], style: { foreground: theme.codeBlock } },
+    { scope: ["number", "boolean", "float", "constant"], style: { foreground: theme.warning } },
+    { scope: ["keyword", "keyword.return", "keyword.conditional", "keyword.repeat"], style: { foreground: theme.thought } },
+    { scope: ["keyword.import", "keyword.type", "keyword.modifier"], style: { foreground: theme.thought } },
+    { scope: ["function", "function.call", "function.method", "constructor"], style: { foreground: theme.user } },
+    { scope: ["type", "class", "module", "namespace"], style: { foreground: theme.toolName } },
+    { scope: ["variable", "variable.parameter", "property", "field"], style: { foreground: theme.text } },
+    { scope: ["operator", "punctuation", "punctuation.delimiter", "punctuation.bracket"], style: { foreground: theme.subtle } },
+  ]
+}
+
+/**
+ * 主题对应的语法配色，**按主题缓存**。
+ *
+ * `SyntaxStyle.fromTheme` 会在原生层分配一份资源，每次渲染都新建一个就是稳定泄漏；
+ * 而主题在一次运行里基本不变，缓存住最划算。
+ */
+const syntaxCache = new WeakMap<Theme, SyntaxStyle>()
+
+export function syntaxStyleFor(theme: Theme): SyntaxStyle {
+  let style = syntaxCache.get(theme)
+  if (!style) {
+    style = SyntaxStyle.fromTheme(syntaxRules(theme))
+    syntaxCache.set(theme, style)
+  }
+  return style
 }
 
 const ThemeContext = createContext<Theme>(dark)
