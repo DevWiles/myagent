@@ -10,8 +10,8 @@
  */
 
 import { TextAttributes } from "@opentui/core"
-import { For, Match, Switch } from "solid-js"
-import { firstLine, summarizeTools } from "../format.ts"
+import { For, Match, Show, Switch } from "solid-js"
+import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { useTheme } from "../theme.ts"
 
@@ -75,22 +75,34 @@ function ThoughtEntry(props: { text: string }) {
   )
 }
 
+/**
+ * 一组工具调用，**只画一行摘要**：「读取 3 个文件 · 执行 1 条命令」。
+ *
+ * 为什么不列每一条：工具名和参数是 agent 的内部动作，不是用户要读的东西。
+ * 一轮下来七八条 `✓ read_file {"path": ...}` 会把真正有信息量的模型回复挤到屏幕外，
+ * 用户得往回滚才能看到结论——代价远大于收益。
+ *
+ * 但有两件事不能藏，否则这行摘要会骗人：
+ * - **还在跑**：末尾加省略号，不然一条慢命令看起来像已经跑完了
+ * - **有失败**：单独标出来。失败会改变后面所有事情的含义，
+ *   只说「执行 1 条命令」而不说它失败了，用户会以为事情办成了
+ *
+ * 明细留给将来的 Ctrl-O 展开。
+ */
 function ToolsEntry(props: { calls: ToolCall[] }) {
   const theme = useTheme()
+  const running = () => props.calls.some((call) => call.running)
+  const failed = () => props.calls.filter((call) => call.ok === false).length
+
   return (
-    <box flexDirection="column" paddingTop={1}>
-      <text fg={theme.subtle}>{summarizeTools(props.calls)}</text>
-      <For each={props.calls}>
-        {(call) => (
-          <box flexDirection="row">
-            <text fg={call.running ? theme.spinner : call.ok ? theme.success : theme.error}>
-              {call.running ? "  ◐ " : call.ok ? "  ✓ " : "  ✗ "}
-            </text>
-            <text fg={theme.toolName}>{call.tool}</text>
-            <text fg={theme.toolArgs}> {firstLine(call.args, 60)}</text>
-          </box>
-        )}
-      </For>
+    <box flexDirection="row" paddingTop={1}>
+      <text fg={theme.subtle}>
+        {summarizeTools(props.calls)}
+        {running() ? "…" : ""}
+      </text>
+      <Show when={failed() > 0}>
+        <text fg={theme.error}> · {failed()} 个失败</text>
+      </Show>
     </box>
   )
 }
