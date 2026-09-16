@@ -118,20 +118,48 @@ async function main(): Promise<void> {
 
   const theme = THEMES[pickTheme(args.theme)]
 
-  // inline 渲染：**不进备用屏幕、不清屏**。
+  // 独占终端：进备用屏幕（alternate screen）。
   //
-  // 这是终端 agent 的正确形态（Claude Code 亦然）：内容直接打进主屏往下增长，
-  // 输入框和状态栏由 Ink 钉在底部实时重画，看着像独占，实际全部留在 scrollback。
-  // 由此得到三件事，都是备用屏方案做不到的：
-  //   · 退出后整段对话留在终端历史里，可以往上翻、可以复制
-  //   · 反复启动多次，每次的记录叠在一起，一条都不丢
-  //   · fn+滚动（或滚轮）直接翻终端 scrollback，能翻回招牌上方
+  // 这才是终端 agent 的形态（Claude Code 亦然）：运行时占满整屏，退出时主屏
+  // **原样恢复** —— 所以退出后你能看到启动前的命令历史（`% ./myagent-tui` 那行
+  // 还在），但和 agent 的对话不留在 scrollback 里，随备用屏一起消失。
   //
-  // 也因此不依赖任何终端设置 —— 备用屏那条路要求 Terminal.app 勾上
-  // 「允许应用程序使用备用屏幕」，没勾就整个失效，而这条路没有这个前提。
+  //   1049h  切备用屏（退出一条 1049l 把主屏还回来）
+  //   2J H   清屏 + 光标归左上，从 (0,0) 开画
   //
-  // 鼠标同样不接管：拖拽选中、Cmd-C 复制全部是终端原生行为。
+  // 刻意不开鼠标追踪：那会夺走终端原生的拖拽选中。滚动/选中/复制全交给终端。
+  //
+  // **重要**：Terminal.app 的「允许应用程序使用备用屏幕」若没勾选，1049 会被
+  // 直接忽略，程序就退化成在主屏往下打印（表现为「没有独占」）。所以下面用
+  // DECRQM 查询终端是否真的接受了，没接受就明确告知用户怎么开，而不是静默失败。
+  const ENTER_ALT = '\x1b[?1049h\x1b[2J\x1b[H'
+  const EXIT_ALT = '\x1b[?1049l'
 
+  process.stdout.write(ENTER_ALT)
+  const altOk = await probeAltScreen()
+  if (!altOk) {
+    process.stdout.write(EXIT_ALT)
+    console.error(
+      '\n无法独占终端：你的终端忽略了备用屏幕（alternate screen）。\n' +
+        'macOS Terminal.app 请开启：\n' +
+        '  设置 → 描述文件 → 选中当前描述文件 → 高级 →\n' +
+        '  勾选「允许应用程序使用备用屏幕缓冲区」，然后**新开一个窗口**。\n' +
+        '（iTerm2 / Ghostty 默认已开启。tmux 需要 set -g alternate-screen on）\n',
+    )
+    process.exit(3)
+  }
+
+  let restored = false
+  const restore = () => {
+    if (restored) return
+    restored = true
+    process.stdout.write(EXIT_ALT)
+  }
+  process.on('exit', restore)
+  process.on('SIGTERM', () => {
+    restore()
+    process.exit(0)
+  })
 
   const instance = render(
     createElement(ThemeProvider, { value: theme }, createElement(App, { store, backend })),
@@ -146,6 +174,41 @@ async function main(): Promise<void> {
   } finally {
     backend.dispose()
   }
+}
+
+/**
+ * 问终端：1049（备用屏）现在是什么状态？
+ *
+ * DECRQM：发 `ESC [ ? 1049 $ p`，终端回 `ESC [ ? 1049 ; <v> $ y`。
+ *   v=1 已开启（我们刚发的 1049h 生效了）  v=2 未开启（被忽略）
+ *   v=0 不支持这个模式
+ * 不回应的终端也存在（不支持 DECRQM），那按「支持」处理——不能因为查不到
+ * 就把能用的终端也挡掉。
+ */
+function probeAltScreen(): Promise<boolean> {
+  return new Promise(resolve => {
+    if (!process.stdin.isTTY) return resolve(true)
+    let buf = ''
+    let settled = false
+    const finish = (ok: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      process.stdin.off('data', onData)
+      process.stdin.setRawMode?.(false)
+      resolve(ok)
+    }
+    const onData = (chunk: Buffer) => {
+      buf += chunk.toString('binary')
+      const m = /\x1b\[\?1049;(\d+)\$y/.exec(buf)
+      if (m) finish(m[1] === '1' || m[1] === '3')
+    }
+    process.stdin.setRawMode?.(true)
+    process.stdin.on('data', onData)
+    process.stdout.write('\x1b[?1049$p')
+    // 没回应 = 终端不支持状态查询，按能用处理
+    const timer = setTimeout(() => finish(true), 300)
+  })
 }
 
 /**
