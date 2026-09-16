@@ -14,7 +14,7 @@
 import { TextAttributes } from "@opentui/core"
 import { createMemo } from "solid-js"
 import type { Approval } from "../../../src/store.ts"
-import { truncateEnd } from "../path.ts"
+import { truncateEnd, width } from "../path.ts"
 import { useTheme } from "../theme.ts"
 
 export type ApprovalDialogProps = {
@@ -27,8 +27,11 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
   // 边框 2 列 + 左右内边距 2 列
   const inner = () => Math.max(12, props.columns - 4)
 
+  // 预算要按**显示宽度**减，不能用 .length：
+  // 「执行命令」是 4 个字符但占 8 列，按字符数算会少扣 4 列，
+  // 长命令就正好溢出一点点，把动作行折成两行，框被撑高、按钮行顶出可视区。
   const detail = createMemo(() =>
-    truncateEnd(props.approval.detail, Math.max(4, inner() - props.approval.action.length - 2)),
+    truncateEnd(props.approval.detail, Math.max(4, inner() - width(props.approval.action) - 2)),
   )
   const reason = createMemo(() => truncateEnd(`原因: ${props.approval.reason}`, inner()))
 

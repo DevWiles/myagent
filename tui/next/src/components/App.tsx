@@ -51,24 +51,42 @@ export function App(props: AppProps) {
   // 因为矮终端下那个框可能整个不渲染，而后端正卡着等回答——
   // 按键要是跟着组件消失，会话就永久挂死了。这条纪律从 Ink 版继承。
   useKeyboard((key: KeyEvent) => {
+    /**
+     * 「这个键我消费了」。
+     *
+     * 不调用它会怎样：OpenTUI 的派发顺序是**全局 handler 先跑、renderable 后跑**，
+     * 而我们在全局 handler 里答完确认框就把 pending 清掉，输入框同一瞬间重新获得焦点，
+     * 于是紧接着的 renderable 派发把同一个按键又交给了输入框——
+     * 按 y 同意之后，输入框里凭空多出一个 y。
+     * preventDefault() 正好卡在两段派发之间（InternalKeyHandler.emitWithPriority）。
+     */
+    const consume = () => key.preventDefault()
+
     const approval = state().approval
     if (approval) {
-      if (key.name === "y") return session.approve(approval.id, "yes")
-      if (key.name === "n" || key.name === "escape") return session.approve(approval.id, "no")
-      if (key.name === "a") return session.approve(approval.id, "always")
-      return
+      if (key.name === "y") return consume(), session.approve(approval.id, "yes")
+      if (key.name === "n" || key.name === "escape")
+        return consume(), session.approve(approval.id, "no")
+      if (key.name === "a") return consume(), session.approve(approval.id, "always")
+      // 确认框挂着时，其余按键一律吞掉：此刻不该有任何别的操作
+      return consume()
     }
 
     // 计划确认同一套道理。刻意没有 [a]——每份计划都不一样，不给一次性授权
     const confirm = state().planConfirm
     if (confirm) {
-      if (key.name === "y" || key.name === "return") return session.confirmPlan(confirm.id, true)
-      if (key.name === "n" || key.name === "escape") return session.confirmPlan(confirm.id, false)
-      return
+      if (key.name === "y" || key.name === "return")
+        return consume(), session.confirmPlan(confirm.id, true)
+      if (key.name === "n" || key.name === "escape")
+        return consume(), session.confirmPlan(confirm.id, false)
+      return consume()
     }
 
     // 没有确认框时，Esc 中断当前这一轮
-    if (key.name === "escape" && state().busy) session.cancel()
+    if (key.name === "escape" && state().busy) {
+      consume()
+      session.cancel()
+    }
   })
 
   return (
