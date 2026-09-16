@@ -119,14 +119,22 @@ src/
 负 marginTop 平移」自己做滚动，高度用 `measureElement` 每帧量。因为消息都活着，
 任何一条工具调用——包括很早以前的——都能点开或 Ctrl-O 展开。
 
-**2. 鼠标点击展开：自己接管鼠标。**
+**2. 鼠标点击展开 + 自研文本选中：自己接管鼠标。**
 社区 ink 完全没有鼠标支持，所以我们自己开鼠标追踪（`1000h+1006h`）、自己从 stdin
 解析 SGR 序列（`mouse.ts`）、自己做命中测试。关键是**在数据进 ink 之前**把鼠标
 序列过滤掉（`main.tsx` 给 ink 传一个过滤后的 PassThrough stdin），否则 ink 会把
 `\x1b[<…m` 当垃圾按键塞进输入框。命中测试（`TranscriptView.hitTest`）把点击行号
-配合滚动偏移映射回是哪个工具组。代价：终端原生滚轮/选中被接管——滚轮我们自己转成
-滚动，选中改按 option 拖拽走终端原生。这正是那份泄露版 Claude Code 自研 ink 里
-`hit-test.ts`/`selection.ts` 做的事，只是我们用社区 ink 只补了点击+滚动这条最小链路。
+配合滚动偏移映射回是哪个工具组。开了鼠标追踪，终端原生的滚轮和拖拽选中就都没了，所以两样都得自己补回来：
+滚轮转成滚动；选中由 `selection.ts`（选区状态机 + 取字）+ 反色覆盖层 +
+`clipboard.ts`（pbcopy / tmux load-buffer / OSC 52 三条降级通路）实现，
+松手即写系统剪贴板。这和那份泄露版 Claude Code 的做法是同一条路
+（它的 `selection.ts` 918 行 + `useCopyOnSelect`），区别是它的渲染器自带格子级
+屏幕缓冲、能 `setCellStyleId` 逐格换背景，我们只能按行内列区间叠反色覆盖层。
+
+取字这里踩过两个坑，都写进代码注释了：用 `renderToString` 拿屏幕文本走不通 ——
+在 render 里调是「渲染中触发嵌套渲染」React 直接退出，在 effect 里调则会另建一套
+Yoga 布局树、和运行中的 Ink 实例抢同一个 WASM 实例，崩在 `Out of bounds
+call_indirect`。最后改成从数据重建文本、按 `measureElement` 量到的真实行高对齐。
 
 **3. 退出把对话打回主屏 scrollback。**
 全屏内容随备用屏幕消失，退出时 `main.tsx` 用 `transcriptToText` 把对话摘要打回

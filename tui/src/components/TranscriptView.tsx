@@ -14,9 +14,12 @@
 import { Box, Text, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import { entryToLines, rowRange, type Point, type SelectionState } from '../selection.ts'
 import type { Entry } from '../store.ts'
 import { useTheme } from '../theme.ts'
 import { EntryView } from './EntryView.tsx'
+
+const ANSI = /\x1b\[[0-9;]*m/g
 
 export type TranscriptHandle = {
   scrollBy(lines: number): void
@@ -24,6 +27,10 @@ export type TranscriptHandle = {
   scrollToBottom(): void
   /** 屏幕行号（0 起，相对视口顶）→ 该行所在的工具组 key，没有则 null。 */
   hitTest(screenRow: number): string | null
+  /** 屏幕坐标 →「内容坐标」。选区一律用内容坐标存，滚动后才不会错位。 */
+  pointAt(screenCol: number, screenRow: number): Point
+  /** 全部内容的纯文本，按内容行号索引。取字用。 */
+  getLines(): string[]
 }
 
 type Props = {
@@ -32,6 +39,8 @@ type Props = {
   height: number
   columns: number
   header?: React.ReactNode
+  /** 当前选区（内容坐标）。用来画反色高亮。 */
+  selection?: SelectionState
   handleRef?: Ref<TranscriptHandle>
   /**
    * 变一次就重新测量一遍布局。resize 后 Yoga 的折行结果全变了，
@@ -50,9 +59,24 @@ export function TranscriptView({
   height,
   columns,
   header,
+  selection,
   handleRef,
   repaintToken,
 }: Props) {
+  // 选区取字的文本来源。
+  //
+  // 试过两条死路，都记在这儿免得再走：
+  // 1. render 里调 renderToString —— React 报「渲染中触发嵌套渲染」直接退出。
+  // 2. effect 里调 renderToString —— 它会另建一套 Yoga 布局树，和正在运行的
+  //    Ink 实例共用同一个 WASM 实例、互相踩内存，进程崩在
+  //    「Out of bounds call_indirect」。
+  //
+  // 所以改为**从数据重建文本**：每个 entry 自己知道它渲染成哪几行（entryLines），
+  // 配合 measureElement 量到的真实行高对齐。代价是复制出来的文本没有 Markdown
+  // 的装饰（比如列表的 • 前缀），拿到的是更接近原文的纯文本 —— 对「复制去粘贴」
+  // 这个用途反而更合适。
+  const linesRef = useRef<string[]>([])
+
   const theme = useTheme()
   const contentRef = useRef<DOMElement>(null)
   const headerRef = useRef<DOMElement>(null)
@@ -67,30 +91,26 @@ export function TranscriptView({
    * 为什么不用「距底部多少行」来存：流式输出时内容每秒长高几十行，
    * 同一个「距底部」值对应的内容位置一直在漂，视野就被不断拽回底部 ——
    * 表现就是「流式输出时没法往上滚，只能等它输完」。
-   * 锚在内容顶部的绝对行号上，下方怎么长都不影响已经看到的位置。
    */
   const [anchor, setAnchor] = useState<number | null>(null)
   const [contentHeight, setContentHeight] = useState(0)
 
-  // 尺寸变了：回到贴底跟随。折行全变了，旧锚点对应不到原来的位置，
-  // 与其停在一个错位的地方，不如落到「最新内容」这个确定的位置。
+  // 尺寸变了：回到贴底跟随。折行全变了，旧锚点对应不到原来的位置。
   useEffect(() => {
     setAnchor(null)
   }, [repaintToken, columns, height])
 
-  // 每次 commit 后：量内容总高，并重建 hitMap（每个工具组的视口行区间）。
-  // 依赖数组留空是刻意的——折行随宽度变，内容没变宽度变了高度也变，每次都量。
+  // 每次 commit 后：量内容总高、重建 hitMap、重建选区取字用的文本行。
   //
-  // 这个 effect 每次 commit 都跑，所以**任何 setState 都必须先判等再调**。
-  // 否则就是「渲染 → 测量 → setState → 渲染」的自激循环：流式文本一秒几十次
-  // 更新，叠上这个循环会直接撞穿 React 的嵌套更新上限
-  // （Maximum update depth exceeded），进程崩掉。
+  // 依赖数组留空是刻意的——折行随宽度变，内容没变宽度变了高度也变，每次都量。
+  // 但因此**任何 setState 都必须先判等再调**，否则就是
+  // 「渲染 → 测量 → setState → 渲染」的自激循环，流式输出时会撞穿
+  // React 的嵌套更新上限（Maximum update depth exceeded）。
   useEffect(() => {
     if (contentRef.current) {
       const measured = measureElement(contentRef.current).height
       if (measured !== contentHeight) setContentHeight(measured)
     }
-    // 内容坐标：header 高度打头，随后按 entries 顺序累加各元素高度
     const spans: HitSpan[] = []
     const headerH = headerRef.current ? measureElement(headerRef.current).height : 0
     let y = headerH
@@ -103,14 +123,31 @@ export function TranscriptView({
       y += h
     }
     hitMap.current = spans
+
+    // 选区取字用的文本行。关键是**按量到的真实行高对齐**：一条消息在屏幕上
+    // 可能因折行占 5 行而原文只有 2 行，直接拼接会让行号和屏幕错位、选出来的
+    // 字对不上。不足补空串、超出截断，保证 linesRef[i] 对应内容行 i。
+    const text: string[] = []
+    for (let i = 0; i < headerH; i++) text.push('')
+    for (const entry of entries) {
+      const el = rowRefs.current.get(entry.key)
+      const rowsUsed = el ? measureElement(el).height : 0
+      const own = entryToLines(entry as never)
+      // EntryView 给每条消息加了 marginTop=1（消息之间的空行），它算在 rowsUsed
+      // 里但不属于正文。漏掉这一行，后面所有行号都会整体偏移 1，选出来的字
+      // 就串到上一行去了。
+      const LEAD_BLANK = 1
+      for (let i = 0; i < rowsUsed; i++) {
+        text.push(i < LEAD_BLANK ? '' : (own[i - LEAD_BLANK] ?? ''))
+      }
+    }
+    linesRef.current = text
   })
 
   const maxHidden = Math.max(0, contentHeight - height)
-  // 贴底跟随时隐藏最多；锚住时按锚点算，并钳进合法范围
   const hiddenAbove = anchor === null ? maxHidden : Math.max(0, Math.min(anchor, maxHidden))
-  // 内容不够高时，剩下的行要用空格铺满。
-  // 空的 Box 不产生任何字符，Ink 就什么都不写，那些格子上一帧的字符会留着 ——
-  // 这正是缩放后出现残影的根源之一。铺上空格，画面就自带擦除能力。
+  // 内容不够高时，剩下的行要用空格铺满：空 Box 不产生字符，Ink 就什么都不写，
+  // 那些格子上一帧的字符会留着——这是缩放后出现残影的根源之一。
   const blankRows = Math.max(0, height - contentHeight)
 
   useImperativeHandle(handleRef, () => ({
@@ -137,7 +174,43 @@ export function TranscriptView({
       }
       return null
     },
+    pointAt(screenCol, screenRow) {
+      return { row: screenRow + hiddenAbove, col: Math.max(0, screenCol) }
+    },
+    getLines: () => linesRef.current,
   }), [maxHidden, hiddenAbove])
+
+  // 选区高亮：逐行算出「这一行的哪一段被选中」，在对应屏幕行叠一条反色文本。
+  // 只处理视口内的行——看不见的没必要画。
+  const selectionOverlay = (() => {
+    if (!selection?.anchor || !selection.focus) return null
+    const lines = linesRef.current
+    if (lines.length === 0) return null
+
+    const overlays: React.ReactNode[] = []
+    for (let screenRow = 0; screenRow < height; screenRow++) {
+      const contentRow = screenRow + hiddenAbove
+      const range = rowRange(selection, contentRow)
+      if (!range) continue
+      const line = lines[contentRow]
+      if (line === undefined) continue
+
+      const chars = [...line]
+      const to = range.to === null ? chars.length : Math.min(range.to, chars.length)
+      if (to <= range.from) continue
+      // 整行都是空白就别画了，否则选到空行会出现一条突兀的反色条
+      const piece = chars.slice(range.from, to).join('')
+      if (piece.trim() === '') continue
+
+      overlays.push(
+        <Box key={`sel-${screenRow}`} position="absolute" marginTop={screenRow}>
+          <Text>{' '.repeat(range.from)}</Text>
+          <Text inverse>{piece}</Text>
+        </Box>,
+      )
+    }
+    return overlays.length > 0 ? overlays : null
+  })()
 
   return (
     <Box flexDirection="column" height={height} overflow="hidden">
@@ -160,6 +233,12 @@ export function TranscriptView({
           </Box>
         ))}
       </Box>
+
+      {/* 选区高亮：绝对定位的覆盖层，把选中的那几段用反色重画一遍。
+          社区 ink 没有格子级屏幕缓冲（那份 Claude Code 源码能 setCellStyleId
+          逐格换背景，我们做不到），所以走「覆盖层重绘」这条路：
+          按行取出选中的列区间，在对应屏幕行上叠一条反色文本。 */}
+      {selectionOverlay}
       {blankRows > 0 &&
         Array.from({ length: blankRows }, (_, i) => (
           <Text key={`blank-${i}`}>{' '.repeat(Math.max(1, columns))}</Text>

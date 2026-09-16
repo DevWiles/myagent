@@ -71,7 +71,7 @@ export function Banner({ ready, columns }: Props) {
       </Text>
       <Text color={theme.inactive} wrap="truncate">
         {columns >= 64
-          ? 'Enter 发送 · Esc 中断 · 点工具行或 Ctrl-O 展开 · /help 查看命令'
+          ? 'Enter 发送 · 点工具行展开 · 拖拽选中即复制 · /help 查看命令'
           : 'Enter 发送 · /help'}
       </Text>
     </Box>
