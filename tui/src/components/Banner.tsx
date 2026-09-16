@@ -1,9 +1,21 @@
-/** 启动招牌。窄终端下自动退化成一行文字。 */
+/**
+ * 启动招牌。
+ *
+ * 两个布局约束（对齐 Claude Code 的手感）：
+ * - **宽度撑满屏幕**：`width={columns}`，终端拉宽拉窄边框跟着走
+ * - **高度固定**：无论宽窄都是同样的行数，缩放时不会忽高忽低把下面的内容顶来顶去
+ *
+ * 宽度不够画大字招牌时退化成一行文字，但**高度保持不变**（用空行补齐），
+ * 这样从宽屏拖窄的过程里 transcript 不会跳。
+ */
 
 import { Box, Text } from 'ink'
 import { LOGO_LINES, LOGO_MIN_WIDTH } from '../format.ts'
 import type { ReadyInfo } from '../store.ts'
 import { useTheme } from '../theme.ts'
+
+/** 招牌固定占的行数：边框 2 + logo 6 + 空 1 + 信息 2 + 空 1 + 提示 1 = 13 */
+export const BANNER_HEIGHT = 13
 
 type Props = {
   ready: ReadyInfo
@@ -13,33 +25,52 @@ type Props = {
 export function Banner({ ready, columns }: Props) {
   const theme = useTheme()
   const showLogo = columns >= LOGO_MIN_WIDTH
+  // 内容区宽度 = 总宽 - 左右边框 2 - 左右 padding 2
+  const inner = Math.max(10, columns - 4)
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box
+      flexDirection="column"
+      width={columns}
+      height={BANNER_HEIGHT}
+      borderStyle="round"
+      borderColor={theme.brand}
+      paddingX={1}
+      flexShrink={0}
+    >
       {showLogo ? (
         LOGO_LINES.map((line, i) => (
-          <Text key={i} color={theme.brand}>
+          <Text key={i} color={theme.brand} wrap="truncate">
             {line}
           </Text>
         ))
       ) : (
-        <Text color={theme.brand} bold>
-          myagent
-        </Text>
+        <>
+          <Text color={theme.brand} bold>
+            myagent
+          </Text>
+          {/* 窄屏也占满 logo 的 6 行，保证招牌高度恒定 */}
+          {[1, 2, 3, 4, 5].map(i => (
+            <Text key={i}> </Text>
+          ))}
+        </>
       )}
 
-      <Box marginTop={showLogo ? 1 : 0}>
-        <Text color={theme.subtle}>
-          v{ready.version} · {ready.model} · {ready.tools.length} 个工具
-          {ready.planMode ? ' · 只读模式' : ''}
-        </Text>
-      </Box>
-      <Text color={theme.inactive}>{ready.workspace}</Text>
-      <Box marginTop={1}>
-        <Text color={theme.inactive}>
-          Enter 发送 · Esc 中断 · Ctrl-O 展开过程 · /help 查看命令
-        </Text>
-      </Box>
+      <Text> </Text>
+      <Text color={theme.subtle} wrap="truncate">
+        v{ready.version} · {ready.model} · {ready.tools.length} 个工具
+        {ready.planMode ? ' · 只读模式' : ''}
+      </Text>
+      {/* 路径可能很长，截断而不是折行——折行会把招牌撑高，破坏固定高度 */}
+      <Text color={theme.inactive} wrap="truncate-start">
+        {ready.workspace}
+      </Text>
+      <Text> </Text>
+      <Text color={theme.inactive} wrap="truncate">
+        {inner >= 60
+          ? 'Enter 发送 · Esc 中断 · 点工具行或 Ctrl-O 展开 · /help 查看命令'
+          : 'Enter 发送 · /help'}
+      </Text>
     </Box>
   )
 }

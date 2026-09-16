@@ -14,16 +14,16 @@
  * 键盘同样能滚：↑/↓ 一行、PgUp/PgDn 一屏、Home/End 顶/底。输入历史走 Ctrl-P/N。
  */
 
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp, useInput, useWindowSize } from 'ink'
 import type { EventEmitter } from 'node:events'
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Backend } from '../backend.ts'
 import type { MouseEvent } from '../mouse.ts'
 import type { ApprovalDecision } from '../protocol.ts'
 import type { SessionStore } from '../store.ts'
 import { useTheme } from '../theme.ts'
 import { ApprovalDialog } from './ApprovalDialog.tsx'
-import { Banner } from './Banner.tsx'
+import { BANNER_HEIGHT, Banner } from './Banner.tsx'
 import { PromptInput } from './PromptInput.tsx'
 import { Spinner } from './Spinner.tsx'
 import { StatusLine } from './StatusLine.tsx'
@@ -53,10 +53,15 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const { exit } = useApp()
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const transcript = useRef<TranscriptHandle>(null)
+  /** 对话内容（不含招牌）的真实行数，由 TranscriptView 量好上报。 */
+  const [entriesRows, setEntriesRows] = useState(0)
+  /** 招牌是否还占着顶部。见下面的滞回判定。 */
+  const bannerVisible = useRef(true)
 
-  // useStdout 的 columns/rows 会随 resize 更新；useWindowSize 也行，这里直接读。
-  const columns = process.stdout.columns || 80
-  const rows = process.stdout.rows || 24
+  // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
+  // 窗口一变大变小就重渲染，整个布局（宽度撑满的 banner/输入框、视口高度、
+  // 内容折行）跟着重算。直接读 process.stdout 是一次性快照，resize 后布局就错位了。
+  const { columns, rows } = useWindowSize()
 
   useEffect(() => {
     const offEvent = backend.onEvent(event => store.apply(event))
@@ -173,17 +178,38 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const approvalRows = state.approval ? 8 : 0
   const closedRows = state.closed ? 1 : 0
   const bottomRows = spinnerRows + approvalRows + closedRows + 3 /* input */ + 1 /* status */
-  const viewportRows = Math.max(3, rows - bottomRows)
+  /** 招牌 + 对话可用的总高度。 */
+  const availRows = Math.max(3, rows - bottomRows)
+
+  // 招牌固定在顶部，直到对话内容多到铺满屏幕才让位给它。
+  //
+  // 用 ref 存这个开关、在 render 里直接算，而不是 useState：它是从「内容行数」
+  // 推出来的派生值，用 state 就得在 render 阶段 setState（React 不喜欢）或多跑
+  // 一轮渲染。entriesRows 本身是 state，它一变就会重渲染，所以 ref 够了。
+  //
+  // 两个阈值（滞回）而不是一个：只用一个阈值时，内容正好卡在边界上会
+  // 「隐藏→空间变大→该显示→空间变小→该隐藏」每帧翻转，屏幕会疯狂闪。
+  // 隐藏后要等内容明显缩回去（留 2 行余量）才重新显示。
+  const roomWithBanner = availRows - BANNER_HEIGHT
+  if (bannerVisible.current && entriesRows > roomWithBanner) bannerVisible.current = false
+  else if (!bannerVisible.current && entriesRows <= roomWithBanner - 2) bannerVisible.current = true
+
+  // 终端太矮就不给招牌留位置了，对话优先
+  const showBanner =
+    state.ready !== null && bannerVisible.current && rows >= BANNER_HEIGHT + 6
+  const viewportRows = Math.max(3, availRows - (showBanner ? BANNER_HEIGHT : 0))
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
+      {showBanner && state.ready && <Banner ready={state.ready} columns={columns} />}
+
       <TranscriptView
         entries={state.entries}
         expanded={state.expanded}
         height={viewportRows}
         columns={columns}
         handleRef={transcript}
-        header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
+        onEntriesHeight={setEntriesRows}
       />
 
       {spinnerRows > 0 && <Spinner step={state.step} startedAt={state.startedAt} />}

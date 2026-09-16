@@ -33,12 +33,28 @@ type Props = {
   columns: number
   header?: React.ReactNode
   handleRef?: Ref<TranscriptHandle>
+  /**
+   * 上报对话内容（不含 header）的真实行数。
+   * App 用它决定「历史是否已铺满屏幕」，从而让固定在顶部的招牌让位。
+   * 之所以要排除 header：招牌显示与否会改变可用高度，若把它算进来，
+   * 「显示招牌 → 高度变小 → 判定溢出 → 隐藏招牌 → 高度变大 → 判定不溢出」
+   * 会来回抖。只看内容本身，这个量和招牌是否显示无关。
+   */
+  onEntriesHeight?: (rows: number) => void
 }
 
 /** 一个工具组在视口里占据的行区间（含 y0，不含 y1）。 */
 type HitSpan = { key: string; y0: number; y1: number }
 
-export function TranscriptView({ entries, expanded, height, columns, header, handleRef }: Props) {
+export function TranscriptView({
+  entries,
+  expanded,
+  height,
+  columns,
+  header,
+  handleRef,
+  onEntriesHeight,
+}: Props) {
   const theme = useTheme()
   const contentRef = useRef<DOMElement>(null)
   const headerRef = useRef<DOMElement>(null)
@@ -58,7 +74,8 @@ export function TranscriptView({ entries, expanded, height, columns, header, han
     }
     // 内容坐标：header 高度打头，随后按 entries 顺序累加各元素高度
     const spans: HitSpan[] = []
-    let y = headerRef.current ? measureElement(headerRef.current).height : 0
+    const headerH = headerRef.current ? measureElement(headerRef.current).height : 0
+    let y = headerH
     for (const entry of entries) {
       const el = rowRefs.current.get(entry.key)
       const h = el ? measureElement(el).height : 0
@@ -68,6 +85,7 @@ export function TranscriptView({ entries, expanded, height, columns, header, han
       y += h
     }
     hitMap.current = spans
+    onEntriesHeight?.(y - headerH)
   })
 
   const maxOffset = Math.max(0, contentHeight - height)
