@@ -108,7 +108,16 @@ export function App(props: AppProps) {
             这套不用，滚动在原生层做。 */}
         <box flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
           <scrollbox stickyScroll stickyStart="bottom">
-            <For each={state().entries}>{(entry) => <EntryView entry={entry} />}</For>
+            {/* streaming 只给最后一条、且会话还忙着的那条——
+                只有它的文本还会继续长，其余都已定稿 */}
+            <For each={state().entries}>
+              {(entry, index) => (
+                <EntryView
+                  entry={entry}
+                  streaming={state().busy && index() === state().entries.length - 1}
+                />
+              )}
+            </For>
           </scrollbox>
         </box>
 
