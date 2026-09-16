@@ -40,6 +40,7 @@ import type { ApprovalDecision } from '../protocol.ts'
 import type { SessionStore } from '../store.ts'
 import { MODE_ALT_SCROLL, disableModes, enableModes } from '../terminal.ts'
 import { ApprovalDialog } from './ApprovalDialog.tsx'
+import { PlanConfirmDialog } from './PlanConfirmDialog.tsx'
 import { Banner } from './Banner.tsx'
 import { ClosedLine } from './ClosedLine.tsx'
 import { PromptInput } from './PromptInput.tsx'
@@ -49,6 +50,7 @@ import { TranscriptView, type TranscriptHandle } from './TranscriptView.tsx'
 
 const HELP = [
   '/help     显示本帮助',
+  '/plan 目标  先规划后执行：拆成任务依赖图，确认后逐个跑',
   '/tools    列出可用工具',
   '/clear    清空对话（后端的上下文也会清）',
   '/exit     退出',
@@ -130,11 +132,14 @@ export function App({ store, backend, fullscreen }: Props) {
     }
   }, [backend, store, exit])
 
-  const inputActive = state.approval === null && state.closed === null
+  const inputActive =
+    state.approval === null && state.planConfirm === null && state.closed === null
 
-  const plan = planBottomStack(layoutRows, {
+  // 计划确认框借用审批框的降级档位：两者永不同时出现
+  // （确认发生在执行之前，审批发生在执行之中），共用一套高度约定即可
+  const bottom = planBottomStack(layoutRows, {
     busy: state.busy,
-    hasApproval: state.approval !== null,
+    hasApproval: state.approval !== null || state.planConfirm !== null,
     hasClosed: state.closed !== null,
   })
 
@@ -146,15 +151,34 @@ export function App({ store, backend, fullscreen }: Props) {
     [backend, state.approval],
   )
 
+  const handlePlanConfirm = useMemo(
+    () => (approved: boolean) => {
+      const confirm = state.planConfirm
+      if (!confirm) return
+      backend.send({ t: 'plan_confirm_reply', id: confirm.id, approved })
+      store.clearPlanConfirm()
+      transcript.current?.scrollToBottom()
+    },
+    [backend, store, state.planConfirm],
+  )
+
   useInput((input, key) => {
     // 确认框的按键在**这里**接，而不是在 ApprovalDialog 里。
-    // 因为终端矮到放不下那个框时（plan.approval === 'none'）组件根本不渲染，
+    // 因为终端矮到放不下那个框时（bottom.approval === 'none'）组件根本不渲染，
     // 而后端此刻正卡在 approve() 上等回答——按键要是跟着组件消失，会话就挂死了。
     if (state.approval) {
       const answer = input.toLowerCase()
       if (answer === 'y') return handleDecision('yes')
       if (answer === 'n' || key.escape) return handleDecision('no')
       if (answer === 'a') return handleDecision('always')
+      return
+    }
+    // 计划确认和审批同一套道理：矮终端下框可能不渲染，但后端正卡着等，
+    // 按键必须无条件活着。刻意没有 [a]——每份计划都不一样，不给一次性授权。
+    if (state.planConfirm) {
+      const answer = input.toLowerCase()
+      if (answer === 'y' || key.return) return handlePlanConfirm(true)
+      if (answer === 'n' || key.escape) return handlePlanConfirm(false)
       return
     }
 
@@ -214,6 +238,28 @@ export function App({ store, backend, fullscreen }: Props) {
         backend.send({ t: 'reset' })
         return
       }
+      if (command === '/plan' || command.startsWith('/plan ')) {
+        const goal = command.slice('/plan'.length).trim()
+        const features = state.ready?.features ?? []
+        store.submitPrompt(command)
+        transcript.current?.scrollToBottom()
+        if (!features.includes('plan')) {
+          // 老后端没有这个能力。这正是 features 存在的意义：界面知道差在哪儿，
+          // 而不是把命令发出去换一句「未知命令」
+          store.notice('error', '这个后端不支持先规划后执行——重新 build 一次 jar（mvn -DskipTests package）')
+          return
+        }
+        if (goal.length === 0) {
+          store.notice('info', '用法: /plan <要做的事>   例如  /plan 给 Task 加上重试能力')
+          return
+        }
+        if (state.busy) {
+          store.notice('warn', '正在处理上一条，先等它结束或按 Esc 中断')
+          return
+        }
+        backend.send({ t: 'plan', goal })
+        return
+      }
       if (state.busy) {
         store.notice('warn', '正在处理上一条，先等它结束或按 Esc 中断')
         return
@@ -239,36 +285,40 @@ export function App({ store, backend, fullscreen }: Props) {
         columns={columns}
         handleRef={transcript}
         repaintToken={epoch}
-        seedHeight={Math.max(1, layoutRows - plan.height)}
+        seedHeight={Math.max(1, layoutRows - bottom.height)}
         header={state.ready ? <Banner ready={state.ready} columns={columns} /> : undefined}
       />
 
       <Box flexDirection="column" flexShrink={0}>
-        {plan.spinner && (
+        {bottom.spinner && (
           <Spinner step={state.step} startedAt={state.startedAt} columns={columns} />
         )}
 
-        {plan.approval !== 'none' && state.approval && (
+        {bottom.approval !== 'none' && state.approval && (
           <ApprovalDialog
             approval={state.approval}
             columns={columns}
-            variant={plan.approval}
+            variant={bottom.approval}
           />
         )}
 
-        {plan.closed && state.closed && <ClosedLine reason={state.closed} columns={columns} />}
+        {bottom.approval !== 'none' && !state.approval && state.planConfirm && (
+          <PlanConfirmDialog columns={columns} variant={bottom.approval} />
+        )}
+
+        {bottom.closed && state.closed && <ClosedLine reason={state.closed} columns={columns} />}
 
         <PromptInput
           busy={state.busy}
           isActive={inputActive}
           columns={columns}
-          bare={plan.input === 'bare'}
+          bare={bottom.input === 'bare'}
           placeholder={state.busy ? '正在处理…（Esc 中断）' : '说点什么，或 /help'}
           onSubmit={handleSubmit}
           onRequestExit={exit}
         />
 
-        {plan.status && <StatusLine state={state} columns={columns} />}
+        {bottom.status && <StatusLine state={state} columns={columns} />}
       </Box>
     </Box>
   )

@@ -296,3 +296,123 @@ describe('其它', () => {
     expect(store.getSnapshot()).toBe(before)
   })
 })
+
+// ------------------------------------------------------------ 先规划后执行
+
+import type { PlanTaskWire } from './protocol.ts'
+
+function wireTask(id: string, deps: string[] = [], parentId: string | null = null): PlanTaskWire {
+  return { id, type: 'FILE_READ', description: `任务 ${id}`, status: 'PENDING', parentId, dependsOn: deps }
+}
+
+function planCreated(): ServerEvent {
+  return {
+    t: 'plan_created',
+    goal: '给 Task 加上重试能力',
+    tasks: [wireTask('t1'), wireTask('t2'), wireTask('t3', ['t1', 't2'])],
+    layers: [['t1', 't2'], ['t3']],
+  }
+}
+
+function planOf(store: SessionStore) {
+  const entry = store.getSnapshot().entries.find(e => e.kind === 'plan')
+  if (!entry || entry.kind !== 'plan') throw new Error('没有计划面板')
+  return entry.plan
+}
+
+describe('计划面板', () => {
+  test('plan_created 落成一条 plan entry，goal 和分层原样保留', () => {
+    const store = new SessionStore()
+    feed(store, planCreated())
+
+    const plan = planOf(store)
+    expect(plan.goal).toBe('给 Task 加上重试能力')
+    expect(plan.status).toBe('CREATED')
+    expect(plan.tasks.map(t => t.id)).toEqual(['t1', 't2', 't3'])
+    expect(plan.layers).toEqual([['t1', 't2'], ['t3']])
+  })
+
+  test('确认请求像审批一样置起标志，回答后由界面清掉', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })
+
+    expect(store.getSnapshot().planConfirm).toEqual({ id: 1 })
+    store.clearPlanConfirm()
+    expect(store.getSnapshot().planConfirm).toBeNull()
+  })
+
+  test('任务开始/结束原地点亮，哪怕计划面板后面已经堆了流式输出', () => {
+    const store = new SessionStore()
+    feed(store,
+      planCreated(),
+      { t: 'plan_task_started', taskId: 't1', taskType: 'FILE_READ', description: '任务 t1' },
+      // 执行期间的 ReAct 事件照常进 transcript，把 plan entry 挤离队尾——
+      // 这正是 updatePlan 按 key 找而不用 replaceTail 的原因
+      { t: 'text_delta', text: '我先读一下' },
+      { t: 'plan_task_finished', taskId: 't1', status: 'SUCCEEDED', durationMs: 7000, result: '读完了', error: null })
+
+    const plan = planOf(store)
+    expect(plan.status).toBe('RUNNING')
+    expect(plan.tasks[0]).toMatchObject({ id: 't1', status: 'SUCCEEDED', durationMs: 7000 })
+    expect(plan.tasks[1]?.status).toBe('PENDING')
+    expect(kinds(store.getSnapshot().entries)).toEqual(['plan', 'assistant'])
+  })
+
+  test('跳过的任务把被谁连累记在 error 里', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(),
+      { t: 'plan_task_finished', taskId: 't3', status: 'SKIPPED', durationMs: 0, result: null, error: '上游 t1 失败' })
+
+    expect(planOf(store).tasks[2]).toMatchObject({ status: 'SKIPPED', error: '上游 t1 失败' })
+  })
+
+  test('动态拆出的子任务插在父任务后面，不是甩到末尾', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(),
+      { t: 'plan_tasks_added', parentId: 't1', tasks: [wireTask('t1.1', [], 't1')] },
+      { t: 'plan_tasks_added', parentId: 't1', tasks: [wireTask('t1.2', ['t1.1'], 't1')] })
+
+    expect(planOf(store).tasks.map(t => t.id)).toEqual(['t1', 't1.1', 't1.2', 't2', 't3'])
+    expect(planOf(store).tasks[1]?.parentId).toBe('t1')
+  })
+
+  test('plan_finished 盖棺定论并带上收支，同时清掉可能悬着的确认框', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(),
+      { t: 'plan_confirm_request', id: 1 },
+      { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 42000 })
+
+    const plan = planOf(store)
+    expect(plan.status).toBe('COMPLETED')
+    expect(plan.summary).toEqual({ succeeded: 3, failed: 0, skipped: 0, durationMs: 42000 })
+    expect(store.getSnapshot().planConfirm).toBeNull()
+  })
+
+  test('用户否决：只有 CANCELLED，没有收支——不能编造三个零', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(), { t: 'plan_finished', status: 'CANCELLED' })
+
+    const plan = planOf(store)
+    expect(plan.status).toBe('CANCELLED')
+    expect(plan.summary).toBeUndefined()
+  })
+
+  test('第二份计划各自独立：更新只落在最新那份上', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(), { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 1000 })
+    feed(store, planCreated(),
+      { t: 'plan_task_finished', taskId: 't1', status: 'FAILED', durationMs: 5, result: null, error: '炸了' })
+
+    const plans = store.getSnapshot().entries.filter(e => e.kind === 'plan')
+    expect(plans).toHaveLength(2)
+    expect(plans[0]).toMatchObject({ plan: { status: 'COMPLETED' } })
+    expect(plans[1]).toMatchObject({ plan: { tasks: expect.arrayContaining([expect.objectContaining({ id: 't1', status: 'FAILED' })]) } })
+  })
+
+  test('ready 没带 features 的老后端：features 是空数组，不是 undefined', () => {
+    const store = new SessionStore()
+    feed(store, ready())
+
+    expect(store.getSnapshot().ready?.features).toEqual([])
+  })
+})

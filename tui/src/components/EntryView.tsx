@@ -10,6 +10,7 @@ import { Box, Text } from 'ink'
 import { firstLine, summarizeTools, truncate } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import type { Entry, ToolCall } from '../store.ts'
+import { PlanPanel } from './PlanPanel.tsx'
 import { useTheme, type Theme } from '../theme.ts'
 
 type Props = {
@@ -54,6 +55,9 @@ export function EntryView({ entry, expanded, columns }: Props) {
 
     case 'tools':
       return <ToolGroup calls={entry.calls} expanded={expanded} columns={columns} theme={theme} />
+
+    case 'plan':
+      return <PlanPanel plan={entry.plan} columns={columns} />
 
     case 'compacted':
       return (
