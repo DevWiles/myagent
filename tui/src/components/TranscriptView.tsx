@@ -41,6 +41,12 @@ type Props = {
    * 会来回抖。只看内容本身，这个量和招牌是否显示无关。
    */
   onEntriesHeight?: (rows: number) => void
+  /**
+   * 变一次就重新测量一遍布局。resize 后 Yoga 的折行结果全变了，
+   * 必须重测，否则 hitTest 用的还是旧行坐标（点击会点偏）。
+   * 用 prop 而不是给本组件换 key：换 key 会让父组件持有的 ref 失效。
+   */
+  repaintToken?: number
 }
 
 /** 一个工具组在视口里占据的行区间（含 y0，不含 y1）。 */
@@ -54,6 +60,7 @@ export function TranscriptView({
   header,
   handleRef,
   onEntriesHeight,
+  repaintToken,
 }: Props) {
   const theme = useTheme()
   const contentRef = useRef<DOMElement>(null)
@@ -64,6 +71,12 @@ export function TranscriptView({
 
   const [offset, setOffset] = useState(0)
   const [contentHeight, setContentHeight] = useState(0)
+
+  // 尺寸变了：回到底部。折行全变了，旧的 offset 对应不到原来的位置，
+  // 与其停在一个错位的地方，不如落到「最新内容」这个确定的锚点。
+  useEffect(() => {
+    setOffset(0)
+  }, [repaintToken, columns, height])
 
   // 每次 commit 后：量内容总高，并重建 hitMap（每个工具组的视口行区间）。
   // 依赖数组留空是刻意的——折行随宽度变，内容没变宽度变了高度也变，每次都量。

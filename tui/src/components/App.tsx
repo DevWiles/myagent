@@ -57,13 +57,15 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const [entriesRows, setEntriesRows] = useState(0)
   /** 招牌是否还占着顶部。见下面的滞回判定。 */
   const bannerVisible = useRef(true)
+  /** 对话视口的第一行在屏幕上的行号（招牌占了多少行）。鼠标命中测试要减掉它。 */
+  const viewportTopRef = useRef(0)
 
   // 关键：用 useWindowSize 而不是直接读 process.stdout——它订阅终端 resize 事件，
   // 窗口一变大变小就重渲染，整个布局（宽度撑满的 banner/输入框、视口高度、
   // 内容折行）跟着重算。直接读 process.stdout 是一次性快照，resize 后布局就错位了。
   const { columns, rows } = useWindowSize()
 
-  // resize 后：光标归位 + 强制整棵树重挂载，用「全量覆写」清掉残影。
+  // resize 后：光标归位 + 触发一次重测量，用「全量覆写」清掉残影。
   //
   // 背景：实测 Ink **完全不发擦除序列**（没有 EL `ESC[K`，也没有 ED `ESC[J`），
   // 它靠「用新字符覆盖旧字符」来更新画面。所以残影的成因是画面没被完整覆写：
@@ -75,10 +77,13 @@ export function App({ store, backend, mouseEmitter }: Props) {
   // sync 帧缓存）。只发光标归位 `ESC[H` 是安全的：它不擦任何东西，最坏情况是
   // 画面没变，绝不会变空。
   //
-  // 真正负责清残影的是 remount：epoch 当 key 让 React 整棵重建，新树没有历史
-  // 可 diff，Ink 必然从第 0 行起全量重写一遍；配合根节点 height={rows} 和
-  // TranscriptView 用空格铺满空白区，每一行都会被真实写入，旧字符无处存活。
-  // 代价：滚动位置回到底部——缩放后这是合理的落点。
+  // 除残影靠「全量覆写」：根节点 height={rows} + TranscriptView 用空格铺满
+  // 空白区，每一行都会被真实写入，旧字符无处存活。
+  //
+  // 这里**不能**用 key 去 remount 整棵树。之前那样做的后患很实在：
+  // TranscriptView 被换成新实例后，transcript.current 还指向已卸载的旧组件，
+  // hitTest 拿的是过期行坐标 —— 表现就是「放大之后点击折叠行没反应」。
+  // epoch 只用来强制 Ink 重算一帧（作为 prop 往下传，不当 key）。
   const [epoch, setEpoch] = useState(0)
   const firstLayout = useRef(true)
   useEffect(() => {
@@ -103,14 +108,23 @@ export function App({ store, backend, mouseEmitter }: Props) {
   }, [backend, store, exit])
 
   // 鼠标事件（已由 main.tsx 从 stdin 过滤出来）：滚轮滚动、点击工具行展开。
+  //
+  // 坐标换算：SGR 报的是 1-based 的**整屏**行号，而 hitTest 要的是**视口内**
+  // 行号。招牌画在视口外、占着屏幕最上面若干行，所以必须把它的高度减掉。
+  // 少减这一项的后果很具体：招牌一出现（点全屏、屏幕够高时）点击就整体偏移
+  // BANNER_HEIGHT 行，表现成「小窗能点开，全屏就点不动」。
+  //
+  // 用 ref 读偏移量而不是写进依赖数组：这个 effect 只该在挂载时注册一次监听，
+  // 把布局量塞进依赖会让它随每次尺寸变化反复解绑重绑。
   useEffect(() => {
     const onMouse = (events: MouseEvent[]) => {
       for (const ev of events) {
         if (ev.type === 'wheel') {
           transcript.current?.scrollBy(ev.direction === 'up' ? 3 : -3)
         } else {
-          // SGR 是 1-based；视口顶 = 屏幕第 0 行，所以 row-1 就是视口行
-          const key = transcript.current?.hitTest(ev.row - 1)
+          const viewportRow = ev.row - 1 - viewportTopRef.current
+          if (viewportRow < 0) continue // 点在招牌上，不是对话内容
+          const key = transcript.current?.hitTest(viewportRow)
           if (key) store.toggleEntry(key)
         }
       }
@@ -225,9 +239,11 @@ export function App({ store, backend, mouseEmitter }: Props) {
   const showBanner =
     state.ready !== null && bannerVisible.current && rows >= BANNER_HEIGHT + 6
   const viewportRows = Math.max(3, availRows - (showBanner ? BANNER_HEIGHT : 0))
+  // 招牌在视口之上，视口顶行号 = 招牌高度（不显示时为 0）
+  viewportTopRef.current = showBanner ? BANNER_HEIGHT : 0
 
   return (
-    <Box key={epoch} flexDirection="column" width={columns} height={rows}>
+    <Box flexDirection="column" width={columns} height={rows}>
       {showBanner && state.ready && <Banner ready={state.ready} columns={columns} />}
 
       <TranscriptView
@@ -237,6 +253,7 @@ export function App({ store, backend, mouseEmitter }: Props) {
         columns={columns}
         handleRef={transcript}
         onEntriesHeight={setEntriesRows}
+        repaintToken={epoch}
       />
 
       {spinnerRows > 0 && <Spinner step={state.step} startedAt={state.startedAt} />}
