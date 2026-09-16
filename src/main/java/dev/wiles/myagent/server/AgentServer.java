@@ -13,6 +13,11 @@ import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
+import dev.wiles.myagent.plan.AgentTaskRunner;
+import dev.wiles.myagent.plan.Plan;
+import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanResult;
+import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 import org.java_websocket.WebSocket;
@@ -61,6 +66,13 @@ public final class AgentServer extends WebSocketServer {
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
+    private final PlanConfirmation planConfirm;
+    /** 规划器。和 agent 用各自的客户端：取消一个不该把另一个也掐了。 */
+    private final Planner planner;
+
+    /** 当前这一轮的计划执行器，Esc/cancel 要能够到它。 */
+    private volatile PlanExecutor runningPlan;
+    private volatile AgentTaskRunner runningTasks;
 
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
@@ -90,8 +102,9 @@ public final class AgentServer extends WebSocketServer {
         this.workspace = new Workspace(options.workspace());
         this.token = newToken();
         this.approval = new RemoteApproval(this::publish, () -> !getConnections().isEmpty());
+        this.planConfirm = new PlanConfirmation(this::publish, () -> !getConnections().isEmpty());
 
-        this.tools = options.planMode()
+        this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace)
                 : BuiltinTools.createDefault(workspace, approval);
 
@@ -99,6 +112,9 @@ public final class AgentServer extends WebSocketServer {
                 ? new Agent(new DeepSeekClient(config), tools,
                         SystemPrompt.forWorkspace(workspace.root()))
                         .onEvent(this::onAgentEvent)
+                : null;
+        this.planner = config.hasApiKey()
+                ? new Planner(new DeepSeekClient(config)).readOnly(options.readOnly())
                 : null;
     }
 
@@ -190,6 +206,9 @@ public final class AgentServer extends WebSocketServer {
             case "cancel" -> handleCancel();
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
+            case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
+            case "plan_confirm_reply" -> planConfirm.reply(
+                    Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
             case "reset" -> handleReset(conn);
             case "ping" -> send(conn, Protocol.event("pong"));
             default -> send(conn, error("未知命令: " + type));
@@ -229,10 +248,85 @@ public final class AgentServer extends WebSocketServer {
         });
     }
 
+    /**
+     * 先规划后执行，无头版。和终端版 {@code Repl.runPlan} 是同一套三幕流程：
+     * 规划 → 让界面确认 → 逐个任务跑，只是「给用户看」换成了「发事件」，
+     * 「读一行 y/n」换成了 {@link PlanConfirmation}。
+     */
+    private void handlePlan(WebSocket conn, String goal) {
+        if (planner == null) {
+            send(conn, error("没有配置 API key，无法规划"));
+            return;
+        }
+        if (goal.isEmpty()) {
+            return;
+        }
+        if (!busy.compareAndSet(false, true)) {
+            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            return;
+        }
+        publish(Protocol.event("busy").put("busy", true));
+        worker.submit(() -> runPlan(goal));
+    }
+
+    private void runPlan(String goal) {
+        long startedAt = System.currentTimeMillis();
+        try {
+            Plan plan = planner.plan(goal);
+            publish(Protocol.encodePlan(plan));
+
+            if (!planConfirm.confirm()) {
+                plan.cancel();
+                publish(Protocol.event("plan_finished").put("status", plan.status().name()));
+                return;
+            }
+
+            AgentTaskRunner runner = new AgentTaskRunner(new DeepSeekClient(config), tools,
+                    workspace.root())
+                    .withPlanner(planner)
+                    .onEvent((task, event) -> onAgentEvent(event));
+            PlanExecutor executor = new PlanExecutor(runner)
+                    .onTaskStarted(task -> publish(Protocol.encodeTaskStarted(task)))
+                    .onTaskFinished(task -> publish(Protocol.encodeTaskFinished(task)))
+                    .onTasksAdded((parent, added) ->
+                            publish(Protocol.encodeAddedTasks(parent.id(), added)));
+            runningTasks = runner;
+            runningPlan = executor;
+
+            PlanResult result = executor.execute(plan);
+            publish(Protocol.encodePlanFinished(plan, result));
+
+        } catch (RuntimeException e) {
+            log.error("计划跑挂了", e);
+            publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
+        } finally {
+            runningPlan = null;
+            runningTasks = null;
+            busy.set(false);
+            ObjectNode idle = Protocol.event("busy");
+            idle.put("busy", false);
+            idle.put("durationMs", System.currentTimeMillis() - startedAt);
+            publish(idle);
+        }
+    }
+
     private void handleCancel() {
         if (agent != null) {
             agent.cancel();
         }
+        // 计划模式下要叫停三处，漏一处按 Esc 就像没反应
+        PlanExecutor executor = runningPlan;
+        if (executor != null) {
+            executor.cancel();
+        }
+        AgentTaskRunner tasks = runningTasks;
+        if (tasks != null) {
+            tasks.cancel();
+        }
+        if (planner != null) {
+            planner.cancel();
+        }
+        planConfirm.cancelPending();            // 卡在计划确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行
     }
 
@@ -264,7 +358,7 @@ public final class AgentServer extends WebSocketServer {
         n.put("version", Cli.VERSION);
         n.put("workspace", workspace.root().toString());
         n.put("model", config.model());
-        n.put("planMode", options.planMode());
+        n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
         n.put("hasApiKey", config.hasApiKey());
         n.put("busy", busy.get());
         if (agent != null) {
