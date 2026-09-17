@@ -58,10 +58,44 @@ describe("splitBlocks", () => {
     })
   })
 
-  test("列表整体算一块——列表项之间没有空行", () => {
+  test("每个列表项各自一个块——列表项之间通常没有空行", () => {
     const text = "- 项一\n- 项二\n- 项三\n\n收尾"
     expect(splitBlocks(text)).toEqual({
-      complete: ["- 项一\n- 项二\n- 项三"],
+      complete: ["- 项一", "- 项二", "- 项三"],
+      current: "收尾",
+    })
+  })
+
+  test("引导句和它下面的有序列表分开，每条各自一块", () => {
+    // 这是真实场景：「**有几点：**」后面跟 1. 2. 3.，中间一个空行都没有。
+    // 按整张列表算一块的话，要等最后一条写完才一次性落下来一大片。
+    const text = "**有几点：**\n1. 第一点\n2. 第二点\n3. 第三"
+    expect(splitBlocks(text)).toEqual({
+      complete: ["**有几点：**", "1. 第一点", "2. 第二点"],
+      current: "3. 第三",
+    })
+  })
+
+  test("嵌套列表项也各自成块", () => {
+    const text = "- 外层\n  - 内层甲\n  - 内层乙\n\n收尾"
+    expect(splitBlocks(text)).toEqual({
+      complete: ["- 外层", "  - 内层甲", "  - 内层乙"],
+      current: "收尾",
+    })
+  })
+
+  test("列表项的续行跟着它自己那一块，不另起块", () => {
+    const text = "- 这一项很长\n  所以换了行继续写\n- 下一项\n\n收尾"
+    expect(splitBlocks(text)).toEqual({
+      complete: ["- 这一项很长\n  所以换了行继续写", "- 下一项"],
+      current: "收尾",
+    })
+  })
+
+  test("围栏里长得像列表项的行不切块", () => {
+    const text = "```md\n- 这是代码里的示例\n- 不是真的列表\n```\n\n收尾"
+    expect(splitBlocks(text)).toEqual({
+      complete: ["```md\n- 这是代码里的示例\n- 不是真的列表\n```"],
       current: "收尾",
     })
   })

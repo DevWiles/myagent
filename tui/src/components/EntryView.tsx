@@ -12,7 +12,7 @@
 import { TextAttributes } from "@opentui/core"
 import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
-import { splitBlocks } from "../markdown-blocks.ts"
+import { isListItem, splitBlocks } from "../markdown-blocks.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { syntaxStyleFor, useTheme } from "../theme.ts"
 
@@ -66,6 +66,22 @@ function UserEntry(props: { text: string }) {
 }
 
 /**
+ * 第 `index` 块前面要不要留一个空行。
+ *
+ * 规则只有一条：**上下都是列表项就贴着，否则留一行**。
+ * 列表项之间塞空行会把紧凑列表撑成松散列表，观感差很多。
+ *
+ * `text` 是给「正在写的那块」用的——它不在 complete 数组里，得单独把内容传进来。
+ */
+function gapBefore(complete: string[], index: number, text?: string): number {
+  if (index === 0) return 0
+  const previous = complete[index - 1]
+  const self = text ?? complete[index]
+  if (!previous || !self) return 0
+  return isListItem(previous) && isListItem(self) ? 0 : 1
+}
+
+/**
  * 模型的回复，边流边渲染 Markdown。
  *
  * ## 不是「每来一个 token 就把全文重新解析一遍」
@@ -115,15 +131,17 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           // （这个顺序依赖是 OpenTUI 源码注释里写明的。）
           //
           // marginTop 得自己加：块间距本来是 markdown 渲染器在一整段里算的，
-          // 拆成一块一个节点之后没人管了，不补的话标题、段落、列表会全挤在一起。
+          // 拆成一块一个节点之后没人管了，不补的话标题、段落会全挤在一起。
+          // 但**连续的列表项之间不能加**——列表本来就是紧挨着的，
+          // 每项之间塞一个空行会把一张紧凑列表撑成松散列表。
           <markdown
             syntaxStyle={syntaxStyleFor(theme)}
-            marginTop={index() > 0 ? 1 : 0}
+            marginTop={gapBefore(blocks().complete, index())}
             content={block}
           />
         )}
       </For>
-      <text fg={theme.text} marginTop={blocks().complete.length > 0 ? 1 : 0}>
+      <text fg={theme.text} marginTop={gapBefore(blocks().complete, blocks().complete.length, blocks().current)}>
         {blocks().current}
       </text>
     </box>
