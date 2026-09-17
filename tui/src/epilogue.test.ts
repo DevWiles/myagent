@@ -18,6 +18,7 @@ function stateOf(partial: { entries?: Entry[]; tokens?: number; auditLog?: strin
         }
       : null,
     entries: partial.entries ?? [],
+    activePlanKey: null,
     expanded: new Set(),
     busy: false,
     step: 0,

@@ -332,6 +332,74 @@ describe('计划面板', () => {
     expect(plan.layers).toEqual([['t1', 't2'], ['t3']])
   })
 
+  test('plan_created 指向底部面板，用户说下一句时让位', () => {
+    const store = new SessionStore()
+    feed(store, planCreated())
+
+    const key = store.getSnapshot().activePlanKey
+    expect(key).not.toBeNull()
+    expect(store.getSnapshot().entries.find(e => e.key === key)?.kind).toBe('plan')
+
+    // 跑完了也还留着——刚看完就消失，用户连结果都来不及看
+    feed(store, { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 100 })
+    expect(store.getSnapshot().activePlanKey).toBe(key)
+
+    // 说下一句才让位
+    store.submitPrompt('接着干别的')
+    expect(store.getSnapshot().activePlanKey).toBeNull()
+  })
+
+  test('面板取的是 transcript 里那一份，不另存一份状态', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(), { t: 'plan_task_started', taskId: 't1', taskType: 'FILE_READ', description: '任务 t1' })
+
+    const key = store.getSnapshot().activePlanKey
+    const entry = store.getSnapshot().entries.find(e => e.key === key)
+    if (entry?.kind !== 'plan') throw new Error('没找到计划')
+
+    // 面板要显示的东西，和滚上去看到的是同一份对象
+    expect(entry.plan).toBe(planOf(store))
+    expect(entry.plan.tasks.find(t => t.id === 't1')?.status).toBe('RUNNING')
+  })
+
+  test('改道：补救任务接在失败那一步后面，并标出来是救场的', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(),
+      { t: 'plan_task_finished', taskId: 't1', status: 'FAILED', durationMs: 5, result: null, error: '炸了' },
+      { t: 'plan_revised', failedTaskId: 't1', tasks: [wireTask('r1'), wireTask('r2', ['r1'])] })
+
+    const plan = planOf(store)
+    // 甩到末尾的话，用户得自己在一堆步骤里找「这几个是来救谁的」
+    expect(plan.tasks.map(t => t.id)).toEqual(['t1', 'r1', 'r2', 't2', 't3'])
+    expect(plan.tasks.find(t => t.id === 'r1')?.recovery).toBe(true)
+    expect(plan.tasks.find(t => t.id === 't2')?.recovery).toBeUndefined()
+  })
+
+  test('认不出 failedTaskId 时补在末尾，也不能把任务弄丢', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(),
+      { t: 'plan_revised', failedTaskId: '不存在', tasks: [wireTask('r1')] })
+
+    expect(planOf(store).tasks.map(t => t.id)).toEqual(['t1', 't2', 't3', 'r1'])
+  })
+
+  test('acceptance 透传，没有就是 undefined', () => {
+    const store = new SessionStore()
+    feed(store, {
+      t: 'plan_created',
+      goal: '目标',
+      tasks: [
+        { ...wireTask('t1'), acceptance: '说清 Java 版本' },
+        wireTask('t2'),
+      ],
+      layers: [['t1', 't2']],
+    })
+
+    const plan = planOf(store)
+    expect(plan.tasks[0]?.acceptance).toBe('说清 Java 版本')
+    expect(plan.tasks[1]?.acceptance).toBeUndefined()
+  })
+
   test('确认请求像审批一样置起标志，回答后由界面清掉', () => {
     const store = new SessionStore()
     feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })

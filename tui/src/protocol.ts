@@ -17,6 +17,8 @@ export type PlanTaskWire = {
   id: string
   type: string
   description: string
+  /** 做到什么算这一步完成。老计划里可能是 null。 */
+  acceptance?: string | null
   status: string
   parentId: string | null
   dependsOn: string[]
@@ -77,6 +79,11 @@ export type ServerEvent =
     }
   /** PLANNING 任务拆出了子任务，图长大了。就地插到父任务下面，别重画整张图。 */
   | { t: 'plan_tasks_added'; parentId: string; tasks: PlanTaskWire[] }
+  /**
+   * 某一步失败后，后端补出了一批救场任务。这是**改道**，
+   * 和 plan_tasks_added 的「计划照常长大」不是一回事，面板上该看得出区别。
+   */
+  | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
   /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
   | {
       t: 'plan_finished'
@@ -85,6 +92,8 @@ export type ServerEvent =
       failed?: number
       skipped?: number
       durationMs?: number
+      /** 中途重规划了几次。COMPLETED 且大于 0，说明绕过弯但目标达成了。 */
+      replans?: number
     }
 
 // ------------------------------------------------------------ 客户端 → 服务端
