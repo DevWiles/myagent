@@ -10,7 +10,7 @@
  */
 
 import { TextAttributes } from "@opentui/core"
-import { createMemo, For, Match, Show, Switch } from "solid-js"
+import { createMemo, For, Match, Show, Switch, untrack } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import { isListItem, splitBlocks } from "../markdown-blocks.ts"
 import type { Entry, ToolCall } from "../store.ts"
@@ -124,22 +124,31 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
   return (
     <box flexDirection="column" paddingTop={1}>
       <For each={blocks().complete}>
-        {(block, index) => (
-          // ⚠️ syntaxStyle 必须写在 content 前面：Solid 按书写顺序调 setter，
-          // 而设置 content 会立刻触发解析；syntaxStyle 还没赋值的话那一趟解析
-          // 查不到任何配色，整段退回默认色——不报错不崩，只是颜色全错。
-          // （这个顺序依赖是 OpenTUI 源码注释里写明的。）
+        {(block, index) => {
+          // ⚠️ 这里必须 untrack。
           //
-          // marginTop 得自己加：块间距本来是 markdown 渲染器在一整段里算的，
-          // 拆成一块一个节点之后没人管了，不补的话标题、段落会全挤在一起。
-          // 但**连续的列表项之间不能加**——列表本来就是紧挨着的，
-          // 每项之间塞一个空行会把一张紧凑列表撑成松散列表。
-          <markdown
-            syntaxStyle={syntaxStyleFor(theme)}
-            marginTop={gapBefore(blocks().complete, index())}
-            content={block}
-          />
-        )}
+          // gapBefore 要读 blocks()，而 blocks() 每来一个 token 就变一次。
+          // 直接写在 JSX 属性里的话，Solid 会为**每一个已完成块**都建一个 effect，
+          // 于是每个字符到达时所有块的 marginTop 都被重新赋值一遍——
+          // 一条长回复就是「块数 × 每秒几十次」的属性写入，
+          // 每次写入都让 Yoga 重新布局整条消息。屏幕就是这么闪起来的。
+          //
+          // 已完成的块不会再变，它前面该留多少空行在创建那一刻就定死了，
+          // 算一次就够。
+          const gap = untrack(() => gapBefore(blocks().complete, index()))
+          return (
+            // ⚠️ syntaxStyle 必须写在 content 前面：Solid 按书写顺序调 setter，
+            // 而设置 content 会立刻触发解析；syntaxStyle 还没赋值的话那一趟解析
+            // 查不到任何配色，整段退回默认色——不报错不崩，只是颜色全错。
+            // （这个顺序依赖是 OpenTUI 源码注释里写明的。）
+            //
+            // marginTop 得自己加：块间距本来是 markdown 渲染器在一整段里算的，
+            // 拆成一块一个节点之后没人管了，不补的话标题、段落会全挤在一起。
+            // 但**连续的列表项之间不能加**——列表本来就是紧挨着的，
+            // 每项之间塞一个空行会把一张紧凑列表撑成松散列表。
+            <markdown syntaxStyle={syntaxStyleFor(theme)} marginTop={gap} content={block} />
+          )
+        }}
       </For>
       <text fg={theme.text} marginTop={gapBefore(blocks().complete, blocks().complete.length, blocks().current)}>
         {blocks().current}

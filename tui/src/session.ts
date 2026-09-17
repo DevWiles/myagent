@@ -10,6 +10,7 @@
  * 把它按新框架重写一遍，然后用两套实现去追同一个后端。
  */
 
+import { readFileSync } from "node:fs"
 import { createSignal, onCleanup, type Accessor } from "solid-js"
 import { startBackend, type Backend, type BackendOptions } from "./backend.ts"
 import { SessionStore, type SessionState } from "./store.ts"
@@ -43,23 +44,74 @@ export function createSession(options: BackendOptions): Session {
   // 但 Solid 的 signal 默认用 === 比较，同一个引用不会触发更新。
   // store 本身就是 immutable 更新，所以直接 setState(snapshot) 是安全的，
   // 包一层函数只是为了绕开 Solid 把函数参数当 updater 的行为。
-  const unsubscribe = store.subscribe(() => setState(() => store.getSnapshot()))
+  /**
+   * store 每变一次就推一次 signal 太密了。
+   *
+   * text_delta 是一个字一个字来的，一秒能有几十次；每一次都会走完整条
+   * 「Solid 更新 → Yoga 重新布局 → 重绘」的链路，屏幕看着就是一直在抖。
+   * 而人眼根本分不出 60 次/秒和 20 次/秒的文字增长有什么区别。
+   *
+   * 所以这里做**尾沿节流**：第一次变更立刻生效（打字的即时感要保住），
+   * 之后 33ms 内的变更全部合并成一次。Claude Code 用的是 16ms（60fps）
+   * 的 throttle，同一个道理。
+   *
+   * 注意必须是尾沿——只做头沿的话，一轮结束前最后那几十毫秒的内容会丢。
+   */
+  const FRAME_MS = 33
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let lastPush = 0
+
+  const push = (): void => {
+    lastPush = performance.now()
+    setState(() => store.getSnapshot())
+  }
+
+  const unsubscribe = store.subscribe(() => {
+    if (timer) return // 已经排好了一次，合并进去
+    const elapsed = performance.now() - lastPush
+    if (elapsed >= FRAME_MS) {
+      push()
+      return
+    }
+    timer = setTimeout(() => {
+      timer = undefined
+      push()
+    }, FRAME_MS - elapsed)
+  })
 
   let backend: Backend | undefined
 
-  startBackend(options)
-    .then((b) => {
-      backend = b
-      b.onEvent((event) => store.apply(event))
-      b.onClose((reason) => store.markClosed(reason ?? "后端已退出"))
-    })
-    .catch((error: unknown) => {
-      // 起不来是常见情况（jar 没 build、没装 java），要把原因原样显示出来，
-      // 而不是留一个空界面让人猜
-      store.markClosed(error instanceof Error ? error.message : String(error))
-    })
+  // 回放模式：不连后端，改用一份固定文本按固定速率喂进来。
+  //
+  // 为什么需要它：渲染性能问题（闪烁、重排）只能靠对比实验定位，
+  // 而每次问模型拿到的回答长度和速度都不一样，测出来的数全是噪声——
+  // 我就在这上面误判过好几次。固定输入才能让「改之前 vs 改之后」可比。
+  //
+  //   MYAGENT_REPLAY=某个.md 文件  ./myagent-tui
+  //   MYAGENT_REPLAY_CPS=200      每秒喂多少字符，默认 120
+  const replayPath = process.env["MYAGENT_REPLAY"]
+  let stopReplay: (() => void) | undefined
+
+  if (replayPath) {
+    stopReplay = startReplay(store, replayPath, Number(process.env["MYAGENT_REPLAY_CPS"] ?? 120))
+  } else {
+    startBackend(options)
+      .then((b) => {
+        backend = b
+        b.onEvent((event) => store.apply(event))
+        b.onClose((reason) => store.markClosed(reason ?? "后端已退出"))
+      })
+      .catch((error: unknown) => {
+        // 起不来是常见情况（jar 没 build、没装 java），要把原因原样显示出来，
+        // 而不是留一个空界面让人猜
+        store.markClosed(error instanceof Error ? error.message : String(error))
+      })
+  }
 
   onCleanup(() => {
+    // 先停节流定时器：不然退出后它还会醒来往一个已经销毁的渲染树里写
+    if (timer) clearTimeout(timer)
+    stopReplay?.()
     unsubscribe()
     backend?.dispose()
   })
@@ -89,5 +141,69 @@ export function createSession(options: BackendOptions): Session {
     cancel() {
       backend?.send({ t: "cancel" })
     },
+  }
+}
+
+/**
+ * 回放模式：把一份固定文本当成模型的流式输出，按固定速率喂给 store。
+ *
+ * 存在的唯一理由是**让渲染性能可以被测量**。真问模型的话，每次回答的长度、
+ * 速度、结构都不一样，测出来的重绘次数根本没法横向比较——
+ * 我就靠不可比的数据误判过好几次。
+ *
+ * 返回一个停止函数。
+ */
+function startReplay(store: SessionStore, path: string, cps: number): () => void {
+  const TICK_MS = 50
+  const perTick = Math.max(1, Math.round((cps * TICK_MS) / 1000))
+
+  let text = ""
+  try {
+    text = readFileSync(path, "utf8")
+  } catch (error) {
+    store.markClosed(`回放文件读不了：${path}（${String(error)}）`)
+    return () => {}
+  }
+
+  store.apply({
+    t: "ready",
+    protocol: 1,
+    version: "replay",
+    workspace: process.cwd(),
+    model: "（回放模式）",
+    planMode: false,
+    hasApiKey: true,
+    busy: false,
+    tokens: 0,
+    contextLimit: 64000,
+    features: [],
+    tools: [],
+  } as never)
+
+  let index = 0
+  let timer: ReturnType<typeof setInterval> | undefined
+
+  const begin = (): void => {
+    store.apply({ t: "busy", busy: true } as never)
+    timer = setInterval(() => {
+      if (index >= text.length) {
+        clearInterval(timer)
+        timer = undefined
+        store.apply({ t: "done", text, steps: 1 } as never)
+        store.apply({ t: "busy", busy: false } as never)
+        return
+      }
+      const chunk = text.slice(index, index + perTick)
+      index += perTick
+      store.apply({ t: "text_delta", text: chunk } as never)
+    }, TICK_MS)
+  }
+
+  // 等界面挂载完再开始，免得把启动阶段也混进测量里
+  const kickoff = setTimeout(begin, 1500)
+
+  return () => {
+    clearTimeout(kickoff)
+    if (timer) clearInterval(timer)
   }
 }
