@@ -64,33 +64,31 @@ function UserEntry(props: { text: string }) {
   )
 }
 
-/** 围栏代码块的标记。用来判断切口是不是落在一个没闭合的代码块里。 */
-const FENCE = /^\s*```/gm
-
 /**
- * 取出这段文本里**已经成块**的部分，没写完的尾巴丢掉。
+ * 取出这段文本里**已经定型**的部分，没写完的最后半行丢掉。
  *
- * 边界是空行——markdown 里空行就是块与块的分隔符，所以切在这里，
- * 拿到的永远是若干个完整的块（段落、列表、代码块、标题…）。
+ * ## 边界为什么是「行」而不是「空行」
  *
- * 一个额外的保护：切口不能落在没闭合的代码围栏里。
- * ```` ```java ```` 已经出现但 ```` ``` ```` 还没来时，那半个代码块
- * 会被解析成「一个包住剩余全部内容的代码块」，等收尾的围栏到了又变回去——
- * 正是我们想避免的那种变身。所以数一下围栏数量，是奇数就退到围栏开始之前。
+ * 一度用空行做边界（markdown 里空行分隔块），但那个粒度太粗：
+ * 一个标题带九条嵌套列表，中间一个空行都没有，于是整坨算一个块，
+ * 要等全部写完才「啪」地落下来一大片。
+ *
+ * Notion 那种「一个 block 渲染完才出现」里的 block，其实是**每个列表项
+ * 各自一个 block**，不是整张列表一个。对应到这里就是：以完整的行为单位。
+ *
+ * 行一写完就定型了：`## 标题` 是标题、`- 项一` 是列表项、代码行是代码行，
+ * 都不会因为后面来了什么而改变身份。没写完的半行才是会骗人的那个
+ * （`## 标` 不是合法标题，只能先当普通文字画出来，`##` 就露出来了）。
+ *
+ * ## 未闭合的代码围栏不用特殊处理
+ *
+ * ```` ```java ```` 开了还没收尾时，marked 会把后面已有的内容全当代码——
+ * 而此刻「后面已有的内容」本来就都是代码，所以这个判断是对的。
+ * 之后每来一行，代码块只是往下长，不会发生「先是代码、后来又不是」的变身。
  */
-export function completedBlocks(text: string): string {
-  const cut = text.lastIndexOf("\n\n")
-  if (cut < 0) return ""
-
-  let stable = text.slice(0, cut + 2)
-  const fences = stable.match(FENCE)?.length ?? 0
-  if (fences % 2 === 1) {
-    // 退到最后那个未闭合围栏所在行的开头
-    const fenceStart = stable.lastIndexOf("```")
-    const lineStart = stable.lastIndexOf("\n", fenceStart)
-    stable = lineStart < 0 ? "" : stable.slice(0, lineStart + 1)
-  }
-  return stable
+export function settledMarkdown(text: string): string {
+  const lastBreak = text.lastIndexOf("\n")
+  return lastBreak < 0 ? "" : text.slice(0, lastBreak + 1)
 }
 
 /**
@@ -99,7 +97,7 @@ export function completedBlocks(text: string): string {
  * 用 OpenTUI 内置的 `<markdown>`，不自己解析：它内部走 TreeSitter，
  * 连代码块的语法高亮一起给了，自己写一个解析器只会得到一个更差的版本。
  *
- * ## 流式按「块」推，不按字符推
+ * ## 流式按「行」推，不按字符推
  *
  * text_delta 是一个字一个字过来的，直接喂给渲染器有两个毛病：
  *
@@ -108,18 +106,14 @@ export function completedBlocks(text: string): string {
  *    （OpenTUI 的 `streaming` 选项正是这个行为：最后一块按未定稿处理。）
  * 2. **抖得厉害**。每来一个字符就重排一次版面，一秒几十次。
  *
- * 所以这里等**一整块写完**（遇到空行）才推给渲染器，没写完的尾块丢掉不画。
- * 屏幕上出现的每一块都已经是最终形态：段落、列表、代码块整块整块地落下来，
- * 不会先露出源码再变身，也不会因为块内换行导致上面的内容跟着往上跳。
- *
- * 这和 Notion / Claude Code 的观感是一致的——以组件为单位出现，而不是逐字打字机。
- *
- * 代价是最后一块有延迟。实测约 0.5 次/秒的刷新节奏，比逐字的几十次/秒安静得多。
+ * 所以这里只把**已经写完的整行**推给渲染器（见 settledMarkdown）。
+ * 屏幕上出现的每一行都已经是最终形态：标题就是标题、列表项就是列表项，
+ * 不会先露出源码再变身。以行为单位出现，而不是逐字打字机。
  */
 function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
 
-  const content = createMemo(() => (props.streaming ? completedBlocks(props.text) : props.text))
+  const content = createMemo(() => (props.streaming ? settledMarkdown(props.text) : props.text))
 
   return (
     <box paddingTop={1}>
@@ -130,7 +124,7 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           去掉星号，**只是颜色全错**，非常难发现。
           （这个顺序依赖是 OpenTUI 自己源码注释里写明的。）
 
-          streaming 恒为 false：我们喂进去的内容总是若干个完整的块，
+          streaming 恒为 false：我们喂进去的内容总是若干个完整的行，
           不需要它再替我们保留一个「未定稿的尾块」——那正是会露出源码的东西。 */}
       <markdown syntaxStyle={syntaxStyleFor(theme)} content={content()} streaming={false} />
     </box>
