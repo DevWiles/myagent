@@ -92,22 +92,26 @@ export function App(props: AppProps) {
   return (
     <ThemeProvider value={dark}>
       <box flexDirection="column" width="100%" height="100%" paddingTop={1}>
-        <Welcome
-          info={{
-            version: state().ready?.version ?? "…",
-            model: state().ready?.model ?? "连接后端中…",
-            toolCount: state().ready?.tools.length ?? 0,
-            workspace: workspace(),
-            user: "Chris",
-          }}
-          columns={dimensions().width}
-        />
-
         {/* 对话区。flexGrow 吃掉剩余高度，把输入框压到底部。
             scrollbox 是 OpenTUI 的原生滚动容器——Ink 版这里要自己算视口切片，
             这套不用，滚动在原生层做。 */}
         <box flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
           <scrollbox stickyScroll stickyStart="bottom">
+            {/* 欢迎框在**滚动容器里面**，是对话流的第一项而不是固定页头。
+                钉在顶上的话，聊到第十轮它还占着五分之一个屏幕，
+                而那时它显示的信息（版本、工具数）早就没人看了。
+                想回看开场信息往上滚就是了。 */}
+            <Welcome
+              info={{
+                version: state().ready?.version ?? "…",
+                model: state().ready?.model ?? "连接后端中…",
+                toolCount: state().ready?.tools.length ?? 0,
+                workspace: workspace(),
+                user: "Chris",
+              }}
+              columns={dimensions().width - 2}
+            />
+
             {/* streaming 只给最后一条、且会话还忙着的那条——
                 只有它的文本还会继续长，其余都已定稿 */}
             <For each={state().entries}>
