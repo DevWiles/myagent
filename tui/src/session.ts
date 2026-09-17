@@ -28,6 +28,14 @@ export type Session = {
   confirmPlan: (id: number, approved: boolean) => void
   /** 中断当前这一轮。 */
   cancel: () => void
+  /**
+   * 显式关掉后端。
+   *
+   * 正常卸载走 onCleanup，这里再暴露一份是给退出路径用的：入口的 shutdown()
+   * 最后要 process.exit()，而 process.exit 不跑 Solid 的卸载链。
+   * 实测不显式关的话，java 进程在 Ctrl-C 之后还要活 10 秒以上。
+   */
+  dispose: () => void
 }
 
 /**
@@ -81,6 +89,15 @@ export function createSession(options: BackendOptions): Session {
 
   let backend: Backend | undefined
 
+  /**
+   * 用来在「后端还没起好」时也能把 java 子进程杀掉。
+   *
+   * backend 只在 startBackend 的 then 里才被赋值，而 java 要一两秒才起得来。
+   * 这段时间里退出的话，backend 还是 undefined，子进程句柄只活在 startBackend
+   * 内部的作用域里——**没有任何人够得着它**。abort 是唯一的手。
+   */
+  const aborter = new AbortController()
+
   // 回放模式：不连后端，改用一份固定文本按固定速率喂进来。
   //
   // 为什么需要它：渲染性能问题（闪烁、重排）只能靠对比实验定位，
@@ -95,7 +112,7 @@ export function createSession(options: BackendOptions): Session {
   if (replayPath) {
     stopReplay = startReplay(store, replayPath, Number(process.env["MYAGENT_REPLAY_CPS"] ?? 120))
   } else {
-    startBackend(options)
+    startBackend(options, aborter.signal)
       .then((b) => {
         backend = b
         b.onEvent((event) => store.apply(event))
@@ -108,13 +125,21 @@ export function createSession(options: BackendOptions): Session {
       })
   }
 
-  onCleanup(() => {
+  let disposed = false
+
+  /** onCleanup 和入口的 shutdown() 都会调，所以必须幂等。 */
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
     // 先停节流定时器：不然退出后它还会醒来往一个已经销毁的渲染树里写
     if (timer) clearTimeout(timer)
     stopReplay?.()
     unsubscribe()
+    aborter.abort()      // 后端还没起好时，这是唯一能杀到子进程的手
     backend?.dispose()
-  })
+  }
+
+  onCleanup(dispose)
 
   return {
     state,
@@ -141,6 +166,7 @@ export function createSession(options: BackendOptions): Session {
     cancel() {
       backend?.send({ t: "cancel" })
     },
+    dispose,
   }
 }
 

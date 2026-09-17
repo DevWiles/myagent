@@ -44,6 +44,11 @@ public final class AuditLog implements AutoCloseable {
     public static final int MAX_FIELD_LENGTH = 4000;
 
     private final String runId;
+    /**
+     * 日志落在哪。**打不开时也保留这个值**——界面要拿它告诉用户「记录在哪儿」，
+     * 而「本该写在这儿但没写成」也是有用的信息，比返回 null 让人猜强。
+     */
+    private final Path file;
     private BufferedWriter writer;
     /** 写失败只报一次，不然一次坏盘能刷满屏幕。 */
     private boolean reportedFailure;
@@ -57,6 +62,7 @@ public final class AuditLog implements AutoCloseable {
 
     public AuditLog(Path file) {
         this.runId = Long.toHexString(System.nanoTime());
+        this.file = file;
         try {
             Path parent = file.getParent();
             if (parent != null) {
@@ -73,6 +79,11 @@ public final class AuditLog implements AutoCloseable {
 
     public String runId() {
         return runId;
+    }
+
+    /** 日志文件的位置。界面退出时要把它显示给用户，好让人知道去哪儿查这趟做了什么。 */
+    public Path file() {
+        return file;
     }
 
     /** 规划产出了一张图。整张图都存下来——事后复盘得知道当时是怎么拆的。 */

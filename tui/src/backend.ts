@@ -59,7 +59,17 @@ export function resolveJar(explicit?: string): string {
   )
 }
 
-export async function startBackend(options: BackendOptions): Promise<Backend> {
+/**
+ * 拉起后端并连上。
+ *
+ * `signal` 用来处理一个很窄但必现的窗口：java 起来要一两秒，这期间用户完全可能
+ * 已经按了 Ctrl-C。而此刻子进程句柄只活在本函数的作用域里——调用方拿到的 Promise
+ * 还没 resolve，它手上什么都没有。不在这儿杀，就会留下一个还攥着端口的 java。
+ */
+export async function startBackend(
+  options: BackendOptions,
+  signal?: AbortSignal,
+): Promise<Backend> {
   const jar = resolveJar(options.jar)
   const args = ['-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
   if (options.model) args.push('-m', options.model)
@@ -67,6 +77,15 @@ export async function startBackend(options: BackendOptions): Promise<Backend> {
   if (options.unsafe) args.push('--unsafe')
 
   const child = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+  // AbortSignal 的监听器是**同步**派发的，所以 abort() 之后 child.kill() 一定在
+  // 紧随其后的 process.exit() 之前跑完。换成「设个标志位、等 then 里再补杀」不行——
+  // 那个 then 永远等不到。
+  const onAbort = (): void => {
+    child.kill()
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
 
   // Java 的日志走 stderr。平时不打扰用户，但后端启动失败时它就是唯一的线索，
   // 所以留一个滚动窗口，报错时一起抛出去。
@@ -87,6 +106,8 @@ export async function startBackend(options: BackendOptions): Promise<Backend> {
   }
 
   const socket = await connect(listening)
+  // 连上了就不再需要这个应急通道，后面交给 backend.dispose()
+  signal?.removeEventListener('abort', onAbort)
   return wire(child, socket)
 }
 

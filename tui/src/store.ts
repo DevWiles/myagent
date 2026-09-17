@@ -86,6 +86,8 @@ export type ReadyInfo = {
   /** 后端宣告的可选能力。'plan' 在里面才放出 /plan 入口。 */
   features: string[]
   workspaceWarning?: string
+  /** 审计日志的位置。退出时的收尾信息要用它。 */
+  auditLog?: string
 }
 
 export type SessionState = {
@@ -257,6 +259,7 @@ export class SessionStore {
             tools: event.tools,
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
+            auditLog: event.auditLog,
           },
           busy: event.busy,
           tokens: event.tokens ?? 0,

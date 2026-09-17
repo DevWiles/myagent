@@ -14,7 +14,24 @@ import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { writeSync } from "node:fs"
 import { basename, resolve } from "node:path"
+import type { Accessor } from "solid-js"
 import { App } from "./components/App.tsx"
+import { buildEpilogue } from "./epilogue.ts"
+import type { SessionState } from "./store.ts"
+
+/**
+ * 整场会话的起点。
+ *
+ * store 里的 `startedAt` 是**每一轮**的（busy 时设、闲时清 null），算不出整场时长。
+ * 起点取「用户敲下命令的那一刻」而不是「连上后端的那一刻」——等 java 起来那一两秒
+ * 他也在等，那也是会话的一部分。
+ *
+ * 不用担心把 mvn build 的时间算进来：myagent-tui 脚本是 build 完才 exec 过来的。
+ */
+const sessionStartedAt = Date.now()
+
+/** 组件树里的东西，退出路径要用。Solid 的作用域出不来，就搁在模块作用域。 */
+const exit: { state?: Accessor<SessionState>; dispose?: () => void } = {}
 
 // --- 参数 -------------------------------------------------------------------
 
@@ -48,11 +65,37 @@ const workspace = resolve(flag("-d", "--dir") ?? process.cwd())
 
 // --- 终端 -------------------------------------------------------------------
 
+let epilogueWritten = false
+
+/**
+ * 把收尾信息留在主屏幕上。
+ *
+ * **时机是这里唯一的难点。** 还原主屏的 ANSI 是 renderer 在 destroy 的最后一步发的，
+ * 早一步写就落在备用屏上，随 altscreen 一起蒸发——表现就是「退出后什么都没留下」，
+ * 这正是修之前的样子。所以主写入点挂在 `onDestroy`（destroy 的最后一步），
+ * shutdown() 里再补一次兜底。幂等，两边都调也只写一次。
+ *
+ * 用 writeSync 而不是 console.log：stdout 被重定向成管道时 console.log 是异步的，
+ * 紧跟着的 process.exit 会把还没刷出去的内容直接丢掉。
+ */
+function flushEpilogue(): void {
+  if (epilogueWritten) return
+  epilogueWritten = true
+  const state = exit.state
+  if (!state) return
+  const lines = buildEpilogue(state(), Date.now() - sessionStartedAt)
+  if (lines.length === 0) return
+  // 暗色只在真终端上加：输出被重定向到文件时别往里塞控制序列
+  const body = lines.join("\n")
+  writeSync(1, (process.stdout.isTTY ? `\x1b[2m${body}\x1b[0m` : body) + "\n")
+}
+
 const renderer = await createCliRenderer({
   targetFps: 30,
   // 自己处理 Ctrl-C：要在退出前关掉后端进程，不能让它变成孤儿
   exitOnCtrlC: false,
   useMouse: true,
+  onDestroy: flushEpilogue,
 })
 
 let shuttingDown = false
@@ -67,7 +110,15 @@ let shuttingDown = false
 function shutdown(reason?: string, code = 0): void {
   if (shuttingDown) return
   shuttingDown = true
+  // 顺序：先关后端，再还终端，最后打字。
+  //
+  // 后端排第一是因为 process.exit() 不跑 Solid 的卸载链。renderer.destroy() 确实会
+  // 顺带触发一次（@opentui/solid 把 root 的 dispose 挂在 renderer 的 destroy 事件上），
+  // 但那是别人的实现细节，而且后端还没起好时那条链路根本够不着已经 spawn 出来的
+  // java 进程。实测不显式关的话，java 在 Ctrl-C 之后还要活 10 秒以上。
+  exit.dispose?.()
   if (!renderer.isDestroyed) renderer.destroy()
+  flushEpilogue()   // destroy 若被推迟（正好卡在渲染帧中间）就靠这一下兜底
   if (reason) writeSync(2, reason.endsWith("\n") ? reason : reason + "\n")
   process.exit(code)
 }
@@ -92,6 +143,10 @@ await render(
       // 后端没了就退出，并把原因留在终端上——altscreen 一还原，
       // 界面里印的任何错误都会跟着消失，只有这里打的才看得见
       onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
+      onMounted={(handle) => {
+        exit.state = handle.state
+        exit.dispose = handle.dispose
+      }}
     />
   ),
   renderer,
