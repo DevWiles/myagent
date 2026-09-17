@@ -47,7 +47,7 @@ token 随进程生灭，每次启动都不一样。
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume"]
+"features": ["plan", "replan", "resume", "auto_mode"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -85,7 +85,7 @@ token 随进程生灭，每次启动都不一样。
   "busy": false,
   "tokens": 1234,
   "contextLimit": 65536,
-  "features": ["plan", "replan", "resume"],
+  "features": ["plan", "replan", "resume", "auto_mode"],
   "tools": [{"name": "read_file", "description": "…"}],
   "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
   "resumable": {
@@ -139,6 +139,7 @@ token 随进程生灭，每次启动都不一样。
 | `plan_task_finished` | `taskId` `status` `durationMs` `result` `error` | `result`/`error` 可能是 `null` |
 | `plan_tasks_added` | `parentId` `tasks[]` | 图长大了，见 3.5 |
 | `plan_revised` | `failedTaskId` `tasks[]` | 某一步失败后补出了救场任务，见 3.6 |
+| `mode_switched` | `mode` `reason` | 一条 `prompt` 被自动改走规划了，见 3.8 |
 | `plan_finished` | `status` `succeeded` `failed` `skipped` `replans` `durationMs` | 用户否决时只有 `status` |
 
 `plan_created`：
@@ -243,6 +244,35 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 存档认工作区：在别的目录连上来，哪怕文件名撞了也不会给你续——
 一份计划里的任务描述全是针对某个仓库写的。
 
+### 3.8 简单任务不规划（feature: `auto_mode`）
+
+不是每句话都值得先拆计划。「PlanParser 为什么从第一个 `{` 抠起」是个查询，
+为它多花一次规划调用纯属浪费。所以服务端收到 `prompt` 时会先做一次**字面判断**，
+决定直接对话还是改走规划。判断分三档，只有前两档会改道：
+
+| 档 | 服务端行为 |
+|---|---|
+| 直接干 | 照常走对话，不发 `mode_switched` |
+| 拿不准 | **并到「规划」处理**（见下） |
+| 该规划 | 发 `mode_switched`，然后走 3.4 那套完整流程 |
+
+```json
+{"t":"mode_switched","mode":"plan","reason":"是改动面比较大的活、范围铺得比较开"}
+```
+
+**为什么「拿不准」不单开一条协议消息去问用户**：规划本来就带一道确认
+（`plan_confirm_request`），「先问一句」的效果它已经有了，代价只是多花一次规划调用。
+终端版能直接读一行 y/n，所以那边是真的会问；无头模式为此新增一轮往返不划算。
+
+**界面该做的事**：收到 `mode_switched` 就把 `reason` 显示出来。不显示的话，
+用户发的是 `prompt`、回来的却是 `plan_created`，会完全不知道发生了什么。
+
+**`/plan`（也就是 `plan` 命令）不受这套判断影响**——显式表态优先于启发式。
+
+> ⚠️ 这是**字面**判断，没有理解。「把那个改一下」六个字背后可能是三天的活。
+> 它认的是明显的两头，中间那片本来就该由人来定，所以 `plan_confirm_request`
+> 那一步任何时候都不能省。
+
 ---
 
 ## 4. 界面 → 服务端
@@ -312,6 +342,7 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 | 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |
 | 某步失败、但模型判断补不了 | 不发 `plan_revised`，照原样收场 | 照常显示失败 |
 | 重规划本身挂了（调用失败、给的图不合法） | 静默忽略，照原样收场 | 界面无感，和没配重规划一样 |
+| `prompt` 被判定为该规划 | 发 `mode_switched`，转走计划流程 | 显示 `reason`，别让用户莫名其妙 |
 | `resume` 但没有存档 | 回 `error` | `ready.resumable` 不存在时就别放出这个入口 |
 | 存档读不出来 / 格式过期 | 当作没有存档 | 同上 |
 | 存不下（磁盘满、只读） | 计划照跑，只是断了续不上 | 界面无感 |

@@ -13,6 +13,8 @@ import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
+import dev.wiles.myagent.plan.ExecutionMode;
+import dev.wiles.myagent.plan.ModeHeuristic;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanCheckpoint;
 import dev.wiles.myagent.plan.PlanExecuteAgent;
@@ -302,6 +304,17 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
+
+        // 看一眼这句话该不该改走规划。**ASK 在这儿并到 PLAN**：无头模式问不了，
+        // 而规划本来就带一道确认（plan_confirm_request），「问一句」的效果它已经有了，
+        // 代价只是多花一次规划调用。为此单开一条协议消息不划算
+        ModeHeuristic.Decision decision = ModeHeuristic.assess(text);
+        if (planAgent != null && decision.mode() != ExecutionMode.DIRECT) {
+            publish(Protocol.encodeModeSwitch(decision.explain()));
+            worker.submit(() -> runPlan(text));
+            return;
+        }
+
         worker.submit(() -> {
             long startedAt = System.currentTimeMillis();
             try {

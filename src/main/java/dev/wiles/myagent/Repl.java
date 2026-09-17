@@ -25,6 +25,7 @@ import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanApproval;
 import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.PlanExecuteAgent;
+import dev.wiles.myagent.plan.ModeHeuristic;
 import dev.wiles.myagent.plan.PlanListener;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.PlanStore;
@@ -372,10 +373,66 @@ public final class Repl {
                 emit(noKeyMessage());
                 continue;
             }
+            if (maybePlanInstead(line)) {
+                emit("");
+                continue;
+            }
             runInterruptible(line);
             emit("");
         }
         emit(Ansi.dim("bye."));
+    }
+
+    /**
+     * 这句话要不要改走规划。
+     *
+     * <p><b>只影响直接输入的那句话，不影响 {@code /plan}</b>——显式敲了命令就是明确表态，
+     * 启发式没资格插嘴。
+     *
+     * @return true 表示已经按规划跑完了，调用方不必再走普通对话
+     */
+    private boolean maybePlanInstead(String request) {
+        if (planAgent == null) {
+            return false;
+        }
+        ModeHeuristic.Decision decision = ModeHeuristic.assess(request);
+        return switch (decision.mode()) {
+            case DIRECT -> false;
+            case PLAN -> {
+                // 说清为什么——自动进了规划却不解释，用户只会觉得它突然变啰嗦
+                emit(Ansi.dim("（" + decision.explain() + "，先拆个计划。/plan 可强制，"
+                        + "计划出来还能否掉）"));
+                runPlan(request);
+                yield true;
+            }
+            case ASK -> {
+                if (!askWhetherToPlan(decision)) {
+                    yield false;
+                }
+                runPlan(request);
+                yield true;
+            }
+        };
+    }
+
+    /**
+     * 拿不准时问一句。
+     *
+     * <p>默认是「拆」（{@code [Y/n]}），因为判错的代价不对称：白拆一次计划，用户在确认那步
+     * 当场就能否掉；而该拆没拆，是跑偏一路改了一堆文件之后才发现。
+     */
+    private boolean askWhetherToPlan(ModeHeuristic.Decision decision) {
+        emit(Ansi.dim("（" + decision.explain() + "）"));
+        try {
+            String answer = reader.readLine("先拆个计划再做? [Y/n] ", InputFrame.none());
+            if (answer == null) {                       // Ctrl-D
+                return false;
+            }
+            String normalized = answer.trim().toLowerCase();
+            return !normalized.equals("n") && !normalized.equals("no") && !normalized.equals("否");
+        } catch (LineReader.Interrupted e) {            // Ctrl-C：当他不想拆
+            return false;
+        }
     }
 
     private static boolean isExitCommand(String line) {
@@ -754,6 +811,8 @@ public final class Repl {
             case "/help" -> {
                 emit("""
                           /plan 目标  先规划后执行：拆成任务依赖图，确认后逐个跑
+                                    （直接说话时，看着像好几步的活会自动走这条路，
+                                      拿不准会先问你一句；查询和小改动照常直接做）
                           /resume   接着跑上次没跑完的计划（做成的步骤不重来）
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）

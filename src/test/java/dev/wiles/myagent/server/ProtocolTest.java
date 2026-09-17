@@ -197,10 +197,21 @@ class ProtocolTest {
     }
 
     @Test
+    @DisplayName("自动改走规划要说一声，不然界面只看到「发的是 prompt，回的是 plan_created」")
+    void encodesModeSwitch() {
+        JsonNode n = Protocol.encodeModeSwitch("范围铺得比较开");
+
+        assertEquals("mode_switched", n.get("t").asText());
+        assertEquals("plan", n.get("mode").asText());
+        assertEquals("范围铺得比较开", n.get("reason").asText());
+    }
+
+    @Test
     @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
     void announcesFeatures() {
         assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
     }
 }
