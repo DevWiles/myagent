@@ -4,6 +4,7 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
@@ -61,7 +62,7 @@ public final class Repl {
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/plan", "/resume", "/clear", "/tools", "/history", "/expand",
+            List.of("/help", "/plan", "/resume", "/continue", "/clear", "/tools", "/history", "/expand",
                     "/quiet", "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
@@ -72,6 +73,7 @@ public final class Repl {
     private final Config config;
     private final Workspace workspace;
     private final MemoryStore memory;
+    private final SessionStore sessions;
     private final ToolRegistry tools;
     private final TerminalMode terminal = new TerminalMode();
     private final LineReader reader;
@@ -174,6 +176,7 @@ public final class Repl {
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
         this.memory = MemoryStore.inUserHome();
+        this.sessions = SessionStore.inUserHome();
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace, memory)
                 : BuiltinTools.createDefault(workspace,
@@ -269,7 +272,48 @@ public final class Repl {
             return;
         }
         runInterruptible(prompt);   // 内容已经通过流式回调打印过了
+        saveSession();
         emit("");
+    }
+
+    /**
+     * 一轮说完存一次盘。
+     *
+     * <p>粒度和计划存档的「每了结一个任务存一次」对齐：都是在一个<b>自洽的边界</b>上存。
+     * 更细的粒度没有意义——一轮对话中途的历史带着没回填的工具调用，
+     * 存下来也是要被 {@code HistoryRepair} 截掉的。
+     */
+    private void saveSession() {
+        if (agent != null) {
+            sessions.save(agent.history(), workspace.root(), config.model());
+        }
+    }
+
+    /**
+     * 把上次没聊完的对话接回来。
+     *
+     * <p>和计划续跑一样<b>不自动做</b>，要用户开口。隔了不知道多久，
+     * 代码可能已经变了，他也未必还记得当时在聊什么——
+     * 悄悄把一段旧上下文塞回去，模型会拿着过时的结论一路往下推。
+     */
+    private void continueSession() {
+        if (agent == null) {
+            emit(noKeyMessage());
+            return;
+        }
+        var snapshot = sessions.peek(workspace.root());
+        if (snapshot.isEmpty()) {
+            emit(Ansi.dim("这个工作区没有可以接着聊的会话。"));
+            return;
+        }
+        if (agent.history().size() > 1) {
+            // 当前已经聊上了。恢复会把眼前这段直接冲掉，得让用户自己决定
+            emit(Ansi.dim("当前已经有对话了。要接上次的，先 /clear 再 /continue。"));
+            return;
+        }
+        int restored = agent.restore(snapshot.get().restorable());
+        emit(Ansi.dim("接上了上次的对话（" + restored + " 条消息，"
+                + snapshot.get().turns() + " 轮）。首句是：" + snapshot.get().firstUserMessage()));
     }
 
     /**
@@ -370,6 +414,11 @@ public final class Repl {
             }
             if (line.equals("/resume")) {
                 resumePlan();
+                emit("");
+                continue;
+            }
+            if (line.equals("/continue")) {
+                continueSession();
                 emit("");
                 continue;
             }
@@ -766,6 +815,8 @@ public final class Repl {
                 if (agent != null) {
                     agent.reset();
                 }
+                // 存档也得删。留着的话下次启动会提示恢复一段用户刚刚明确表示不要的对话
+                sessions.delete(workspace.root());
                 emit(Ansi.dim("对话历史已清空。"));
                 return true;
             }
@@ -821,6 +872,7 @@ public final class Repl {
                                     （直接说话时，看着像好几步的活会自动走这条路，
                                       拿不准会先问你一句；查询和小改动照常直接做）
                           /resume   接着跑上次没跑完的计划（做成的步骤不重来）
+                          /continue 接着聊上次没聊完的对话
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
@@ -948,14 +1000,22 @@ public final class Repl {
 
     /** 启动时提一句上次没跑完的计划。不提的话，那份存档等于不存在。 */
     private void announceResumable() {
-        if (planAgent == null) {
-            return;
+        if (planAgent != null) {
+            planAgent.savedPlan().ifPresent(checkpoint -> {
+                emit(Ansi.dim("上次有一份计划没跑完：" + checkpoint.goal()
+                        + "（还剩 " + checkpoint.remaining() + " 步）  输入 /resume 接着跑"));
+                emit("");
+            });
         }
-        planAgent.savedPlan().ifPresent(checkpoint -> {
-            emit(Ansi.dim("上次有一份计划没跑完：" + checkpoint.goal()
-                    + "（还剩 " + checkpoint.remaining() + " 步）  输入 /resume 接着跑"));
-            emit("");
-        });
+        // 会话存档同理：不提一句，它就等于不存在
+        if (agent != null) {
+            sessions.peek(workspace.root()).ifPresent(snapshot -> {
+                emit(Ansi.dim("上次在这儿聊过 " + snapshot.turns() + " 轮：「"
+                        + oneLine(snapshot.firstUserMessage(), Math.max(20, width - 40))
+                        + "」  输入 /continue 接着聊"));
+                emit("");
+            });
+        }
     }
 
     /**

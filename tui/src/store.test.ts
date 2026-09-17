@@ -532,3 +532,97 @@ describe('计划面板', () => {
     expect(store.getSnapshot().ready?.features).toEqual([])
   })
 })
+
+describe('会话恢复', () => {
+  const readyWithSession = () =>
+    ({
+      ...(ready() as Extract<ServerEvent, { t: 'ready' }>),
+      features: ['plan', 'resume', 'session'],
+      continuable: {
+        turns: 4,
+        messages: 11,
+        firstMessage: '这个项目怎么跑测试',
+        savedAt: 1,
+      },
+    }) as ServerEvent
+
+  test('首帧带上次没聊完的对话，界面据此放出「接着聊」', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+
+    expect(store.getSnapshot().ready?.continuable?.turns).toBe(4)
+    expect(store.getSnapshot().ready?.continuable?.firstMessage).toBe('这个项目怎么跑测试')
+  })
+
+  test('续计划和续对话是两件独立的事，可以同时挂着', () => {
+    const store = new SessionStore()
+    feed(store, {
+      ...(readyWithSession() as Extract<ServerEvent, { t: 'ready' }>),
+      resumable: { goal: '把 README 补全', remaining: 3, total: 7, savedAt: 1 },
+    })
+
+    expect(store.getSnapshot().ready?.resumable).toBeDefined()
+    expect(store.getSnapshot().ready?.continuable).toBeDefined()
+  })
+
+  test('恢复成功后「接着聊」的入口就该收——存档已经用掉了', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, {
+      t: 'session_restored',
+      messages: 11,
+      turns: 4,
+      firstMessage: '这个项目怎么跑测试',
+      savedAt: 1,
+    })
+
+    expect(store.getSnapshot().ready?.continuable).toBeUndefined()
+    // 只摘这一个字段，其余 ready 信息不能跟着丢
+    expect(store.getSnapshot().ready?.model).toBe('deepseek-chat')
+    expect(store.getSnapshot().ready?.tools).toHaveLength(1)
+  })
+
+  test('恢复成功会说清接回来多少——可能比存档里少，残缺的尾巴被修剪了', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, {
+      t: 'session_restored',
+      messages: 8,
+      turns: 3,
+      firstMessage: '这个项目怎么跑测试',
+      savedAt: 1,
+    })
+
+    const last = store.getSnapshot().entries.at(-1)!
+    expect(last.kind).toBe('notice')
+    expect((last as Extract<Entry, { kind: 'notice' }>).text).toContain('3 轮')
+    expect((last as Extract<Entry, { kind: 'notice' }>).text).toContain('8 条')
+  })
+
+  test('恢复会把 token 占用一起更新——接回来的历史本来就占上下文', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, {
+      t: 'session_restored',
+      messages: 11,
+      turns: 4,
+      firstMessage: 'x',
+      savedAt: 1,
+      tokens: 8240,
+      contextLimit: 64000,
+    })
+
+    expect(store.getSnapshot().tokens).toBe(8240)
+    expect(store.getSnapshot().contextLimit).toBe(64000)
+  })
+
+  test('清空对话后入口也要收——后端 reset 时会把存档一起删掉', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, { t: 'reset_done' })
+
+    // 留着的话用户点了只会得到一条 error
+    expect(store.getSnapshot().ready?.continuable).toBeUndefined()
+    expect(store.getSnapshot().ready?.model).toBe('deepseek-chat')
+  })
+})

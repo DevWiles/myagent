@@ -8,6 +8,7 @@ import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.HistoryRepair;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
 import org.slf4j.Logger;
@@ -113,9 +114,42 @@ public final class Agent {
         history.add(ChatMessage.system(systemPrompt));
     }
 
+    /**
+     * 把一段存下来的对话立回来，接着往下聊。
+     *
+     * <h3>用的是<b>当前</b>的 system 提示词，不是存档里那条</h3>
+     * 这里先 {@link #reset()} 再追加，所以第 0 条一定是本次构造时生成的那份——
+     * 带着此刻最新的长期记忆索引。照搬存档里的 system 的话，
+     * 上次会话之后新记的东西会<b>永远不生效</b>，而现象是「记成功了但它不知道」，
+     * 属于最难查的那一类。{@code SessionSnapshot} 干脆不存 system，两头都堵上。
+     *
+     * <h3>先修再用</h3>
+     * 存档可能停在「工具点了、结果没回来」的当口。那种残缺留在历史里，
+     * 之后<b>每一次</b>请求都会 400，而且重启也不会好——存档还在，一恢复又坏。
+     * 所以必须过一遍 {@link HistoryRepair}。
+     *
+     * @param conversation 不含 system 的对话内容
+     * @return 真正恢复了多少条（可能少于传入的，残缺部分被截掉了）
+     */
+    public int restore(List<ChatMessage> conversation) {
+        reset();
+        List<ChatMessage> safe = HistoryRepair.repair(conversation);
+        history.addAll(safe);
+        if (conversation != null && safe.size() < conversation.size()) {
+            log.info("会话恢复：{} 条里有 {} 条不完整，已截掉",
+                    conversation.size(), conversation.size() - safe.size());
+        }
+        return safe.size();
+    }
+
     /** 只读视图，供界面查看当前上下文。 */
     public List<ChatMessage> history() {
         return List.copyOf(history);
+    }
+
+    /** 对话内容，<b>不含</b> index 0 的 system——这是要存盘的那部分。 */
+    public List<ChatMessage> conversation() {
+        return history.size() <= 1 ? List.of() : List.copyOf(history.subList(1, history.size()));
     }
 
     /**

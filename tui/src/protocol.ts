@@ -48,6 +48,12 @@ export type ServerEvent =
        * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
        */
       resumable?: { goal: string; remaining: number; total: number; savedAt: number }
+      /**
+       * 这个工作区上次没聊完的对话。没有就没这个字段。
+       *
+       * 和 resumable 是两件事：那个续的是**计划**，这个续的是**对话**。
+       */
+      continuable?: { turns: number; messages: number; firstMessage: string; savedAt: number }
       tools: ToolInfo[]
     }
   /** 第 step 轮开始，正在等模型响应。 */
@@ -58,6 +64,21 @@ export type ServerEvent =
   | { t: 'thought'; text: string }
   | { t: 'tool_started'; id: number; tool: string; arguments: string }
   | { t: 'tool_finished'; id: number; tool: string; ok: boolean; output: string }
+  /**
+   * 上次的对话已经立回后端内存了。
+   *
+   * 这条只是回执，**不带历史内容**——后端不负责替界面重播已经画过的东西。
+   * messages 是**真正恢复的条数**，可能少于存档里的：残缺的尾巴会被修剪掉。
+   */
+  | {
+      t: 'session_restored'
+      messages: number
+      turns: number
+      firstMessage: string
+      savedAt: number
+      tokens?: number
+      contextLimit?: number
+    }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
   | { t: 'done'; text: string; steps: number }
@@ -118,6 +139,8 @@ export type ClientCommand =
   | { t: 'plan'; goal: string }
   /** 接着跑上次没跑完的计划。没有存档时后端回 error。 */
   | { t: 'resume' }
+  /** 接着聊上次没聊完的对话。没有存档、或当前已经有对话时后端回 error。 */
+  | { t: 'continue' }
   | { t: 'plan_confirm_reply'; id: number; approved: boolean }
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }

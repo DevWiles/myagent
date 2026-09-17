@@ -24,6 +24,8 @@ export type Session = {
   plan: (goal: string) => void
   /** 接着跑上次没跑完的计划。后端没宣告 resume 能力、或没有存档时不要调。 */
   resume: () => void
+  /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
+  continueSession: () => void
   /** 回应审批请求。 */
   approve: (id: number, decision: "yes" | "no" | "always") => void
   /** 回应计划确认。 */
@@ -160,6 +162,10 @@ export function createSession(options: BackendOptions): Session {
       // 屏幕上什么都不留的话像是按键丢了
       store.submitPrompt("/resume")
       backend?.send({ t: "resume" })
+    },
+    continueSession() {
+      store.submitPrompt("/continue")
+      backend?.send({ t: "continue" })
     },
     approve(id, decision) {
       // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，

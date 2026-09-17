@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.cli.Cli;
@@ -74,6 +75,7 @@ public final class AgentServer extends WebSocketServer {
     private final Config config;
     private final Workspace workspace;
     private final MemoryStore memory;
+    private final SessionStore sessions;
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
@@ -134,6 +136,7 @@ public final class AgentServer extends WebSocketServer {
         // 工具拿到的是**包了审计的**审批策略，和 Repl 的做法一致：
         // 每次批准/拒绝都留一条记录，否则事后没法回答「这个文件是谁同意改的」
         this.memory = MemoryStore.inUserHome();
+        this.sessions = SessionStore.inUserHome();
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace, memory)
                 : BuiltinTools.createDefault(workspace, audit.audited(approval), memory);
@@ -319,6 +322,7 @@ public final class AgentServer extends WebSocketServer {
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
             case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
             case "resume" -> handleResume(conn);
+            case "continue" -> handleContinue(conn);
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
             case "reset" -> handleReset(conn);
@@ -360,6 +364,8 @@ public final class AgentServer extends WebSocketServer {
                 log.error("agent 跑挂了", e);
                 publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
             } finally {
+                // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
+                sessions.save(agent.history(), workspace.root(), config.model());
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
@@ -414,6 +420,47 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.event("busy").put("busy", true));
         worker.submit(this::runResume);
+    }
+
+    /**
+     * 把上次没聊完的对话接回来。
+     *
+     * <p>和 {@code handleResume} 一样是<b>同步</b>完成的，不丢进 worker：
+     * 恢复只是往内存里塞一段历史，没有模型调用，占不了多久。
+     * 丢进后台反而要处理「恢复期间又来了一条 prompt」这种本来不存在的竞态。
+     *
+     * <p>三道闸都过不了就定向回一条 error 给发命令的那个连接，
+     * 而不是广播——别的界面没做错什么，不该被打扰。
+     */
+    private void handleContinue(WebSocket conn) {
+        if (agent == null) {
+            send(conn, error("没有配置 API key，无法对话"));
+            return;
+        }
+        if (busy.get()) {
+            send(conn, error("正在处理中，不能恢复会话"));
+            return;
+        }
+        var snapshot = sessions.peek(workspace.root());
+        if (snapshot.isEmpty()) {
+            send(conn, error("这个工作区没有可以接着聊的会话"));
+            return;
+        }
+        if (agent.history().size() > 1) {
+            // 恢复会把眼前这段直接冲掉，这个决定得由用户来做
+            send(conn, error("当前已经有对话了。要接上次的，先 reset 再 continue"));
+            return;
+        }
+
+        int restored = agent.restore(snapshot.get().restorable());
+        ObjectNode done = Protocol.event("session_restored");
+        done.put("messages", restored);
+        done.put("turns", snapshot.get().turns());
+        done.put("firstMessage", snapshot.get().firstUserMessage());
+        done.put("savedAt", snapshot.get().savedAt());
+        done.put("tokens", agent.estimatedTokens());
+        done.put("contextLimit", agent.contextLimit());
+        publish(done);
     }
 
     private void runResume() {
@@ -478,6 +525,8 @@ public final class AgentServer extends WebSocketServer {
         if (agent != null) {
             agent.reset();
         }
+        // 存档也得删——留着的话下次连上来还会提示恢复一段用户刚表示不要的对话
+        sessions.delete(workspace.root());
         approval.reset();
         publish(Protocol.event("reset_done"));
     }
@@ -537,6 +586,16 @@ public final class AgentServer extends WebSocketServer {
             resumable.put("total", checkpoint.tasks().size());
             resumable.put("savedAt", checkpoint.savedAt());
         });
+        // 上次没聊完的对话，同理放进首帧
+        if (agent != null) {
+            sessions.peek(workspace.root()).ifPresent(snapshot -> {
+                ObjectNode continuable = n.putObject("continuable");
+                continuable.put("turns", snapshot.turns());
+                continuable.put("messages", snapshot.restorable().size());
+                continuable.put("firstMessage", snapshot.firstUserMessage());
+                continuable.put("savedAt", snapshot.savedAt());
+            });
+        }
         String rejection = WorkspaceGuard.rejectionReason(workspace.root());
         if (rejection != null) {
             n.put("workspaceWarning", rejection);   // 能走到这儿说明是 --unsafe 放行的

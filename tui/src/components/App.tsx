@@ -90,6 +90,15 @@ export function App(props: AppProps) {
   const canResume = () =>
     Boolean(state().ready?.resumable) && Boolean(state().ready?.features.includes("resume"))
 
+  /**
+   * 后端说这个工作区有没聊完的对话，而且它确实支持恢复。
+   *
+   * <p>两个条件都要查，理由同 canResume。和它是两件独立的事——
+   * 一个续计划、一个续对话，可能同时有，也可能只有一个。
+   */
+  const canContinue = () =>
+    Boolean(state().ready?.continuable) && Boolean(state().ready?.features.includes("session"))
+
   /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
   const pending = () => state().approval !== null || state().planConfirm !== null
 
@@ -192,6 +201,18 @@ export function App(props: AppProps) {
           </box>
         </Show>
 
+        {/* 上次没聊完的对话，摆在计划那条下边。两条可能同时在——
+            一个续计划、一个续对话，各说各的，不该互相顶掉 */}
+        <Show when={canContinue() && !state().busy}>
+          <box flexShrink={0} paddingLeft={1} flexDirection="row">
+            <text fg={dark.warning}>⏸ 上次在这儿聊过 </text>
+            <text fg={dark.text}>{state().ready!.continuable!.turns} 轮</text>
+            <text fg={dark.subtle}>
+              （首句「{state().ready!.continuable!.firstMessage}」，输入 /continue 接着聊）
+            </text>
+          </box>
+        </Show>
+
         {/* 没有 API key 时先说清楚，否则用户发一句话才看到报错 */}
         <Show when={state().ready && !state().ready!.hasApiKey}>
           <box paddingLeft={1}>
@@ -234,6 +255,7 @@ export function App(props: AppProps) {
             const planGoal = value.startsWith("/plan ") ? value.slice(6).trim() : null
             if (planGoal && state().ready?.features.includes("plan")) session.plan(planGoal)
             else if (value.trim() === "/resume" && canResume()) session.resume()
+            else if (value.trim() === "/continue" && canContinue()) session.continueSession()
             else session.prompt(value)
           }}
         />

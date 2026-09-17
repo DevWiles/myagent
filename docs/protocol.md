@@ -47,7 +47,7 @@ token 随进程生灭，每次启动都不一样。
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume", "auto_mode"]
+"features": ["plan", "replan", "resume", "auto_mode", "session"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -85,7 +85,7 @@ token 随进程生灭，每次启动都不一样。
   "busy": false,
   "tokens": 1234,
   "contextLimit": 65536,
-  "features": ["plan", "replan", "resume", "auto_mode"],
+  "features": ["plan", "replan", "resume", "auto_mode", "session"],
   "tools": [{"name": "read_file", "description": "…"}],
   "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
@@ -278,6 +278,48 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 > 它认的是明显的两头，中间那片本来就该由人来定，所以 `plan_confirm_request`
 > 那一步任何时候都不能省。
 
+### 3.9 接着聊上次没聊完的（feature: `session`）
+
+对话**每说完一轮存一次盘**（`~/.myagent/sessions/`，一个工作区一份）。
+下次连上来，`ready.continuable` 会带上摘要：
+
+```json
+"continuable": {"turns": 4, "messages": 11,
+                "firstMessage": "这个项目怎么跑测试", "savedAt": 1758100000000}
+```
+
+界面发 `{"t":"continue"}`，服务端把历史立回内存，回一条 `session_restored`：
+
+```json
+{"t":"session_restored","messages":11,"turns":4,
+ "firstMessage":"这个项目怎么跑测试","savedAt":1758100000000,
+ "tokens":8240,"contextLimit":64000}
+```
+
+这条只是回执，**不会重播历史内容**。界面要显示上次聊了什么，
+自己留一份就好——服务端不负责替界面记住已经画过的东西。
+
+| 规矩 | 说明 |
+|---|---|
+| **不自动恢复** | 和计划续跑同理：隔了不知道多久，代码可能变了，用户也未必还记得当时在聊什么 |
+| **当前已经有对话时拒绝** | 恢复会把眼前这段冲掉，这个决定该由用户做。先 `reset` 再 `continue` |
+| **`reset` 会顺带删档** | 用户刚明确表示不要这段对话，留着它下次还会提示恢复 |
+| **存档不含 system 消息** | 见下 |
+
+**存档里为什么没有 system 消息**，这是最容易埋雷的地方：
+
+system 是每轮请求的第 0 条，里面有工作区路径**以及长期记忆的索引**。
+存档带着它、恢复时照搬的话，上次会话之后新记的所有东西在恢复出来的会话里
+**永远看不见**——而现象是「remember 明明成功了，它却不知道」，极难查。
+所以存档结构上就不存 system，恢复时由服务端现场生成一条新的。
+
+**残缺的存档会被修剪**。进程可能死在「模型点了三个工具、只回来两个结果」的当口。
+那种消息序列一旦留在历史里，之后**每一次**请求都会 400，而且重启也不会好——
+存档还在，一恢复又坏。所以恢复前会退回到最后一个「模型把话说完」的位置，
+`session_restored.messages` 给的是**真正恢复的条数**，可能少于存档里的。
+
+存档认工作区：在别的目录连上来不给恢复——一段对话里全是针对某个仓库的上下文。
+
 ---
 
 ## 4. 界面 → 服务端
@@ -290,6 +332,7 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always` | 回应 `approval_request` |
 | `cancel` | — | 中断当前这一轮 |
 | `resume` | — | 接着跑上次没跑完的计划，见 3.7。没有存档时回 `error` |
+| `continue` | — | 接着聊上次没聊完的对话，见 3.9。没有存档、或当前已有对话时回 `error` |
 | `reset` | — | 清空对话历史。忙的时候会被拒 |
 | `ping` | — | 保活 |
 

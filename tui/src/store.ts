@@ -94,6 +94,8 @@ export type ReadyInfo = {
   auditLog?: string
   /** 上次没跑完的计划。没有就是 undefined。 */
   resumable?: { goal: string; remaining: number; total: number; savedAt: number }
+  /** 上次没聊完的对话。和 resumable 是两件事：那个是计划，这个是对话。 */
+  continuable?: { turns: number; messages: number; firstMessage: string; savedAt: number }
 }
 
 export type SessionState = {
@@ -224,6 +226,19 @@ export class SessionStore {
     return rest
   }
 
+  /**
+   * 去掉「上次有对话没聊完」那条，其余 ready 信息原样保留。
+   *
+   * 只摘这一个字段——ready 里还有工具清单、能力清单、审计日志路径，
+   * 跟着一起丢的话界面会当场少半截。
+   */
+  private clearContinuable(): ReadyInfo | null {
+    const ready = this.state.ready
+    if (!ready?.continuable) return ready
+    const { continuable, ...rest } = ready
+    return rest
+  }
+
   /** 本地提示（错误、帮助、连接状态）。不经过后端。 */
   notice(level: 'info' | 'warn' | 'error', text: string): void {
     this.append({ kind: 'notice', key: this.nextKey('notice'), level, text })
@@ -289,6 +304,7 @@ export class SessionStore {
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
             resumable: event.resumable,
+            continuable: event.continuable,
           },
           busy: event.busy,
           tokens: event.tokens ?? 0,
@@ -418,6 +434,8 @@ export class SessionStore {
 
       case 'reset_done':
         this.clearTranscript()
+        // 后端 reset 时会把会话存档一起删掉，入口留着的话点了只会得到一条 error
+        this.set({ ready: this.clearContinuable() })
         this.notice('info', '对话已清空')
         return
 
@@ -430,6 +448,23 @@ export class SessionStore {
         // 要紧的是把「凭什么这么判」摆出来：用户发的是一句话，屏幕上却冒出个计划，
         // 不说清楚他只会觉得莫名其妙，也没机会说「不用，直接做」
         this.notice('info', event.reason ? `${event.reason}，先拆个计划` : '这件事先拆个计划')
+        return
+      }
+
+      case 'session_restored': {
+        // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史
+        this.set({ ready: this.clearContinuable() })
+        this.notice(
+          'info',
+          `接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。` +
+            `上次首句：${event.firstMessage}`,
+        )
+        if (event.tokens !== undefined) {
+          this.set({ tokens: event.tokens })
+        }
+        if (event.contextLimit !== undefined) {
+          this.set({ contextLimit: event.contextLimit })
+        }
         return
       }
 
