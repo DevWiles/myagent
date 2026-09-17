@@ -16,12 +16,14 @@ import java.util.Map;
  * 那是规划质量的问题，归 {@link PlanLimits} 和规划那一层管——
  * 放这儿会很别扭，因为 {@link #addSubTasks} 让图会长大，总数本来就会超过一次规划的上限。
  *
- * <p><b>为什么校验必须在开跑之前做完</b>：这三种烂图的症状差别很大，
+ * <p><b>为什么校验必须在开跑之前做完</b>：这几种烂图的症状差别很大，
  * 但都指向同一个结论——早发现比晚发现便宜太多。
  * <ul>
  *   <li>重复 id：后面的悄悄覆盖前面的，一个任务凭空消失，还不报错</li>
  *   <li>悬空依赖：下游永远等一个不存在的上游，静默挂死</li>
  *   <li>成环：大家都在等别人，同样是静默挂死，而且从日志上看就是「不动了」</li>
+ *   <li>连到已经废掉的上游：只会发生在追加的那一刻，症状同样是静默挂死，
+ *       见 {@link #requireLiveDeps}</li>
  * </ul>
  *
  * <p>线程安全：<b>没有</b>。同层并发是后面的事，到时候要么把图的读写收进调度线程，
@@ -74,9 +76,8 @@ public final class TaskGraph {
      * <p>和 {@link #addSubTasks} 是同一套原子性保证，区别只在语义：那边长出来的是
      * 某个 PLANNING 任务的下一层，这边长出来的是「原来那条路走不通，换一条」。
      *
-     * <p><b>新任务只能依赖已经成功的任务</b>，这一条由调用方在建任务时保证——
-     * 依赖一个已经 FAILED 或 SKIPPED 的任务，它永远等不到就绪，
-     * 而 {@code ready()} 看不出这种死等和「还没轮到」的区别，图就静默挂住了。
+     * <p><b>新任务不许依赖已经废掉的任务</b>。这一条由 {@link #requireLiveDeps} 当场拦下，
+     * 不再指望调用方自觉——指望不上：子任务那条路上，拆任务的是模型。
      */
     public void addTasks(Collection<Task> newTasks) {
         addTasks(newTasks, "任务");
@@ -93,6 +94,7 @@ public final class TaskGraph {
             }
         }
         validate(candidate);
+        requireLiveDeps(subTasks, candidate);
 
         // 校验过了才动真格。只需要连新任务的边——老任务之间的边早就连好了
         tasks.putAll(candidate);
@@ -234,6 +236,42 @@ public final class TaskGraph {
             }
         }
         detectCycle(map);
+    }
+
+    /**
+     * 新来的任务不许依赖已经废掉的上游——{@link TaskStatus#FAILED} 或 {@link TaskStatus#SKIPPED}。
+     *
+     * <p>这种边<b>永远不会就绪</b>：{@link #ready()} 要求每个依赖都 SUCCEEDED，
+     * 而终态不会再变了。于是这一步和它下游的一整条线全都卡死，
+     * 偏偏 {@code ready()} 分不出「死等」和「还没轮到」，图就静默挂在那儿，
+     * 日志上只看得到「不动了」——和成环是同一种难查法。
+     *
+     * <p><b>只查新来的这批，不查整张图。</b>{@link #propagateFailure} 跑完之后，
+     * 图里本来就合法地躺着「SKIPPED 依赖 FAILED」这样的边——那正是失败传播的产物。
+     * 拿整张图来查的话，任何一次任务失败之后就再也追加不进任何东西了：
+     * 洞没堵上，正常的路先断了。
+     *
+     * <p><b>必须排在 {@link #validate} 后面</b>：得先确认依赖真的存在，
+     * 否则这里从 map 里取到的是 null，翻出来的是 NPE 而不是那句能回灌给模型的话。
+     *
+     * <p>重规划那条路在解析阶段还有 {@code PlanParser.requireSelfContainedDeps} 挡一道；
+     * 子任务那条路没有对应的关卡（拆子任务的提示词只是「说」了这条规矩），
+     * 所以这道闸设在图这一层，两条路一起兜住。
+     */
+    private static void requireLiveDeps(Collection<Task> newTasks, Map<String, Task> candidate) {
+        for (Task task : newTasks) {
+            for (String id : task.dependencies()) {
+                Task dep = candidate.get(id);
+                if (dep.isTerminal() && dep.status() != TaskStatus.SUCCEEDED) {
+                    throw new IllegalArgumentException("任务 " + task.id() + " 依赖了 " + id
+                            + "，但 " + id + " 已经"
+                            + (dep.status() == TaskStatus.FAILED ? "失败了" : "被跳过了")
+                            + "，它的产出永远不会有，这一步会永远等不到就绪。"
+                            + "改成依赖还没跑或已经跑成的任务；"
+                            + "如果这一步本来就该在它的成果上继续，那它做不成，这一步也该取消。");
+                }
+            }
+        }
     }
 
     /** DFS 染色用的三种颜色。没进 map 的就是「白」——还没碰过。 */

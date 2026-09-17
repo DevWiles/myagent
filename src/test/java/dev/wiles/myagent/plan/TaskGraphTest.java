@@ -248,4 +248,85 @@ class TaskGraphTest {
 
         assertEquals(2, g.size());
     }
+
+    // ── 追加时不许连到已经废掉的任务 ──────────────────────────────
+
+    /**
+     * 一条已经断掉的腿：n2 自己失败，n3 被它连累跳过；n4、n5 都还没轮到。
+     *
+     * <p>n1 是 RUNNING——PLANNING 任务往图里落子任务的那一刻，正是这个状态
+     * （见 {@code PlanExecutor.runOne}：子任务先落图，成功了才 succeed）。
+     */
+    private static TaskGraph graphWithDeadLeg() {
+        TaskGraph g = TaskGraph.of(List.of(
+                new Task("n1", "探路", TaskType.PLANNING, List.of()),
+                t("n2"), t("n3", "n2"), t("n4"), t("n5")));
+        g.get("n1").start();
+        g.get("n2").start();
+        g.get("n2").fail("编译不过");
+        g.propagateFailure("n2");
+        return g;
+    }
+
+    @Test
+    @DisplayName("子任务依赖一个已经失败的任务：它永远等不到就绪，当场拒绝")
+    void rejectsSubTaskDependingOnFailedTask() {
+        TaskGraph g = graphWithDeadLeg();
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> g.addSubTasks(List.of(g.get("n1").subTask(
+                        "n1.1", "接着 n2 的产出改", TaskType.FILE_WRITE, List.of("n2")))));
+
+        // 这句话会变成「子任务不合法: ...」，进而成为重规划提示词的一部分，
+        // 所以得点名是谁连了谁——只说「依赖不合法」模型没法照着改
+        assertTrue(e.getMessage().contains("n1.1"), "报错要点出是哪个新任务: " + e.getMessage());
+        assertTrue(e.getMessage().contains("n2"), "报错要点出连坏了哪个上游: " + e.getMessage());
+
+        assertEquals(5, g.size(), "拒绝了就不该让图变大");
+        assertEquals(List.of("n3"), g.get("n2").dependents(), "半截反向边也不许留");
+    }
+
+    @Test
+    @DisplayName("子任务依赖一个被跳过的任务：和依赖失败任务一样是死等，同样拒绝")
+    void rejectsSubTaskDependingOnSkippedTask() {
+        TaskGraph g = graphWithDeadLeg();
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> g.addSubTasks(List.of(g.get("n1").subTask(
+                        "n1.1", "在 n3 的成果上继续", TaskType.FILE_WRITE, List.of("n3")))));
+
+        assertTrue(e.getMessage().contains("n3"), "报错要点出连坏了哪个上游: " + e.getMessage());
+        assertEquals(5, g.size(), "拒绝了就不该让图变大");
+        assertTrue(g.get("n3").dependents().isEmpty(), "半截反向边也不许留");
+    }
+
+    @Test
+    @DisplayName("追加的任务依赖一个不存在的 id：报错要说得清，不能是 NPE")
+    void rejectsAppendWithDanglingDependency() {
+        TaskGraph g = graphWithDeadLeg();
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> g.addSubTasks(List.of(g.get("n1").subTask(
+                        "n1.1", "接着不存在的那步做", TaskType.FILE_WRITE, List.of("n9")))));
+
+        assertTrue(e.getMessage().contains("n9"), "报错要点出是哪个 id 不存在: " + e.getMessage());
+        assertEquals(5, g.size());
+    }
+
+    @Test
+    @DisplayName("依赖还没跑的、或已经跑成的兄弟任务都正常，别顺手一起堵掉")
+    void allowsSubTaskDependingOnLiveTasks() {
+        TaskGraph g = graphWithDeadLeg();
+        g.get("n5").start();
+        g.get("n5").succeed("量完了");
+
+        // n4 还是 PENDING、n5 已经 SUCCEEDED——这两种都是活的上游，等得到
+        g.addSubTasks(List.of(g.get("n1").subTask(
+                "n1.1", "等 n4 做完，用上 n5 的产出", TaskType.FILE_WRITE, List.of("n4", "n5"))));
+
+        assertEquals(6, g.size());
+        assertEquals(TaskStatus.PENDING, g.get("n4").status());
+        assertEquals(List.of("n1.1"), g.get("n4").dependents());
+        assertEquals(List.of("n1.1"), g.get("n5").dependents());
+    }
 }
