@@ -10,7 +10,7 @@
  */
 
 import { TextAttributes } from "@opentui/core"
-import { For, Match, Show, Switch } from "solid-js"
+import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { syntaxStyleFor, useTheme } from "../theme.ts"
@@ -65,38 +65,79 @@ function UserEntry(props: { text: string }) {
 }
 
 /**
- * 模型的回复。
+ * 把流式文本切成「已成块的部分」和「还在写的尾巴」。
  *
- * **流式期间是纯文本，收完再整体渲染成 Markdown。**
+ * 边界是空行——markdown 里空行分隔块，所以前半截永远是若干个完整的块。
+ */
+function splitSettled(text: string): { settled: string; tail: string } {
+  const cut = text.lastIndexOf("\n\n")
+  if (cut < 0) return { settled: "", tail: text }
+  return { settled: text.slice(0, cut + 2), tail: text.slice(cut + 2) }
+}
+
+/**
+ * 模型的回复，边流边渲染 Markdown。
  *
- * 为什么不边流边渲染：`<markdown>` 每次 content 变化都要重新解析整段文本、
- * 重建整棵渲染树。不管把更新粒度调到多粗（试过逐字符、整块、整行三档），
- * 只要还在流式期间反复重建，屏幕就会闪——粒度只改变闪的频率，不改变它闪。
+ * ## 不闪的关键是「不重建」，不是「少更新」
  *
- * 所以干脆分成两个阶段：
- * - 流式中：一个 `<text>`，内容只增不改，没有解析也没有树重建，滚动平顺
- * - 流完了：换成 `<markdown>`，一次成型
+ * 这里绕了很久：逐字符、整块、整行三档更新粒度都试过，都会闪。
+ * 后来去实测 Claude Code 才想明白——它每秒都在更新画面，一样不闪，
+ * 因为**已经画出来的内容从不被重建**（实测 15 次追加、0 次改写）。
+ * 粒度只改变闪的频率，改变不了「每次更新都全量重建整棵树」这件事。
  *
- * 代价是流式期间能看见 `##`、`**` 这些源码标记，结束时有一次「变身」。
- * 这是刻意换来的：源码标记只是不好看，闪烁是没法看。
+ * ## 结构：已定稿的交给 markdown，尾巴用纯文本补
+ *
+ * ```
+ * <markdown>   ← 已经成块的部分。只在「又写完一个块」时才变，
+ *                  一次回复也就变几次，而且重建出来的像素和上一版一样，
+ *                  原生层差分后没有输出，看不见任何动静
+ * <text>       ← 还在长的那一块。每个 token 都在变，但它只是一个文本节点，
+ *                  没有解析、没有树重建，更新代价近乎零
+ * ```
+ *
+ * 这是 Claude Code 那套「已定稿内容 + 宽容渲染的尾巴」在 OpenTUI 上的对应物。
+ * 差别在于 Claude Code 的尾巴由一个宽容的 markdown 解析器渲染（半截语法也能画），
+ * 我们的尾巴就是纯文本——所以**正在写的那一两行会露出 `##`、`**` 标记**，
+ * 写完成块之后立刻变成正体。
+ *
+ * ## 为什么尾巴要自己补，不能全交给 markdown
+ *
+ * OpenTUI 内部确实有按块复用的机制（`getStableBlockCount()` 就是干这个的，
+ * 注意它只在 `internalBlockMode: "top-level"` 下才生效，默认的 "coalesced"
+ * 会直接返回 0）。但它对**未定稿尾块的处理是整个不画**，而不是宽容地画出来。
+ * 实测 1500 字的长回复：屏幕空了 11 秒，然后一次性砸出 64 行——不闪，但也没有反馈。
+ * 所以尾巴得我们自己用纯文本补上。
+ *
+ * ## streaming 必须传 true，不能写死 false
+ *
+ * 已定稿的那段虽然全是完整的块，`streaming` 仍要跟着流走。
+ * 写死 false 时 `createInitialStyledText()` 直接返回 undefined，走的是另一条
+ * 渲染路径，实测流式期间这段**完全不出现**，要等整轮结束才一次性画出来。
  */
 function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
+  const parts = createMemo(() =>
+    props.streaming ? splitSettled(props.text) : { settled: props.text, tail: "" },
+  )
 
   return (
-    <box paddingTop={1}>
-      <Show
-        when={!props.streaming}
-        fallback={<text fg={theme.text}>{props.text}</text>}
-      >
-        {/* ⚠️ syntaxStyle 必须写在 content **前面**。
-            Solid 的 reconciler 按 JSX 里的书写顺序依次调 setter，而设置 content 会
-            立刻触发一次解析；syntaxStyle 还没赋值的话，那一趟解析查不到任何配色，
-            整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
-            去掉星号，**只是颜色全错**，非常难发现。
-            （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
-        <markdown syntaxStyle={syntaxStyleFor(theme)} content={props.text} streaming={false} />
-      </Show>
+    <box flexDirection="column" paddingTop={1}>
+      {/* 这两个节点都**无条件存在**，内容为空时自然什么都不画。
+          不要用 <Show> 去包：实测包上之后，内部对 parts() 的绑定就不再跟着更新了，
+          表现是流式期间正文区一片空白，直到整轮结束才一次性出现。 */}
+
+      {/* ⚠️ 所有配置项都要写在 content **前面**。
+          Solid 的 reconciler 按 JSX 里的书写顺序依次调 setter，而设置 content 会
+          立刻触发一次解析；配置还没赋值的话，那一趟解析用的就是默认值。
+          syntaxStyle 没赋值时整段文字会退回默认色——不报错也不崩，
+          标题照样是标题、加粗照样去掉星号，**只是颜色全错**，非常难发现。
+          （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
+      <markdown
+        syntaxStyle={syntaxStyleFor(theme)}
+        streaming={props.streaming}
+        content={parts().settled}
+      />
+      <text fg={theme.text}>{parts().tail}</text>
     </box>
   )
 }
