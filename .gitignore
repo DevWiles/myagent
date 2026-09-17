@@ -6,3 +6,6 @@ target/
 .env
 config.json
 dependency-reduced-pom.xml
+
+# 调试时抓的终端 ANSI 输出，不是源码
+raw_normal.bin
