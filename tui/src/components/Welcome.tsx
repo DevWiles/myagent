@@ -16,6 +16,7 @@ import { createMemo, For, Show } from "solid-js"
 import { truncateStart } from "../path.ts"
 import { useTheme } from "../theme.ts"
 import { Banner, BannerCompact, BANNER_MIN_WIDTH } from "./Banner.tsx"
+import { Wordmark } from "./Wordmark.tsx"
 
 /** 招牌字模的宽度，左栏按它对齐。 */
 const LOGO_COLUMNS = 64
@@ -28,8 +29,6 @@ export type WelcomeInfo = {
   model: string
   toolCount: number
   workspace: string
-  /** 用户称呼，用在 "Welcome back X!" 那行；给空就只写 "Welcome back!" */
-  user?: string
 }
 
 export type WelcomeProps = {
@@ -63,9 +62,7 @@ export function Welcome(props: WelcomeProps) {
       {/* 左栏：欢迎语 + 招牌 + 环境信息 */}
       <box flexDirection="column" flexGrow={twoColumn() ? 0 : 1} flexShrink={0}>
         <box alignItems="center" width={leftWidth()}>
-          <text fg={theme.text} attributes={TextAttributes.BOLD}>
-            {props.info.user ? `Welcome back ${props.info.user}!` : "Welcome back!"}
-          </text>
+          <Wordmark text="Welcome" columns={leftWidth()} />
         </box>
         <text> </text>
 

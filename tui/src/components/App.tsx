@@ -153,7 +153,6 @@ export function App(props: AppProps) {
                 model: state().ready?.model ?? "连接后端中…",
                 toolCount: state().ready?.tools.length ?? 0,
                 workspace: workspace(),
-                user: "Chris",
               }}
               columns={dimensions().width - 2}
             />
