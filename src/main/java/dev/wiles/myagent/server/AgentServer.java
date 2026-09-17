@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
@@ -72,6 +73,7 @@ public final class AgentServer extends WebSocketServer {
     private final CliOptions options;
     private final Config config;
     private final Workspace workspace;
+    private final MemoryStore memory;
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
@@ -131,13 +133,15 @@ public final class AgentServer extends WebSocketServer {
 
         // 工具拿到的是**包了审计的**审批策略，和 Repl 的做法一致：
         // 每次批准/拒绝都留一条记录，否则事后没法回答「这个文件是谁同意改的」
+        this.memory = MemoryStore.inUserHome();
         this.tools = options.readOnly()
-                ? BuiltinTools.createReadOnly(workspace)
-                : BuiltinTools.createDefault(workspace, audit.audited(approval));
+                ? BuiltinTools.createReadOnly(workspace, memory)
+                : BuiltinTools.createDefault(workspace, audit.audited(approval), memory);
 
+        // 索引扫一次就定，理由同 Repl：它是 history 的第 0 条，不能中途换
         this.agent = config.hasApiKey()
                 ? new Agent(new DeepSeekClient(config), tools,
-                        SystemPrompt.forWorkspace(workspace.root()))
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())))
                         .onEvent(this::onAgentEvent)
                 : null;
         this.planner = config.hasApiKey()

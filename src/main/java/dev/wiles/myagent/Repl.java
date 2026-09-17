@@ -4,6 +4,7 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
 import dev.wiles.myagent.cli.Cli;
@@ -70,6 +71,7 @@ public final class Repl {
     private final CliOptions options;
     private final Config config;
     private final Workspace workspace;
+    private final MemoryStore memory;
     private final ToolRegistry tools;
     private final TerminalMode terminal = new TerminalMode();
     private final LineReader reader;
@@ -171,13 +173,18 @@ public final class Repl {
                 .onScroll(fullscreen == null ? null : fullscreen::scroll)
                 .historyFile(Path.of(System.getProperty("user.home"), ".myagent", "history"));
 
+        this.memory = MemoryStore.inUserHome();
         this.tools = options.readOnly()
-                ? BuiltinTools.createReadOnly(workspace)
+                ? BuiltinTools.createReadOnly(workspace, memory)
                 : BuiltinTools.createDefault(workspace,
-                        audit.audited(new TerminalApproval(reader)));
+                        audit.audited(new TerminalApproval(reader)), memory);
 
+        // 索引在这里扫一次就定了，不随对话刷新：系统提示词是 history 的第 0 条，
+        // 改它等于改已经发生过的历史。本轮新记的东西下次启动生效——
+        // 而模型刚 remember 完，那条事实本来就还在它眼前的上下文里。
         this.agent = config.hasApiKey()
-                ? new Agent(newClient(), tools, SystemPrompt.forWorkspace(workspace.root()))
+                ? new Agent(newClient(), tools,
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())))
                         .onEvent(this::render)
                 : null;
         // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），

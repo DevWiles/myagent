@@ -1,5 +1,7 @@
 package dev.wiles.myagent.agent;
 
+import dev.wiles.myagent.memory.MemoryIndex;
+
 import java.nio.file.Path;
 
 /**
@@ -15,6 +17,24 @@ public final class SystemPrompt {
     }
 
     public static String forWorkspace(Path workspaceRoot) {
+        return forWorkspace(workspaceRoot, MemoryIndex.empty());
+    }
+
+    /**
+     * 带上长期记忆索引的版本。
+     *
+     * <p>索引拼在<b>最后</b>，不是最前。理由是它的内容每次启动都不一样
+     * （记一条就变一次），而前面那段工作方式的约定是恒定的——
+     * 把变动的部分放在尾部，前缀就能稳定命中提供方的 prompt 缓存。
+     *
+     * <p>索引为空时 {@link MemoryIndex#render()} 返回空串，
+     * 拼接的结果和不带记忆的版本<b>一字不差</b>。
+     */
+    public static String forWorkspace(Path workspaceRoot, MemoryIndex memory) {
+        return base(workspaceRoot) + (memory == null ? "" : memory.render());
+    }
+
+    private static String base(Path workspaceRoot) {
         return """
                 你是 myagent，一个运行在用户终端里的编码助手。你可以调用工具来读写文件、执行命令。
 

@@ -2,6 +2,7 @@ package dev.wiles.myagent.plan;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.wiles.myagent.tool.WorkspaceKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,8 +12,6 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import java.util.Optional;
 
 /**
@@ -126,29 +125,9 @@ public final class PlanStore {
         }
     }
 
-    /** 存档文件的位置。目录名给人看，哈希保证不撞车。 */
+    /** 存档文件的位置。命名规则见 {@link WorkspaceKey}：目录名给人看，哈希保证不撞车。 */
     Path pathFor(Path workspace) {
-        Path normalized = workspace.toAbsolutePath().normalize();
-        Path name = normalized.getFileName();
-        String label = name == null ? "root" : sanitize(name.toString());
-        return dir.resolve(label + "-" + hash(normalized.toString()) + ".json");
-    }
-
-    /** 文件名里只留安全字符：工作区目录名可能带空格、中文、斜杠之外的怪东西。 */
-    private static String sanitize(String raw) {
-        String cleaned = raw.replaceAll("[^A-Za-z0-9._-]", "_");
-        return cleaned.length() > 40 ? cleaned.substring(0, 40) : cleaned;
-    }
-
-    private static String hash(String text) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(bytes, 0, 6);
-        } catch (Exception e) {
-            // SHA-256 不可能没有；真没有的话退化成 hashCode，撞车概率大些但不至于不能用
-            return Integer.toHexString(text.hashCode());
-        }
+        return dir.resolve(WorkspaceKey.of(workspace) + ".json");
     }
 
     private static void move(Path tmp, Path target) throws IOException {
