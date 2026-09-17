@@ -150,9 +150,11 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           )
         }}
       </For>
-      <text fg={theme.text} marginTop={gapBefore(blocks().complete, blocks().complete.length, blocks().current)}>
-        {blocks().current}
-      </text>
+      {/* 正在写的那一块**不画**。
+          以前这里挂一个跟着 token 长的 <text>，那等于每帧都有东西在变，
+          而 OpenTUI 的 <markdown> 一旦有邻居更新就会被拖着整片重画
+          （实测：内容永不改变的 markdown 节点被重写 71 次，换成 text 只写 1 次）。
+          只在块写完时吐一整块，markdown 的重绘次数就从「每帧」降到「每块一次」。 */}
     </box>
   )
 }
