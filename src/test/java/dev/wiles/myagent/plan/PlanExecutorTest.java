@@ -456,4 +456,148 @@ class PlanExecutorTest {
         assertEquals(0, second.replans(), "上一轮的重规划计数漏到这一轮来了");
         assertEquals(PlanStatus.COMPLETED, second.status());
     }
+    // ── 存档与断点续跑 ──────────────────────────────────────────
+
+    @Test
+    @DisplayName("每了结一个任务存一次盘——最坏只丢正在跑的那一个")
+    void checkpointsAfterEachTask() {
+        RecordingRunner runner = new RecordingRunner();
+        List<Integer> doneCounts = new ArrayList<>();
+
+        new PlanExecutor(runner)
+                .onCheckpoint(plan -> doneCounts.add((int) plan.graph().tasks().stream()
+                        .filter(Task::isTerminal).count()))
+                .execute(diamondPlan());
+
+        assertEquals(List.of(1, 2, 3, 4), doneCounts, "该是一个任务一次，且进度单调往前");
+    }
+
+    @Test
+    @DisplayName("存档看到的是自洽状态：补救任务已经进图了才喊存")
+    void checkpointSeesRecoveryTasksAlreadyInGraph() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+        List<Boolean> sawRecovery = new ArrayList<>();
+
+        new PlanExecutor(runner).withReplanner(replanner)
+                .onCheckpoint(plan -> sawRecovery.add(
+                        plan.graph().tasks().stream().anyMatch(t -> t.id().equals("r1"))))
+                .execute(diamondPlan());
+
+        assertTrue(sawRecovery.get(1), "n2 失败那一轮存档时，补救任务该已经在图里了");
+    }
+
+    @Test
+    @DisplayName("重规划的计数跟着计划走，存得下来")
+    void replanCountLivesOnThePlan() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+        Plan plan = diamondPlan();
+
+        new PlanExecutor(runner).withReplanner(replanner).execute(plan);
+
+        assertEquals(1, plan.replans());
+        assertEquals(List.of("r1"), plan.recoveryIds());
+    }
+
+    @Test
+    @DisplayName("存档回调自己炸了，不能把计划带走")
+    void checkpointFailureDoesNotBreakThePlan() {
+        RecordingRunner runner = new RecordingRunner();
+
+        PlanResult result = assertDoesNotThrow(() -> new PlanExecutor(runner)
+                .onCheckpoint(plan -> {
+                    throw new IllegalStateException("磁盘满了");
+                })
+                .execute(diamondPlan()));
+
+        assertEquals(PlanStatus.COMPLETED, result.status());
+    }
+
+    @Test
+    @DisplayName("端到端：跑一半存档，载回来接着跑，做完的不重跑")
+    void resumesFromCheckpoint() {
+        // 第一程：n2 让执行体假装「进程在这儿没了」
+        RecordingRunner first = new RecordingRunner();
+        Plan plan = diamondPlan();
+        plan.start();
+        Task n1 = plan.graph().get("n1");
+        n1.start();
+        n1.succeed("n1 干完了");
+
+        PlanCheckpoint saved = PlanCheckpoint.of(plan, java.nio.file.Path.of("/tmp/ws"), 1L);
+
+        // 第二程：从存档立起来接着跑
+        RecordingRunner second = new RecordingRunner();
+        Plan resumed = saved.toPlan();
+        PlanResult result = new PlanExecutor(second).execute(resumed);
+
+        assertFalse(second.order.contains("n1"), "已经做成的事不该重跑: " + second.order);
+        assertEquals(List.of("n2", "n3", "n4"), second.order);
+        assertEquals(PlanStatus.COMPLETED, result.status());
+        assertEquals("n1 干完了", resumed.graph().get("n1").result(), "上一程的产出要还在");
+    }
+
+    @Test
+    @DisplayName("续跑时下游拿得到上一程的产出——不然那条依赖边就白连了")
+    void resumedDownstreamStillSeesUpstreamResults() {
+        Plan plan = diamondPlan();
+        plan.start();
+        Task n1 = plan.graph().get("n1");
+        n1.start();
+        n1.succeed("上一程留下的结论");
+
+        RecordingRunner runner = new RecordingRunner();
+        new PlanExecutor(runner).execute(
+                PlanCheckpoint.of(plan, java.nio.file.Path.of("/tmp/ws"), 1L).toPlan());
+
+        assertEquals(List.of("n1=上一程留下的结论"), runner.upstreamSeen.get("n2"));
+    }
+
+    @Test
+    @DisplayName("续跑的计划不会把开始时间重新计时——总耗时得是真的")
+    void resumeDoesNotResetTheClock() {
+        Plan plan = diamondPlan();
+        plan.start();
+        long originalStart = plan.startTime();
+
+        Plan resumed = PlanCheckpoint.of(plan, java.nio.file.Path.of("/tmp/ws"), 1L).toPlan();
+        new PlanExecutor(new RecordingRunner()).execute(resumed);
+
+        assertEquals(originalStart, resumed.startTime());
+    }
+    @Test
+    @DisplayName("Ctrl-C 之后存档还能续——这是断点续跑最常用的入口")
+    void cancelledPlanIsStillResumable() {
+        java.nio.file.Path ws = java.nio.file.Path.of("/tmp/ws");
+        List<PlanCheckpoint> saved = new ArrayList<>();
+        PlanExecutor[] holder = new PlanExecutor[1];
+
+        PlanExecutor executor = new PlanExecutor((task, upstream) -> {
+            if (task.id().equals("n1")) {
+                holder[0].cancel();                 // 模拟用户在第一步跑完时按下 Ctrl-C
+            }
+            return TaskOutcome.ok(task.id() + " 干完了");
+        }).onCheckpoint(plan -> saved.add(PlanCheckpoint.of(plan, ws, 1L)));
+        holder[0] = executor;
+
+        PlanResult result = executor.execute(diamondPlan());
+
+        assertEquals(PlanStatus.CANCELLED, result.status());
+        PlanCheckpoint last = saved.get(saved.size() - 1);
+        assertTrue(last.isResumable(),
+                "取消时存的是一份全都了结了的死图，那断点续跑就只在进程被 kill 时才有用");
+        assertEquals(3, last.remaining(), "剩下三步该还留着，不该被标成跳过");
+
+        // 真的能接着跑，而且做成的那步不重来
+        RecordingRunner second = new RecordingRunner();
+        PlanResult resumed = new PlanExecutor(second).execute(last.toPlan());
+
+        assertEquals(List.of("n2", "n3", "n4"), second.order);
+        assertEquals(PlanStatus.COMPLETED, resumed.status());
+    }
 }

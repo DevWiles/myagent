@@ -105,6 +105,30 @@ public class Task {
         }
     }
 
+    /**
+     * 从存档里把一个任务原样立起来，<b>包括它当时的状态和产出</b>。
+     *
+     * <p>包私有，只给存档层（{@link PlanCheckpoint}）用。为什么非要开这个后门：
+     * 对外的状态迁移全都带前置校验（跑完了不许再 start、没跑不许宣布成功），
+     * 那是为了让调度器的 bug 当场暴露；而反序列化要做的恰恰是<b>直接落到某个状态</b>，
+     * 走正常入口的话得把当初那串迁移重放一遍，既别扭又会把时间戳弄成假的。
+     *
+     * <p>开成包私有而不是 public，是因为这个能力一旦漏到外面，
+     * 就等于把状态机的全部约束作废了——谁都能随手把一个任务改成 SUCCEEDED。
+     */
+    static Task restore(String id, String description, TaskType type, List<String> dependencies,
+                        String acceptance, String parentId, int depth,
+                        TaskStatus status, String result, String error,
+                        long startTime, long endTime) {
+        Task task = new Task(id, description, type, dependencies, acceptance, parentId, depth);
+        task.status = status == null ? TaskStatus.PENDING : status;
+        task.result = result;
+        task.error = error;
+        task.startTime = startTime;
+        task.endTime = endTime;
+        return task;
+    }
+
     public String id() {
         return id;
     }
