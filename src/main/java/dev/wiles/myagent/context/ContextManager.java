@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * 上下文管理：在撞上模型的上下文上限之前，把历史压小。
@@ -47,8 +48,49 @@ public final class ContextManager {
     /** 短于这个长度的工具输出没有裁剪价值。 */
     private static final int TOOL_OUTPUT_TRIM_THRESHOLD = 300;
 
+    /** 一次压缩最多顺手捡几条记忆。捡太多会把噪音一起带进长期记忆。 */
+    private static final int MAX_HARVEST = 3;
+    /** 模型用它把「记住」那段和摘要隔开。找不到就说明它没捡到东西，全文都是摘要。 */
+    private static final String HARVEST_MARKER = "===值得记住===";
+
     private final int maxTokens;
     private final double compactRatio;
+
+    /** 顺手捡到的长期记忆往哪送。默认什么都不做——不接记忆时行为和以前一字不差。 */
+    private Consumer<Harvested> harvest = h -> {
+    };
+
+    /**
+     * 压缩时顺手捡到的一条长期记忆。
+     *
+     * <p>字段和 {@code MemoryEntry} 对得上，但<b>这里不引用那个类</b>：
+     * 上下文压缩不该知道记忆是怎么存的，它只负责把候选递出去，
+     * 由 {@code Repl} / {@code AgentServer} 决定收不收、怎么收。
+     */
+    public record Harvested(String name, String description, String content) {
+    }
+
+    /**
+     * 接上「压缩时顺手记一笔」。
+     *
+     * <h3>为什么是在压缩这一刻捡</h3>
+     * 因为此时此刻手上正好握着<b>一段马上要被永久丢弃的历史</b>，
+     * 而且<b>已经在发一次模型调用了</b>（生成摘要）。多问一句「这里面有什么
+     * 值得跨会话记住的」，额外 API 成本是零。
+     *
+     * <p>这是第四条写入路径，和 {@code remember} 工具<b>互补而非竞争</b>：
+     * 工具是模型主动记，这条是兜底——它没想起来要记，但那段话马上就没了。
+     *
+     * <h3>为什么不改摘要的格式契约</h3>
+     * 摘要在长对话的关键路径上，压不出摘要整个会话就废了。
+     * 所以「记住」那段是<b>追加</b>在摘要后面、用一行标记隔开的：
+     * 模型没给这段、或者给歪了，{@link #splitSummary} 就把全文当摘要——
+     * 和加这个功能之前的行为一模一样。<b>捡记忆失败绝不能伤到压缩本身。</b>
+     */
+    public ContextManager onHarvest(Consumer<Harvested> harvest) {
+        this.harvest = harvest == null ? h -> { } : harvest;
+        return this;
+    }
 
     public ContextManager() {
         this(DEFAULT_MAX_TOKENS, DEFAULT_COMPACT_RATIO);
@@ -208,19 +250,93 @@ public final class ContextManager {
 
                             不要保留寒暄和推理过程，只留结论。
 
+                            摘要写完之后，如果这段记录里有**下次打开这个项目还用得上**的事实
+                            （用户的纠正和偏好、构建命令、架构约定、某个坑的成因），
+                            另起一行写 %s，然后每行一条，用 | 分成三段：
+
+                            短名字(小写连字符) | 一句话摘要 | 详细说明
+
+                            只挑真正跨会话有用的，最多 %d 条。一次性的中间结果、
+                            读一遍文件就知道的事、这轮做完就没意义的进度，都不要写。
+                            没有值得记的就把这段整个省掉——宁可不记，不要凑数。
+
                             ----- 工作记录 -----
                             %s
-                            """.formatted(transcript))), null);   // 摘要时不给工具
+                            """.formatted(HARVEST_MARKER, MAX_HARVEST, transcript))), null);
 
-            String summary = response.text();
+            String[] parts = splitSummary(response.text());
+            String summary = parts[0];
             if (summary.isBlank()) {
                 return fallbackSummary(discarded);
             }
+            emitHarvest(parts[1]);
             return ChatMessage.user("[以下是早先对话的摘要，原文已省略]\n" + summary);
 
         } catch (LlmException e) {
             log.warn("生成摘要失败，退化为直接丢弃: {}", e.getMessage());
             return fallbackSummary(discarded);
+        }
+    }
+
+    /**
+     * 把模型的回答切成「摘要」和「值得记住的」两段。
+     *
+     * <p><b>找不到标记就是全文都是摘要</b>——这是这个功能的安全底座：
+     * 模型没给这段、给歪了、或者标记被它翻译成了别的写法，
+     * 结果都只是「这次没捡到记忆」，摘要照常可用。
+     *
+     * @return 长度恒为 2 的数组：[摘要, 记忆段落]
+     */
+    private static String[] splitSummary(String text) {
+        if (text == null) {
+            return new String[]{"", ""};
+        }
+        int marker = text.indexOf(HARVEST_MARKER);
+        if (marker < 0) {
+            return new String[]{text.strip(), ""};
+        }
+        return new String[]{
+                text.substring(0, marker).strip(),
+                text.substring(marker + HARVEST_MARKER.length()).strip()};
+    }
+
+    /**
+     * 解析「值得记住的」那几行，逐条递出去。
+     *
+     * <p>整段包在 try 里：捡记忆是<b>顺带</b>做的事，
+     * 解析炸了、下游存盘炸了，都不该影响这次压缩的结果——
+     * 那可是会话能不能继续下去的关键路径。
+     */
+    private void emitHarvest(String block) {
+        if (block == null || block.isBlank()) {
+            return;
+        }
+        int taken = 0;
+        for (String line : block.lines().toList()) {
+            if (taken >= MAX_HARVEST) {
+                break;
+            }
+            String[] fields = line.split("\\|");
+            if (fields.length < 3) {
+                continue;   // 模型写歪的行直接跳过，不去猜它想说什么
+            }
+            String name = fields[0].strip().replaceAll("^[-*\\s]+", "");
+            String description = fields[1].strip();
+            String content = fields[2].strip();
+            if (name.isBlank() || description.isBlank() || content.isBlank()) {
+                continue;
+            }
+            // try 包在**单条**上，不是包在整个循环上：
+            // 一条名字不合规就让剩下几条全丢掉，未免太亏
+            try {
+                harvest.accept(new Harvested(name, description, content));
+                taken++;
+            } catch (RuntimeException e) {
+                log.warn("这条记忆没收下（{}）: {}", name, e.toString());
+            }
+        }
+        if (taken > 0) {
+            log.info("压缩时顺手记下了 {} 条长期记忆", taken);
         }
     }
 

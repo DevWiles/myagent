@@ -6,7 +6,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.SessionStore;
+import dev.wiles.myagent.memory.MemoryEntry;
+import dev.wiles.myagent.memory.MemoryScope;
+import dev.wiles.myagent.memory.MemorySource;
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.cli.Cli;
@@ -38,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
+import java.time.LocalDate;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
@@ -144,7 +149,8 @@ public final class AgentServer extends WebSocketServer {
         // 索引扫一次就定，理由同 Repl：它是 history 的第 0 条，不能中途换
         this.agent = config.hasApiKey()
                 ? new Agent(new DeepSeekClient(config), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())))
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
+                        Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         .onEvent(this::onAgentEvent)
                 : null;
         this.planner = config.hasApiKey()
@@ -158,6 +164,26 @@ public final class AgentServer extends WebSocketServer {
                         workspace.root(), PlanStore.inUserHome())
                         .approval(plan -> planConfirm.confirm())
                         .listener(new ProtocolPlanView());
+    }
+
+/**
+     * 上下文管理器，接上「压缩时顺手记一笔」。
+     *
+     * <p>压缩那一刻手上正握着一段马上要被永久丢弃的历史，而且已经在发一次模型调用了。
+     * 多问一句「有什么值得跨会话记住的」，额外成本是零。
+     *
+     * <p>来源记 OBSERVATION——这是模型自己的判断，不是用户亲口说的，
+     * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
+     */
+    private ContextManager contextManager(boolean readOnly) {
+        ContextManager context = new ContextManager();
+        if (readOnly) {
+            return context;
+        }
+        return context.onHarvest(h -> memory.save(new MemoryEntry(
+                h.name(), h.description(), h.content(),
+                MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now()),
+                workspace.root()));
     }
 
     /**

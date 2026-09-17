@@ -4,7 +4,11 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.SessionStore;
+import dev.wiles.myagent.memory.MemoryEntry;
+import dev.wiles.myagent.memory.MemoryScope;
+import dev.wiles.myagent.memory.MemorySource;
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.cli.Ansi;
 import dev.wiles.myagent.cli.Banner;
@@ -41,6 +45,7 @@ import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -187,7 +192,8 @@ public final class Repl {
         // 而模型刚 remember 完，那条事实本来就还在它眼前的上下文里。
         this.agent = config.hasApiKey()
                 ? new Agent(newClient(), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())))
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
+                        Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         .onEvent(this::render)
                 : null;
         // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），
@@ -205,6 +211,26 @@ public final class Repl {
                         PlanStore.inUserHome())
                         .approval(plan -> confirmPlan())
                         .listener(new TerminalPlanView());
+    }
+
+/**
+     * 上下文管理器，接上「压缩时顺手记一笔」。
+     *
+     * <p>压缩那一刻手上正握着一段马上要被永久丢弃的历史，而且已经在发一次模型调用了。
+     * 多问一句「有什么值得跨会话记住的」，额外成本是零。
+     *
+     * <p>来源记 OBSERVATION——这是模型自己的判断，不是用户亲口说的，
+     * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
+     */
+    private ContextManager contextManager(boolean readOnly) {
+        ContextManager context = new ContextManager();
+        if (readOnly) {
+            return context;
+        }
+        return context.onHarvest(h -> memory.save(new MemoryEntry(
+                h.name(), h.description(), h.content(),
+                MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now()),
+                workspace.root()));
     }
 
     private LlmClient newClient() {
