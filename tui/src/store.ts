@@ -92,6 +92,8 @@ export type ReadyInfo = {
   workspaceWarning?: string
   /** 审计日志的位置。退出时的收尾信息要用它。 */
   auditLog?: string
+  /** 上次没跑完的计划。没有就是 undefined。 */
+  resumable?: { goal: string; remaining: number; total: number; savedAt: number }
 }
 
 export type SessionState = {
@@ -214,6 +216,14 @@ export class SessionStore {
     })
   }
 
+  /** 去掉「上次有计划没跑完」那条，其余 ready 信息原样保留。 */
+  private clearResumable(): ReadyInfo | null {
+    const ready = this.state.ready
+    if (!ready?.resumable) return ready
+    const { resumable, ...rest } = ready
+    return rest
+  }
+
   /** 本地提示（错误、帮助、连接状态）。不经过后端。 */
   notice(level: 'info' | 'warn' | 'error', text: string): void {
     this.append({ kind: 'notice', key: this.nextKey('notice'), level, text })
@@ -278,6 +288,7 @@ export class SessionStore {
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
+            resumable: event.resumable,
           },
           busy: event.busy,
           tokens: event.tokens ?? 0,
@@ -414,10 +425,20 @@ export class SessionStore {
         this.notice('error', event.message)
         return
 
+      case 'mode_switched': {
+        // 用一条普通提示带过，不占计划面板的位置——它马上就要出来了。
+        // 要紧的是把「凭什么这么判」摆出来：用户发的是一句话，屏幕上却冒出个计划，
+        // 不说清楚他只会觉得莫名其妙，也没机会说「不用，直接做」
+        this.notice('info', event.reason ? `${event.reason}，先拆个计划` : '这件事先拆个计划')
+        return
+      }
+
       case 'plan_created': {
         const key = this.nextKey('plan')
         this.planKey = key
-        this.set({ activePlanKey: key })
+        // 提示该收了：存档要么刚被续上，要么正被这份新计划覆盖，
+        // 留着它会指向一份已经不存在的进度
+        this.set({ activePlanKey: key, ready: this.clearResumable() })
         this.append({
           kind: 'plan',
           key,

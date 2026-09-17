@@ -82,6 +82,14 @@ export function App(props: AppProps) {
    */
   const planRows = () => Math.max(4, Math.min(16, Math.floor(dimensions().height * 0.4)))
 
+  /**
+   * 后端说这个工作区有没跑完的计划，而且它确实支持续跑。
+   *
+   * <p>两个条件都要查：老后端没有 resume 能力，这时候放出入口只会让用户敲了没反应。
+   */
+  const canResume = () =>
+    Boolean(state().ready?.resumable) && Boolean(state().ready?.features.includes("resume"))
+
   /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
   const pending = () => state().approval !== null || state().planConfirm !== null
 
@@ -171,6 +179,20 @@ export function App(props: AppProps) {
           </scrollbox>
         </box>
 
+        {/* 上次没跑完的计划。摆在输入框上方而不是塞进欢迎框里——
+            欢迎框会被对话顶上去滚走，而这条得一直看得见：
+            后端在「被叫停」之后是留着存档的，用户随时可能回来接着跑 */}
+        <Show when={canResume() && !state().busy}>
+          <box flexShrink={0} paddingLeft={1} flexDirection="row">
+            <text fg={dark.warning}>⏸ 上次有一份计划没跑完：</text>
+            <text fg={dark.text}>{state().ready!.resumable!.goal}</text>
+            <text fg={dark.subtle}>
+              （还剩 {state().ready!.resumable!.remaining} /{" "}
+              {state().ready!.resumable!.total} 步，输入 /resume 接着跑）
+            </text>
+          </box>
+        </Show>
+
         {/* 没有 API key 时先说清楚，否则用户发一句话才看到报错 */}
         <Show when={state().ready && !state().ready!.hasApiKey}>
           <box paddingLeft={1}>
@@ -212,6 +234,7 @@ export function App(props: AppProps) {
             // /plan 开头走规划模式，但后端没宣告 plan 能力时退回普通对话
             const planGoal = value.startsWith("/plan ") ? value.slice(6).trim() : null
             if (planGoal && state().ready?.features.includes("plan")) session.plan(planGoal)
+            else if (value.trim() === "/resume" && canResume()) session.resume()
             else session.prompt(value)
           }}
         />
