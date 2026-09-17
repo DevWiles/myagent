@@ -43,6 +43,21 @@
 /** 围栏行：``` 或 ~~~ 开头（前面允许有缩进）。 */
 const FENCE_LINE = /^\s{0,3}(```|~~~)/
 
+/**
+ * 列表项的起始行：`- foo`、`* foo`、`+ foo`、`1. foo`、`2) foo`，允许缩进（嵌套）。
+ *
+ * **每个列表项各自是一个块**，这和 Notion 的 block 模型一致。
+ * 不这么切的话，一个「**有几点：**」带十条的列表之间没有任何空行，
+ * 整坨算一个块——要等最后一条写完才一次性落下来一大片，
+ * 而且在那之前它一直以纯文本形式挂在屏幕上露着 `1.`、`**` 这些标记。
+ */
+const LIST_ITEM_LINE = /^\s*([-*+]|\d+[.)])\s/
+
+/** 这一行是不是一个列表项的开头。给外部算块间距用。 */
+export function isListItem(text: string): boolean {
+  return LIST_ITEM_LINE.test(text)
+}
+
 export type MarkdownBlocks = {
   /** 已经写完、不会再变的块。每个块自己就是一段合法的 markdown。 */
   complete: string[]
@@ -96,6 +111,16 @@ export function splitBlocks(text: string): MarkdownBlocks {
         // 这样「代码块 + 紧随其后的空行」不会被拆成两次更新
         continue
       }
+    }
+
+    // 新的列表项开始 → 上一块（前面的段落，或上一个列表项）到此为止。
+    // 列表项之间通常没有空行，光靠空行切的话整张列表会变成一个块。
+    //
+    // 这一步必须排在 isLast 前面：正在写的那个列表项本身就是最后一行，
+    // 如果先走 isLast 分支直接 push，上一个列表项就没机会收尾，
+    // 会和正在写的这条黏成一团留在 current 里。
+    if (!inFence && LIST_ITEM_LINE.test(line) && block.some((l) => l.trim() !== "")) {
+      flush()
     }
 
     if (isLast) {
