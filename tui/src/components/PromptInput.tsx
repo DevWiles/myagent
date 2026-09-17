@@ -27,8 +27,21 @@ export function PromptInput(props: PromptInputProps) {
   const theme = useTheme()
   let input: InputRenderable | undefined
 
+  // 上下两条横线把输入区从对话流和状态栏里切出来。
+  // 正在跑的时候换成高亮色——这是除了状态栏那个点之外，第二个「它还活着」的信号，
+  // 而且是全屏最宽的一处，眼睛不用去找。
+  const rule = () => (props.busy ? theme.promptBorderBusy : theme.promptBorder)
+
   return (
-    <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
+    <box
+      flexDirection="row"
+      flexShrink={0}
+      // 只要上下两条边：左右再封起来就成了一个方框，和下面的状态栏挤在一起显得很闷
+      border={["top", "bottom"]}
+      borderColor={rule()}
+      paddingLeft={1}
+      paddingRight={1}
+    >
       <text fg={props.busy ? theme.promptBorderBusy : theme.brand}>{"› "}</text>
       <box flexGrow={1} minWidth={0}>
         <input
