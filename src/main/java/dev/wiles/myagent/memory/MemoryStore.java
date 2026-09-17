@@ -57,12 +57,16 @@ public final class MemoryStore {
     static final String GLOBAL_DIR = "global";
 
     /**
-     * 一次扫描最多收多少条。
+     * 一次扫描最多读多少条——<b>读盘这一侧</b>的闸。
      *
-     * <p>这个数字不是随手定的：索引常驻系统提示词，每条约 50 token，
-     * 而 {@code ContextManager.DEFAULT_MAX_TOKENS} 是 64,000。
-     * 200 条 ≈ 10,000 token ≈ 窗口的 16%——已经是「常驻税」能接受的上限了。
-     * 再多就必须改成按相关性检索，而不是继续往提示词里堆。
+     * <p>它管的是「别把整个目录无限读进内存」，<b>不代表这么多条都发得进提示词</b>。
+     * 进提示词那一侧的闸是 {@link MemoryIndex#MAX_TOKENS}，按真实 token 记。
+     *
+     * <p>两个闸必须分开，是踩过才明白的：这里原先拿「每条约 50 token」倒推出 200，
+     * 顺手就把它当成了提示词预算。但每条的 description 可以写到
+     * {@link MemoryEntry#MAX_DESCRIPTION} 个字，中文约 130 token，
+     * 200 条实际是 27,000 token——名义预算的 2.7 倍，而这个闸一声不响，
+     * 因为它数的是条数。<b>凡是按 A 计量却拿来管 B 的闸，迟早都是这个结局。</b>
      *
      * <p>超出时<b>会打日志说明丢了多少</b>。悄悄截断最要命：
      * 用户以为记住的东西在里面，其实早被砍掉了。
@@ -178,9 +182,22 @@ public final class MemoryStore {
         return List.copyOf(all);
     }
 
-    /** 扫出来直接排版成索引。这是给系统提示词用的那个入口。 */
+    /**
+     * 扫出来排版成索引，并<b>裁到放得进 token 预算</b>。这是给系统提示词用的那个入口。
+     *
+     * <p>裁剪发生在这里而不是 {@link #scan}：scan 还要服务 {@code recall}——
+     * 那条路是按名字取一条，跟提示词预算没关系，不该被它连累。
+     */
     public MemoryIndex index(Path workspace) {
-        return MemoryIndex.of(scan(workspace));
+        MemoryIndex full = MemoryIndex.of(scan(workspace));
+        MemoryIndex fitted = full.withinBudget(MemoryIndex.MAX_TOKENS);
+        if (fitted.size() < full.size()) {
+            log.warn("记忆索引约 {} token，超过预算 {}，只放前 {} 条——"
+                    + "剩下的 {} 条模型看不见了。该精简 description 或清理旧记忆",
+                    full.estimatedTokens(), MemoryIndex.MAX_TOKENS,
+                    fitted.size(), full.size() - fitted.size());
+        }
+        return fitted;
     }
 
     // ------------------------------------------------------------------ 内部

@@ -16,8 +16,18 @@ public final class SystemPrompt {
     private SystemPrompt() {
     }
 
+    /**
+     * 不带记忆功能的版本——<b>一个字都不提记忆</b>。
+     *
+     * <p>走这条路的是计划任务（{@code TaskPrompt}），而 {@code TaskTools} 的白名单里
+     * 没有 {@code recall}：工具不在菜单上，还要交代「你没有记忆」纯属噪音，
+     * 甚至会勾着模型去找一个它根本调不到的工具。
+     *
+     * <p>注意这和「接了记忆但一条没记过」是两回事，后者必须出声，
+     * 理由见 {@code MemoryIndex.EMPTY_NOTICE}。
+     */
     public static String forWorkspace(Path workspaceRoot) {
-        return forWorkspace(workspaceRoot, MemoryIndex.empty());
+        return base(workspaceRoot);
     }
 
     /**
@@ -27,8 +37,9 @@ public final class SystemPrompt {
      * （记一条就变一次），而前面那段工作方式的约定是恒定的——
      * 把变动的部分放在尾部，前缀就能稳定命中提供方的 prompt 缓存。
      *
-     * <p>索引为空时 {@link MemoryIndex#render()} 返回空串，
-     * 拼接的结果和不带记忆的版本<b>一字不差</b>。
+     * <p>索引为空时 {@link MemoryIndex#render()} 会明说「没有可用的记忆」，
+     * 所以这个版本和不带记忆的版本<b>永远不一样</b>——那一句是故意留的，
+     * 少了它模型会去猜记忆的名字。
      */
     public static String forWorkspace(Path workspaceRoot, MemoryIndex memory) {
         return base(workspaceRoot) + (memory == null ? "" : memory.render());
