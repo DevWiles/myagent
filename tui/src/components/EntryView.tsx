@@ -9,7 +9,13 @@
  * 宁可先全部可见且难看，也不要漏掉某一种让人以为事件丢了。
  */
 
-import { TextAttributes } from "@opentui/core"
+import {
+  StyledText,
+  TextAttributes,
+  TextRenderable,
+  type Renderable,
+  type RenderNodeContext,
+} from "@opentui/core"
 import { createMemo, For, Match, Show, Switch, untrack } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import { isListItem, splitBlocks } from "../markdown-blocks.ts"
@@ -63,6 +69,104 @@ function UserEntry(props: { text: string }) {
       <text fg={theme.user}>{props.text}</text>
     </box>
   )
+}
+
+/** 无序列表的符号。OpenTUI 把它硬编码成 ASCII 的 `-`，看起来像没渲染。 */
+const BULLET = "•"
+
+/** 默认渲染出来的列表标记长这样：`"- "`（marker 宽度 1 + 一个空格）。 */
+const HYPHEN_MARKER = /^( *)- $/
+
+/**
+ * 把无序列表的 `-` 换成 `•`。
+ *
+ * ## 为什么要自己动手
+ *
+ * OpenTUI 把列表符号写死在 `Markdown.ts` 里（`token.ordered ? \`${n}.\` : "-"`），
+ * 没有配置项，0.4.5 和 0.5.11 都一样。而渲染出来的 `-` 和原始 markdown
+ * 长得一模一样，看着就像整个列表压根没被解析。
+ *
+ * 好在不用自己重写列表布局：`renderNode` 的上下文给了 `defaultRender()`，
+ * 能拿到官方排好版的结果，只把标记那一个字符换掉即可。
+ *
+ * ## 这次为什么能成
+ *
+ * 之前试过一次，失败了——改完会被库的更新逻辑写回去，
+ * 因为 `applyListItemMarker` 每次更新都会检查「标记文字是不是我心里的那个」，
+ * 不是就重写。当时我加了个 setter 补丁去硬抗，结果流式期间列表正文整片消失。
+ *
+ * 现在的结构下这个问题不存在了：**每个块的 markdown 节点在创建时把 content
+ * 定死，之后再也不更新**（块写完才创建）。没有更新，就没有那趟写回。
+ * 所以这里只要在创建那一刻改一次就够，不需要任何补丁。
+ *
+ * 有序列表的 `1. ` 不匹配，保持原样。
+ */
+function bulletize(node: Renderable | null): Renderable | null {
+  if (!node) return null
+
+  const visit = (renderable: Renderable): void => {
+    if (renderable instanceof TextRenderable && renderable.chunks.length === 1) {
+      const chunk = renderable.chunks[0]!
+      if (HYPHEN_MARKER.test(chunk.text)) patchMarker(renderable)
+    }
+    for (const child of renderable.getChildren()) visit(child)
+  }
+
+  visit(node)
+  return node
+}
+
+/**
+ * 在这个标记节点上接管 `content` 的 setter，把写进来的 `"- "` 改写成 `"• "`。
+ *
+ * 为什么不能直接赋值了事：`defaultRender()` 返回之后，库还会再走一趟
+ * `applyListItemMarker` 把标记按它心里的样子写回去——直接改会被覆盖
+ * （上次就是这么失败的）。接管 setter 之后不管它什么时候写、写几次，
+ * 结果都是 `•`。
+ *
+ * 之前这个做法引起过「列表正文整片消失」，那是因为当时每个 token 都会触发
+ * 一轮更新，反复重写把行内容也带塌了。现在块创建后再无更新，触发不了。
+ */
+function patchMarker(marker: TextRenderable): void {
+  let proto: object | null = Object.getPrototypeOf(marker)
+  let descriptor: PropertyDescriptor | undefined
+  while (proto && !descriptor) {
+    descriptor = Object.getOwnPropertyDescriptor(proto, "content")
+    proto = Object.getPrototypeOf(proto)
+  }
+  if (!descriptor?.get || !descriptor.set) return
+
+  const { get, set } = descriptor
+  const rewrite = (value: StyledText | string): StyledText | string => {
+    if (typeof value === "string" || value.chunks.length !== 1) return value
+    const chunk = value.chunks[0]!
+    const match = HYPHEN_MARKER.exec(chunk.text)
+    if (!match) return value
+    // 连同颜色和属性一起复制，只换文字。宽度不变（都占 1 列），对齐不受影响
+    return new StyledText([{ ...chunk, text: `${match[1]}${BULLET} ` }])
+  }
+
+  Object.defineProperty(marker, "content", {
+    configurable: true,
+    get(this: TextRenderable) {
+      return get.call(this)
+    },
+    set(this: TextRenderable, value: StyledText | string) {
+      set.call(this, rewrite(value))
+    },
+  })
+  marker.content = marker.content
+}
+
+/**
+ * 块首的缩进宽度。
+ *
+ * 嵌套列表项被切成独立的块之后，`  - 子项` 单独交给 marked 解析时，
+ * 两个空格不足以让它认成嵌套（它看不到父级列表），缩进就丢了。
+ * 所以缩进改由我们自己用 marginLeft 补。
+ */
+function indentOf(text: string): number {
+  return /^( *)/.exec(text)?.[1]?.length ?? 0
 }
 
 /**
@@ -136,6 +240,7 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           // 已完成的块不会再变，它前面该留多少空行在创建那一刻就定死了，
           // 算一次就够。
           const gap = untrack(() => gapBefore(blocks().complete, index()))
+          const indent = untrack(() => indentOf(block))
           return (
             // ⚠️ syntaxStyle 必须写在 content 前面：Solid 按书写顺序调 setter，
             // 而设置 content 会立刻触发解析；syntaxStyle 还没赋值的话那一趟解析
@@ -146,7 +251,15 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
             // 拆成一块一个节点之后没人管了，不补的话标题、段落会全挤在一起。
             // 但**连续的列表项之间不能加**——列表本来就是紧挨着的，
             // 每项之间塞一个空行会把一张紧凑列表撑成松散列表。
-            <markdown syntaxStyle={syntaxStyleFor(theme)} marginTop={gap} content={block} />
+            <markdown
+              syntaxStyle={syntaxStyleFor(theme)}
+              renderNode={(token: { type: string }, ctx: RenderNodeContext) =>
+                token.type === "list" ? bulletize(ctx.defaultRender()) : null
+              }
+              marginTop={gap}
+              marginLeft={indent}
+              content={block}
+            />
           )
         }}
       </For>
