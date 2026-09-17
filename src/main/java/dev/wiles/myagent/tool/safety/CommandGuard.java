@@ -30,6 +30,18 @@ import java.util.regex.Pattern;
  */
 public final class CommandGuard {
 
+    /**
+     * 这些命令<b>规划阶段就该避开</b>，别等执行时才被拦。
+     *
+     * <p>排过序，因为它会被拼进规划提示词——顺序不稳定的话，
+     * 同一个工作区每次规划的提示词都不一样，缓存命不中，出了问题也不好复现。
+     *
+     * @return 禁止命令的名字，已排序
+     */
+    public static List<String> forbiddenCommands() {
+        return FORBIDDEN_COMMANDS.stream().sorted().toList();
+    }
+
     /** 无论如何都不执行。 */
     private static final Set<String> FORBIDDEN_COMMANDS = Set.of(
             "sudo", "su", "doas",                                   // 提权

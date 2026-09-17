@@ -17,6 +17,8 @@ public record ChatRequest(
         @JsonProperty("tool_choice") String toolChoice,
         Double temperature,
         @JsonProperty("max_tokens") Integer maxTokens,
-        Boolean stream
+        Boolean stream,
+        /** 非 null 时要求服务端保证输出是合法 JSON，见 {@link ResponseFormat}。 */
+        @JsonProperty("response_format") ResponseFormat responseFormat
 ) {
 }

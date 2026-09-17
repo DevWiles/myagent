@@ -30,6 +30,18 @@ public class Task {
     private final String id;
     private final String description;
     private final TaskType type;
+
+    /**
+     * 做到什么程度算这一步做完了。规划阶段由模型给出，执行阶段原样交给执行这一步的子模型。
+     *
+     * <p>为什么值得单独一个字段，而不是塞进 {@code description} 里：
+     * <b>description 说的是「做什么」，它说的是「做到什么算完」</b>，两件事。
+     * 少了它，子循环只能靠自己感觉「差不多了」就收口——ReAct 循环最常见的翻车方式，
+     * 一是没做完就宣布成功，二是做完了还在原地打转直到撞上步数上限。
+     *
+     * <p>老的构造入口不带它，这时是 {@code null}——测试和历史代码照常能造任务。
+     */
+    private final String acceptance;
     private final List<String> dependencies;
     private final List<String> dependents = new ArrayList<>();
 
@@ -47,7 +59,13 @@ public class Task {
 
     /** 造一个根任务（规划阶段直接产出的那种）。 */
     public Task(String id, String description, TaskType type, List<String> dependencies) {
-        this(id, description, type, dependencies, null, 0);
+        this(id, description, type, dependencies, null, null, 0);
+    }
+
+    /** 带验收标准的根任务，规划器走的是这条路。 */
+    public Task(String id, String description, TaskType type, List<String> dependencies,
+                String acceptance) {
+        this(id, description, type, dependencies, acceptance, null, 0);
     }
 
     /**
@@ -58,7 +76,7 @@ public class Task {
      * 把约束做成「写不出来」，比做成「写出来会被校验拦下」更硬。
      */
     private Task(String id, String description, TaskType type, List<String> dependencies,
-                 String parentId, int depth) {
+                 String acceptance, String parentId, int depth) {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("任务 id 不能为空");
         }
@@ -75,6 +93,8 @@ public class Task {
         this.id = id;
         this.description = description;
         this.type = type;
+        // 空白和 null 一视同仁：模型很爱塞一个 "" 进来，让下游各自判空是自找麻烦
+        this.acceptance = acceptance == null || acceptance.isBlank() ? null : acceptance.strip();
         this.parentId = parentId;
         this.depth = depth;
         // 防御性拷贝：调用方后面改它的 list，不该动到已经成型的计划
@@ -83,6 +103,30 @@ public class Task {
             // 自环是最短的环，在这儿顺手挡掉，建图时的环检测就少一种边界情况
             throw new IllegalArgumentException("任务 " + id + " 依赖了自己");
         }
+    }
+
+    /**
+     * 从存档里把一个任务原样立起来，<b>包括它当时的状态和产出</b>。
+     *
+     * <p>包私有，只给存档层（{@link PlanCheckpoint}）用。为什么非要开这个后门：
+     * 对外的状态迁移全都带前置校验（跑完了不许再 start、没跑不许宣布成功），
+     * 那是为了让调度器的 bug 当场暴露；而反序列化要做的恰恰是<b>直接落到某个状态</b>，
+     * 走正常入口的话得把当初那串迁移重放一遍，既别扭又会把时间戳弄成假的。
+     *
+     * <p>开成包私有而不是 public，是因为这个能力一旦漏到外面，
+     * 就等于把状态机的全部约束作废了——谁都能随手把一个任务改成 SUCCEEDED。
+     */
+    static Task restore(String id, String description, TaskType type, List<String> dependencies,
+                        String acceptance, String parentId, int depth,
+                        TaskStatus status, String result, String error,
+                        long startTime, long endTime) {
+        Task task = new Task(id, description, type, dependencies, acceptance, parentId, depth);
+        task.status = status == null ? TaskStatus.PENDING : status;
+        task.result = result;
+        task.error = error;
+        task.startTime = startTime;
+        task.endTime = endTime;
+        return task;
     }
 
     public String id() {
@@ -95,6 +139,11 @@ public class Task {
 
     public TaskType type() {
         return type;
+    }
+
+    /** 做到什么算完。没给就是 null，调用方自己兜底。 */
+    public String acceptance() {
+        return acceptance;
     }
 
     public TaskStatus status() {
@@ -122,11 +171,17 @@ public class Task {
      * 模型想再套一层是完全可能发生的，得让调用方当场知道，然后把这句话回灌给模型让它改。
      */
     public Task subTask(String id, String description, TaskType type, List<String> dependencies) {
+        return subTask(id, description, type, dependencies, null);
+    }
+
+    /** 带验收标准的子任务。 */
+    public Task subTask(String id, String description, TaskType type, List<String> dependencies,
+                        String acceptance) {
         if (!canSpawnSubtasks()) {
             throw new IllegalStateException("任务 " + this.id + " 已经在第 " + depth
                     + " 层，不能再拆子任务（最深 " + PlanLimits.MAX_DEPTH + " 层）");
         }
-        return new Task(id, description, type, dependencies, this.id, depth + 1);
+        return new Task(id, description, type, dependencies, acceptance, this.id, depth + 1);
     }
 
     public String result() {

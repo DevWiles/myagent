@@ -21,10 +21,15 @@ import dev.wiles.myagent.cli.TerminalMode;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
-import dev.wiles.myagent.plan.AgentTaskRunner;
 import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanApproval;
+import dev.wiles.myagent.plan.PlanContext;
+import dev.wiles.myagent.plan.PlanExecuteAgent;
+import dev.wiles.myagent.plan.ModeHeuristic;
+import dev.wiles.myagent.plan.PlanListener;
 import dev.wiles.myagent.plan.PlanResult;
+import dev.wiles.myagent.plan.PlanStore;
+import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.cli.PlanView;
 import dev.wiles.myagent.tool.BuiltinTools;
@@ -37,6 +42,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * 交互式命令行外壳：读输入、交给 Agent、把事件画到屏幕上。
@@ -53,8 +60,8 @@ public final class Repl {
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/plan", "/clear", "/tools", "/history", "/expand", "/quiet",
-                    "/verbose", "/config", "/exit", "/quit");
+            List.of("/help", "/plan", "/resume", "/clear", "/tools", "/history", "/expand",
+                    "/quiet", "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
     private static final List<String> EXIT_WORDS =
@@ -176,13 +183,32 @@ public final class Repl {
         // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），
         // 共用一个客户端的话，取消一个会把另一个也掐了
         this.planner = config.hasApiKey()
-                ? new Planner(newClient()).readOnly(options.readOnly())
+                ? new Planner(newClient())
+                        .readOnly(options.readOnly())
+                        // 现场信息现采一份：规划器看得到仓库长什么样、手上有哪些工具，
+                        // 就不必再拿探路任务去摸，也编不出不存在的文件名
+                        .context(PlanContext.of(workspace.root(), tools))
                 : null;
+        // 编排全交出去，这边只留「怎么问」和「怎么画」
+        this.planAgent = planner == null ? null
+                : new PlanExecuteAgent(planner, this::newClient, tools, workspace.root(),
+                        PlanStore.inUserHome())
+                        .approval(plan -> confirmPlan())
+                        .listener(new TerminalPlanView());
     }
 
     private LlmClient newClient() {
         return new DeepSeekClient(config);
     }
+
+    /**
+     * 「先规划后执行」的编排层。没有 API key 时是 null——
+     * 规划、续跑、存档提示全都无从谈起，调用处一律先判空。
+     */
+    private final PlanExecuteAgent planAgent;
+
+    /** 执行期间接管 Ctrl-C 的那个监听，见 {@link #startPlanWatcher()}。 */
+    private InterruptWatcher planWatcher;
 
     public void run() {
         try {
@@ -201,6 +227,7 @@ public final class Repl {
                 System.out.print(Ansi.clearScreen());
             }
             printBanner();
+            announceResumable();
             loop();
         } finally {
             if (fullscreen != null) {
@@ -334,6 +361,11 @@ public final class Repl {
                 emit("");
                 continue;
             }
+            if (line.equals("/resume")) {
+                resumePlan();
+                emit("");
+                continue;
+            }
             if (handleSlashCommand(line)) {
                 continue;
             }
@@ -341,10 +373,66 @@ public final class Repl {
                 emit(noKeyMessage());
                 continue;
             }
+            if (maybePlanInstead(line)) {
+                emit("");
+                continue;
+            }
             runInterruptible(line);
             emit("");
         }
         emit(Ansi.dim("bye."));
+    }
+
+    /**
+     * 这句话要不要改走规划。
+     *
+     * <p><b>只影响直接输入的那句话，不影响 {@code /plan}</b>——显式敲了命令就是明确表态，
+     * 启发式没资格插嘴。
+     *
+     * @return true 表示已经按规划跑完了，调用方不必再走普通对话
+     */
+    private boolean maybePlanInstead(String request) {
+        if (planAgent == null) {
+            return false;
+        }
+        ModeHeuristic.Decision decision = ModeHeuristic.assess(request);
+        return switch (decision.mode()) {
+            case DIRECT -> false;
+            case PLAN -> {
+                // 说清为什么——自动进了规划却不解释，用户只会觉得它突然变啰嗦
+                emit(Ansi.dim("（" + decision.explain() + "，先拆个计划。/plan 可强制，"
+                        + "计划出来还能否掉）"));
+                runPlan(request);
+                yield true;
+            }
+            case ASK -> {
+                if (!askWhetherToPlan(decision)) {
+                    yield false;
+                }
+                runPlan(request);
+                yield true;
+            }
+        };
+    }
+
+    /**
+     * 拿不准时问一句。
+     *
+     * <p>默认是「拆」（{@code [Y/n]}），因为判错的代价不对称：白拆一次计划，用户在确认那步
+     * 当场就能否掉；而该拆没拆，是跑偏一路改了一堆文件之后才发现。
+     */
+    private boolean askWhetherToPlan(ModeHeuristic.Decision decision) {
+        emit(Ansi.dim("（" + decision.explain() + "）"));
+        try {
+            String answer = reader.readLine("先拆个计划再做? [Y/n] ", InputFrame.none());
+            if (answer == null) {                       // Ctrl-D
+                return false;
+            }
+            String normalized = answer.trim().toLowerCase();
+            return !normalized.equals("n") && !normalized.equals("no") && !normalized.equals("否");
+        } catch (LineReader.Interrupted e) {            // Ctrl-C：当他不想拆
+            return false;
+        }
     }
 
     private static boolean isExitCommand(String line) {
@@ -723,6 +811,9 @@ public final class Repl {
             case "/help" -> {
                 emit("""
                           /plan 目标  先规划后执行：拆成任务依赖图，确认后逐个跑
+                                    （直接说话时，看着像好几步的活会自动走这条路，
+                                      拿不准会先问你一句；查询和小改动照常直接做）
+                          /resume   接着跑上次没跑完的计划（做成的步骤不重来）
                           /clear    清空对话历史
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
@@ -754,7 +845,7 @@ public final class Repl {
      * 在这儿毙掉只花一次规划的钱；放它跑完再发现，代价是十倍。
      */
     private void runPlan(String goal) {
-        if (agent == null) {
+        if (planAgent == null) {
             emit(noKeyMessage());
             return;
         }
@@ -762,29 +853,40 @@ public final class Repl {
             emit(Ansi.dim("用法: /plan <要做的事>   例如  /plan 给 Task 加上重试能力"));
             return;
         }
-
-        Plan plan;
+        beginPlanRun();
         status.start("规划中…");
         try {
-            plan = planner.plan(goal);
+            planAgent.run(goal);
         } catch (RuntimeException e) {
-            status.stop();
             emit(Ansi.red("规划失败: ") + e.getMessage());
-            return;
         } finally {
-            status.stop();
+            endPlanRun();
         }
+    }
 
-        audit.planCreated(plan);
-        PlanView.plan(plan, width).forEach(this::emit);
-        emit("");
-        if (!confirmPlan()) {
-            plan.cancel();
-            audit.note("plan_rejected", "goal", plan.goal());
-            emit(Ansi.dim("已放弃这份计划。"));
+    /**
+     * 接着跑上次没跑完的计划。
+     *
+     * <p>「有没有存档」在这儿就查掉，这样「没有」是一句平静的说明，
+     * 而不是等编排层返回一个空 Optional 之后再猜它为什么空。
+     */
+    private void resumePlan() {
+        if (planAgent == null) {
+            emit(noKeyMessage());
             return;
         }
-        executePlan(plan);
+        if (!planAgent.hasSavedPlan()) {
+            emit(Ansi.dim("这个工作区没有没跑完的计划。"));
+            return;
+        }
+        beginPlanRun();
+        try {
+            planAgent.resume();
+        } catch (RuntimeException e) {
+            emit(Ansi.red("续跑失败: ") + e.getMessage());
+        } finally {
+            endPlanRun();
+        }
     }
 
     /** 让用户拍板。看不懂的计划不该跑，跑错的代价比多问一句大得多。 */
@@ -801,61 +903,138 @@ public final class Repl {
         }
     }
 
-    private void executePlan(Plan plan) {
+    private void beginPlanRun() {
         markdown.reset();
         runStartedAt = System.nanoTime();
         runSteps = 0;
         runToolCalls = 0;
+    }
 
-        // 执行体的事件直接喂给现有的渲染器：工具调用、流式文本都照老样子显示，
-        // 只是外面多包了一层「现在在跑哪个任务」
-        AgentTaskRunner runner = new AgentTaskRunner(newClient(), tools, workspace.root())
-                .withPlanner(planner)
-                .onEvent((task, event) -> render(event));
+    private void endPlanRun() {
+        currentTaskId = null;
+        status.stop();
+        stopPlanWatcher();
+    }
 
-        PlanExecutor executor = new PlanExecutor(runner)
-                .onTaskStarted(task -> {
-                    currentTaskId = task.id();
-                    audit.taskStarted(task);
-                    status.stop();
-                    emit("");
-                    emit(PlanView.taskStarted(task));
-                    status.start("执行中…");
-                })
-                .onTasksAdded((parent, added) -> emit(Ansi.dim("  ↳ 拆出 " + added.size()
-                        + " 个子任务: " + added.stream().map(t -> t.id())
-                        .collect(java.util.stream.Collectors.joining(", ")))))
-                .onTaskFinished(task -> {
-                    audit.taskFinished(task);
-                    status.stop();
-                    flushText();
-                    collapseToolGroup();
-                    emit(PlanView.taskFinished(task));
-                });
+    /**
+     * 执行期间接管 Ctrl-C。
+     *
+     * <p><b>不能更早开</b>：确认那一步还等着 {@code reader.readLine} 读一行，
+     * 两个东西同时抢标准输入，按键会被吃掉一半。所以要等编排层说「确认通过了」
+     * （{@link PlanListener#onApproved}）才开。
+     */
+    private void startPlanWatcher() {
+        if (!rawMode || planAgent == null) {
+            return;
+        }
+        stopPlanWatcher();
+        planWatcher = new InterruptWatcher(System.in, planAgent::cancel);
+        planWatcher.start();
+    }
 
-        PlanResult result;
-        if (!rawMode) {
-            result = executor.execute(plan);
-        } else {
-            // Ctrl-C 要同时叫停三处：调度器不再开新任务、执行体掐断正在跑的子循环、
-            // 规划器掐断可能正在进行的子规划请求。漏掉任何一处，按下去都像没反应
-            try (InterruptWatcher watcher = new InterruptWatcher(System.in, () -> {
-                executor.cancel();
-                runner.cancel();
-                planner.cancel();
-            })) {
-                watcher.start();
-                result = executor.execute(plan);
+    private void stopPlanWatcher() {
+        if (planWatcher != null) {
+            planWatcher.close();
+            planWatcher = null;
+        }
+    }
+
+    /** 启动时提一句上次没跑完的计划。不提的话，那份存档等于不存在。 */
+    private void announceResumable() {
+        if (planAgent == null) {
+            return;
+        }
+        planAgent.savedPlan().ifPresent(checkpoint -> {
+            emit(Ansi.dim("上次有一份计划没跑完：" + checkpoint.goal()
+                    + "（还剩 " + checkpoint.remaining() + " 步）  输入 /resume 接着跑"));
+            emit("");
+        });
+    }
+
+    /**
+     * 把一次「先规划后执行」画到终端上。
+     *
+     * <p>这个类里<b>只有显示</b>——什么时候规划、什么时候存档、失败了要不要改道，
+     * 全归 {@link PlanExecuteAgent}。这条界线是这次重构的全部意义：
+     * 同一套编排原来在终端版和无头版各写了一遍，加个功能得改两处。
+     */
+    private final class TerminalPlanView implements PlanListener {
+
+        @Override
+        public void onPlanCreated(Plan plan) {
+            status.stop();
+            audit.planCreated(plan);
+            long done = plan.graph().tasks().stream().filter(Task::isTerminal).count();
+            if (done > 0) {
+                emit(Ansi.dim("接着跑上次的计划（" + plan.graph().size()
+                        + " 步里已经做完 " + done + " 步）"));
             }
+            PlanView.plan(plan, width).forEach(Repl.this::emit);
+            emit("");
         }
 
-        currentTaskId = null;
-        audit.planFinished(plan, result);
-        status.stop();
-        flushText();
-        flushQuietBuffer();
-        PlanView.summary(plan, result).forEach(this::emit);
+        @Override
+        public void onRejected(Plan plan) {
+            audit.note("plan_rejected", "goal", plan.goal());
+            emit(Ansi.dim("已放弃这份计划。"));
+        }
+
+        @Override
+        public void onApproved(Plan plan) {
+            startPlanWatcher();
+        }
+
+        @Override
+        public void onTaskStarted(Task task) {
+            currentTaskId = task.id();
+            audit.taskStarted(task);
+            status.stop();
+            emit("");
+            emit(PlanView.taskStarted(task));
+            status.start("执行中…");
+        }
+
+        @Override
+        public void onTaskFinished(Task task) {
+            audit.taskFinished(task);
+            status.stop();
+            flushText();
+            collapseToolGroup();
+            emit(PlanView.taskFinished(task));
+        }
+
+        @Override
+        public void onTasksAdded(Task parent, List<Task> added) {
+            emit(Ansi.dim("  ↳ 拆出 " + added.size() + " 个子任务: "
+                    + added.stream().map(Task::id).collect(Collectors.joining(", "))));
+        }
+
+        @Override
+        public void onReplanned(Task failed, List<Task> recovery) {
+            emit(Ansi.dim("  ↻ " + failed.id() + " 失败，改走另一条路，补出 "
+                    + recovery.size() + " 步: "
+                    + recovery.stream().map(Task::id).collect(Collectors.joining(", "))));
+        }
+
+        @Override
+        public void onAgentEvent(Task task, AgentEvent event) {
+            render(event);
+        }
+
+        @Override
+        public void onFinished(Plan plan, PlanResult result) {
+            currentTaskId = null;
+            audit.planFinished(plan, result);
+            status.stop();
+            flushText();
+            flushQuietBuffer();
+            PlanView.summary(plan, result).forEach(Repl.this::emit);
+            if (result.cancelled()) {
+                emit(Ansi.dim("已中断，进度留着了。输入 /resume 接着跑。"));
+            }
+        }
     }
+
 
     private void printBanner() {
         Banner.render(Cli.VERSION, config.model(), workspace.root(),
