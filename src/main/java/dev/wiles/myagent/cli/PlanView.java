@@ -114,6 +114,11 @@ public final class PlanView {
         if (result.skipped() > 0) {
             sb.append(Ansi.dim(" · 跳过 " + result.skipped()));
         }
+        // 一次跑通和「中途换了条路才跑通」都是 COMPLETED，但后者说明原计划某处想岔了，
+        // 是下次该复盘的地方——不报出来的话，这条信息就永远没人看见
+        if (result.wasReplanned()) {
+            sb.append(Ansi.dim(" · 重规划 " + result.replans() + " 次"));
+        }
         if (plan.durationMillis() >= 0) {
             sb.append(Ansi.dim(" · 用时 " + plan.durationMillis() / 1000 + "s"));
         }

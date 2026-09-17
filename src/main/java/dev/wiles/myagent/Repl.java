@@ -24,6 +24,7 @@ import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.plan.AgentTaskRunner;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.cli.PlanView;
@@ -176,7 +177,11 @@ public final class Repl {
         // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），
         // 共用一个客户端的话，取消一个会把另一个也掐了
         this.planner = config.hasApiKey()
-                ? new Planner(newClient()).readOnly(options.readOnly())
+                ? new Planner(newClient())
+                        .readOnly(options.readOnly())
+                        // 现场信息现采一份：规划器看得到仓库长什么样、手上有哪些工具，
+                        // 就不必再拿探路任务去摸，也编不出不存在的文件名
+                        .context(PlanContext.of(workspace.root(), tools))
                 : null;
     }
 
@@ -824,6 +829,11 @@ public final class Repl {
                 })
                 .onTasksAdded((parent, added) -> emit(Ansi.dim("  ↳ 拆出 " + added.size()
                         + " 个子任务: " + added.stream().map(t -> t.id())
+                        .collect(java.util.stream.Collectors.joining(", ")))))
+                .withReplanner(planner::replan)
+                .onReplanned((failed, recovery) -> emit(Ansi.dim("  ↻ " + failed.id()
+                        + " 失败，改走另一条路，补出 " + recovery.size() + " 步: "
+                        + recovery.stream().map(t -> t.id())
                         .collect(java.util.stream.Collectors.joining(", ")))))
                 .onTaskFinished(task -> {
                     audit.taskFinished(task);

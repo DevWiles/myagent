@@ -24,7 +24,7 @@ import dev.wiles.myagent.agent.AgentEvent;
  *                     tool_finished / compacted / done / failed
  *                     approval_request / busy / error / pong
  *                     plan_created / plan_confirm_request / plan_task_started
- *                     plan_task_finished / plan_tasks_added / plan_finished
+ *                     plan_task_finished / plan_tasks_added / plan_revised / plan_finished
  *   客户端 → 服务端   prompt / cancel / approval_reply / reset / ping
  *                     plan / plan_confirm_reply</pre>
  *
@@ -39,6 +39,7 @@ import dev.wiles.myagent.agent.AgentEvent;
  *          ...执行期间照常发 thinking / text_delta / tool_started 等事件...
  *          {"t":"plan_task_finished","taskId":"t1","status":"SUCCEEDED",...}
  *          {"t":"plan_tasks_added",...}        (PLANNING 任务拆出子任务时才有)
+ *          {"t":"plan_revised",...}            (某一步失败后补出救场任务时才有)
  *          {"t":"plan_finished","status":"COMPLETED","succeeded":5,...}
  *          {"t":"busy","busy":false}
  * </pre>
@@ -61,7 +62,7 @@ public final class Protocol {
      * 直接拒连——明明它只是用不了新功能，却连旧功能也没得用了。
      * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
      */
-    public static final List<String> FEATURES = List.of("plan");
+    public static final List<String> FEATURES = List.of("plan", "replan");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -194,7 +195,26 @@ public final class Protocol {
         n.put("succeeded", result.succeeded());
         n.put("failed", result.failed());
         n.put("skipped", result.skipped());
+        n.put("replans", result.replans());
         n.put("durationMs", plan.durationMillis());
+        return n;
+    }
+
+    /**
+     * 某一步失败之后补出了一批救场任务。
+     *
+     * <p>界面不知道这件事的话，用户看到的就是「某一步红了」，然后屏幕上莫名其妙
+     * 冒出几个计划里根本没有的任务在跑。
+     *
+     * <p>和 {@code plan_tasks_added} 分成两条消息而不是共用一条：前者是计划<b>按原样长大</b>
+     * （PLANNING 任务拆出下一层），后者是<b>原路走不通，换了条路</b>。
+     * 对用户的意义完全不同，界面该画得不一样。
+     */
+    public static ObjectNode encodeReplanned(Task failed, List<Task> recovery) {
+        ObjectNode n = event("plan_revised");
+        n.put("failedTaskId", failed.id());
+        ArrayNode tasks = n.putArray("tasks");
+        recovery.forEach(task -> tasks.add(encodeTask(task)));
         return n;
     }
 
@@ -203,6 +223,8 @@ public final class Protocol {
         item.put("id", task.id());
         item.put("type", task.type().name());
         item.put("description", task.description());
+        // 新增字段不升协议版本：老界面照约定忽略不认识的字段，照跑不误
+        item.put("acceptance", task.acceptance());
         item.put("status", task.status().name());
         item.put("parentId", task.parentId());
         ArrayNode deps = item.putArray("dependsOn");

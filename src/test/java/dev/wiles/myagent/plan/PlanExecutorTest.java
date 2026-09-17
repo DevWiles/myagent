@@ -288,4 +288,172 @@ class PlanExecutorTest {
 
         assertTrue(seen.isEmpty());
     }
+    // ── 失败后重规划 ────────────────────────────────────────────
+
+    /** 造一个补救任务：id 用 r 开头，不依赖原计划里的任何东西。 */
+    private static Task r(String id, String... deps) {
+        return new Task(id, "补救 " + id, TaskType.FILE_WRITE, List.of(deps), "补上了");
+    }
+
+    /** 记下被调了几次、每次看到的是哪一步失败。 */
+    static class RecordingReplanner implements Replanner {
+        final List<String> failedSeen = new ArrayList<>();
+        List<Task> recovery = List.of();
+        RuntimeException blowUp;
+
+        @Override
+        public List<Task> replan(Plan plan, Task failed, String error) {
+            failedSeen.add(failed.id());
+            if (blowUp != null) {
+                throw blowUp;
+            }
+            return recovery;
+        }
+    }
+
+    @Test
+    @DisplayName("一步倒了，补救任务顶上并跑完，整份计划算达成")
+    void recoveredPlanCountsAsCompleted() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"), r("r2", "r1"));
+        Plan plan = diamondPlan();
+
+        PlanResult result = new PlanExecutor(runner).withReplanner(replanner).execute(plan);
+
+        assertEquals(List.of("n2"), replanner.failedSeen, "补救器该看到倒下的是哪一步");
+        assertTrue(runner.order.containsAll(List.of("r1", "r2")), runner.order.toString());
+        assertEquals(PlanStatus.COMPLETED, result.status(),
+                "活都干完了还报失败，用户会以为目标没达成");
+        assertEquals(1, result.replans());
+        assertTrue(result.wasReplanned());
+        assertEquals(1, result.failed(), "失败过就是失败过，这个数字不该被抹掉");
+    }
+
+    @Test
+    @DisplayName("补救任务自己也倒了：老老实实报失败")
+    void failedRecoveryStillFails() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        runner.failing.add("r1");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+
+        PlanResult result = new PlanExecutor(runner).withReplanner(replanner)
+                .execute(diamondPlan());
+
+        assertEquals(PlanStatus.FAILED, result.status());
+        assertEquals(1, result.replans());
+    }
+
+    @Test
+    @DisplayName("补救只给一次机会——同一个误解反复换皮，只是烧钱")
+    void replansAtMostOnce() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        runner.failing.add("r1");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+
+        new PlanExecutor(runner).withReplanner(replanner).execute(diamondPlan());
+
+        assertEquals(PlanLimits.MAX_REPLANS, replanner.failedSeen.size(),
+                "补救次数超了上限: " + replanner.failedSeen);
+    }
+
+    @Test
+    @DisplayName("模型说补不了（空列表）：照原样收场，不硬凑")
+    void emptyRecoveryIsAnAnswerNotAnError() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n1");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of();
+
+        PlanResult result = new PlanExecutor(runner).withReplanner(replanner)
+                .execute(diamondPlan());
+
+        assertEquals(PlanStatus.FAILED, result.status());
+        assertEquals(0, result.replans());
+        assertEquals(1, replanner.failedSeen.size(), "该问过一次");
+    }
+
+    @Test
+    @DisplayName("补救器自己炸了，不能把整个计划带走")
+    void replannerBlowingUpDoesNotBreakThePlan() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n1");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.blowUp = new IllegalStateException("模型挂了");
+
+        PlanResult result = assertDoesNotThrow(() ->
+                new PlanExecutor(runner).withReplanner(replanner).execute(diamondPlan()));
+
+        assertEquals(PlanStatus.FAILED, result.status());
+        assertEquals(4, result.total(), "每个任务都得有个交代");
+    }
+
+    @Test
+    @DisplayName("补救任务撞了已有 id：照原样收场，不让脏图跑起来")
+    void illegalRecoveryIsDropped() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("n1"));       // 和原计划撞车
+
+        PlanResult result = new PlanExecutor(runner).withReplanner(replanner)
+                .execute(diamondPlan());
+
+        assertEquals(PlanStatus.FAILED, result.status());
+        assertEquals(0, result.replans());
+    }
+
+    @Test
+    @DisplayName("补出来的任务要通知界面，不然屏幕上会冒出计划里没有的步骤")
+    void notifiesTheUiAboutRecoveryTasks() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+
+        List<String> announced = new ArrayList<>();
+        new PlanExecutor(runner).withReplanner(replanner)
+                .onReplanned((failed, added) -> {
+                    announced.add(failed.id());
+                    added.forEach(t -> announced.add(t.id()));
+                })
+                .execute(diamondPlan());
+
+        assertEquals(List.of("n2", "r1"), announced);
+    }
+
+    @Test
+    @DisplayName("没配补救器时，行为和以前一模一样")
+    void withoutReplannerNothingChanges() {
+        RecordingRunner runner = new RecordingRunner();
+        runner.failing.add("n1");
+
+        PlanResult result = new PlanExecutor(runner).execute(diamondPlan());
+
+        assertEquals(PlanStatus.FAILED, result.status());
+        assertEquals(0, result.replans());
+        assertFalse(result.wasReplanned());
+    }
+
+    @Test
+    @DisplayName("两次 execute 之间，重规划的计数不许残留")
+    void replanStateDoesNotLeakBetweenRuns() {
+        RecordingRunner first = new RecordingRunner();
+        first.failing.add("n2");
+        RecordingReplanner replanner = new RecordingReplanner();
+        replanner.recovery = List.of(r("r1"));
+        PlanExecutor executor = new PlanExecutor(first).withReplanner(replanner);
+
+        executor.execute(diamondPlan());
+        first.failing.clear();                      // 这一轮不该再有人倒下
+        PlanResult second = executor.execute(diamondPlan());
+
+        assertEquals(0, second.replans(), "上一轮的重规划计数漏到这一轮来了");
+        assertEquals(PlanStatus.COMPLETED, second.status());
+    }
 }

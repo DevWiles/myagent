@@ -22,6 +22,7 @@ import java.util.stream.Collectors;
  *   <li>类型写成小写、写成自己编的名字</li>
  *   <li>字段缺失、tasks 不是数组</li>
  *   <li>任务数量离谱</li>
+ *   <li>引用了 {@code {{t1}}} 却忘了把 t1 写进 dependsOn（见 {@link TaskRefs}）</li>
  * </ul>
  */
 public final class PlanParser {
@@ -77,6 +78,60 @@ public final class PlanParser {
         return tasks;
     }
 
+    /**
+     * 解析一批<b>补救任务</b>——原计划某一步倒了之后重规划出来的那些。
+     *
+     * <p>和根计划的三点不同：
+     * <ul>
+     *   <li>不要 goal（目标还是原来那个，没变）</li>
+     *   <li><b>允许空</b>。{@code {"tasks": []}} 是模型在说「这事儿在当前条件下做不成」，
+     *       那是一个有用的答案，不是错误——见 {@link PlanPrompt#replanSystem()}。</li>
+     *   <li>依赖只能指向这批新任务内部，理由见 {@link #requireSelfContainedDeps}</li>
+     * </ul>
+     */
+    public static List<Task> parseReplan(String text) {
+        JsonNode root = extractJson(text);
+        JsonNode array = root.get("tasks");
+        if (array == null || !array.isArray()) {
+            throw new IllegalArgumentException("缺少 tasks 字段，或者它不是数组。"
+                    + "补不了的话就输出 {\"tasks\": []}。");
+        }
+        if (array.isEmpty()) {
+            return List.of();       // 模型明说补不了，这是合法答案
+        }
+
+        List<Task> tasks = parseTasks(root, null);
+        if (tasks.size() > PlanLimits.MAX_REPLAN_TASKS) {
+            throw new IllegalArgumentException("补救任务有 " + tasks.size() + " 个，最多 "
+                    + PlanLimits.MAX_REPLAN_TASKS + " 个。补救是在已有成果上接着走，"
+                    + "不是把整件事重做一遍。");
+        }
+        requireSelfContainedDeps(tasks);
+        return tasks;
+    }
+
+    /**
+     * 补救任务的依赖只能指向这批新任务里的其它任务。
+     *
+     * <p>为什么不能连回原计划：原来那些任务此刻只有两种状态——已经跑完（产出已经
+     * 摊进提示词里了，直接用就行），或者已经失败/被跳过。<b>连到后者会让新任务永远等不到就绪</b>，
+     * 而调度器看不出「死等」和「还没轮到」的区别，整张图就静默挂在那儿。
+     * 与其等它挂住再去猜，不如在解析这一步就打回去重写。
+     */
+    private static void requireSelfContainedDeps(List<Task> tasks) {
+        List<String> ids = tasks.stream().map(Task::id).toList();
+        for (Task task : tasks) {
+            for (String dep : task.dependencies()) {
+                if (!ids.contains(dep)) {
+                    throw new IllegalArgumentException("补救任务 " + task.id() + " 依赖了 " + dep
+                            + "，但它不在这批新任务里。dependsOn 只能写这批任务内部的 id——"
+                            + "原计划那些步骤要么已经跑完（产出都给你了），要么已经废掉，"
+                            + "连过去的话这一步永远等不到就绪。");
+                }
+            }
+        }
+    }
+
     private static List<Task> parseTasks(JsonNode root, Task parent) {
         JsonNode array = root.get("tasks");
         if (array == null || !array.isArray()) {
@@ -106,6 +161,13 @@ public final class PlanParser {
                     + "描述要写清这一步具体做什么，它会被原样交给执行这一步的模型。");
         }
 
+        String acceptance = text(node, "acceptance");
+        if (acceptance == null) {
+            throw new IllegalArgumentException(where + "（" + id + "）缺少 acceptance。"
+                    + "acceptance 要用一句话写清「做到什么算这一步完成」，"
+                    + "执行这一步的模型靠它判断能不能收口——少了它，它只能凭感觉决定什么时候停。");
+        }
+
         TaskType type = parseType(text(node, "type"), where, id);
         // 子任务不许再是 PLANNING：它深度已经是 1，再拆就是孙子任务，模型层直接不给入口。
         // 与其让它跑起来之后拆不动再报错，不如在规划阶段就打回去重写。
@@ -115,9 +177,33 @@ public final class PlanParser {
         }
 
         List<String> dependsOn = parseDependsOn(node, where, id);
+        requireRefsDeclared(where, id, description, acceptance, dependsOn);
         return parent == null
-                ? new Task(id, description, type, dependsOn)
-                : parent.subTask(id, description, type, dependsOn);
+                ? new Task(id, description, type, dependsOn, acceptance)
+                : parent.subTask(id, description, type, dependsOn, acceptance);
+    }
+
+    /**
+     * 占位符引用的任务，必须同时写进 {@code dependsOn}。
+     *
+     * <p>这是整个数据流设计里唯一需要强制的一致性：引用说的是「我要用你的产出」，
+     * 依赖说的是「我得等你跑完」。只写前者不写后者，调度器完全可能先跑引用方——
+     * 那时占位符能换进来的只有一片空白，而且不会报任何错，是最难查的一种静默错误。
+     */
+    private static void requireRefsDeclared(String where, String id, String description,
+                                            String acceptance, List<String> dependsOn) {
+        for (String ref : TaskRefs.referencedIn(description + "\n" + acceptance)) {
+            if (ref.equals(id)) {
+                throw new IllegalArgumentException(where + "（" + id + "）引用了 {{" + id
+                        + "}}，也就是它自己。占位符只能用来引用上游任务的产出。");
+            }
+            if (!dependsOn.contains(ref)) {
+                throw new IllegalArgumentException(where + "（" + id + "）的文字里写了 {{" + ref
+                        + "}}，但它的 dependsOn 里没有 " + ref + "。"
+                        + "要用某个任务的产出，就必须把它写进 dependsOn，"
+                        + "否则执行时那一步可能还没跑，这里拿到的会是一片空白。");
+            }
+        }
     }
 
     private static TaskType parseType(String raw, String where, String id) {

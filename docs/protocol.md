@@ -47,7 +47,7 @@ token 随进程生灭，每次启动都不一样。
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan"]
+"features": ["plan", "replan"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -85,7 +85,7 @@ token 随进程生灭，每次启动都不一样。
   "busy": false,
   "tokens": 1234,
   "contextLimit": 65536,
-  "features": ["plan"],
+  "features": ["plan", "replan"],
   "tools": [{"name": "read_file", "description": "…"}],
   "workspaceWarning": "（可选）--unsafe 放行时的警告文案"
 }
@@ -130,7 +130,8 @@ token 随进程生灭，每次启动都不一样。
 | `plan_task_started` | `taskId` `taskType` `description` | |
 | `plan_task_finished` | `taskId` `status` `durationMs` `result` `error` | `result`/`error` 可能是 `null` |
 | `plan_tasks_added` | `parentId` `tasks[]` | 图长大了，见 3.5 |
-| `plan_finished` | `status` `succeeded` `failed` `skipped` `durationMs` | 用户否决时只有 `status` |
+| `plan_revised` | `failedTaskId` `tasks[]` | 某一步失败后补出了救场任务，见 3.6 |
+| `plan_finished` | `status` `succeeded` `failed` `skipped` `replans` `durationMs` | 用户否决时只有 `status` |
 
 `plan_created`：
 
@@ -140,8 +141,10 @@ token 随进程生灭，每次启动都不一样。
   "goal": "模型用自己的话复述的目标，界面要显眼地展示——用户靠它判断有没有理解偏",
   "tasks": [
     {"id": "t1", "type": "FILE_READ", "description": "读 pom.xml",
+     "acceptance": "说清 Java 版本是多少",
      "status": "PENDING", "parentId": null, "dependsOn": []},
-    {"id": "t3", "type": "FILE_WRITE", "description": "改 X",
+    {"id": "t3", "type": "FILE_WRITE", "description": "按 {{t1}} 查到的版本改 X",
+     "acceptance": "X 里的版本号和 pom 一致",
      "status": "PENDING", "parentId": null, "dependsOn": ["t1", "t2"]}
   ],
   "layers": [["t1", "t2"], ["t3"]]
@@ -151,6 +154,14 @@ token 随进程生灭，每次启动都不一样。
 **`layers` 是服务端算好的拓扑分层**，同一层内部互不依赖。界面直接照着画，
 不要自己按 `dependsOn` 再推一遍——那等于把同一套图算法在两种语言里各实现一次，
 迟早有一边算错。
+
+**`acceptance` 是这一步的完成标准**，可能是 `null`（老计划、或模型没给）。
+它回答的是「做到什么算完」，和 `description` 的「做什么」是两件事，值得单独显示——
+用户看一眼就知道这一步的验收线划在哪儿。
+
+**`description` 和 `acceptance` 里可能出现 `{{t1}}` 这样的占位符**，表示「这里要填上
+t1 的产出」。**界面原样显示就行**，不要试图自己替换——真正的产出要等 t1 跑完才有，
+替换发生在服务端执行那一步之前。占位符引用的任务一定在 `dependsOn` 里，这条由服务端保证。
 
 `taskType` 六种：`PLANNING` `FILE_READ` `FILE_WRITE` `COMMAND` `ANALYSIS` `VERIFICATION`
 `status` 五种：`PENDING` `RUNNING` `SUCCEEDED` `FAILED` `SKIPPED`
@@ -168,6 +179,39 @@ token 随进程生灭，每次启动都不一样。
 
 界面要把它们**就地插到父任务下面**，而不是重画整张图。
 子任务最多再拆一层（不会有「孙子任务」），单批最多 5 个。
+
+### 3.6 失败之后会重规划（feature: `replan`）
+
+一步失败时，服务端**不一定就此收摊**。它会把「原目标 + 已经做成的产出 + 失败原因 +
+被连累跳过的活」交回模型，让它补出接下来该走的几步，然后发 `plan_revised`：
+
+```json
+{"t":"plan_revised","failedTaskId":"t3",
+ "tasks":[{"id":"r1","type":"FILE_READ","description":"查清 App.java 的真实位置",
+           "acceptance":"给出实际路径","status":"PENDING","parentId":null,"dependsOn":[]}]}
+```
+
+三条规矩：
+
+| 规矩 | 说明 |
+|---|---|
+| **一份计划只重规划一次** | 补救又失败就如实收场，不会没完没了 |
+| **补救任务的 id 以 `r` 开头**，且只依赖这批新任务内部 | 不会连回原计划里已经废掉的节点 |
+| **模型可以交白卷** | 判断这事儿做不成时不发 `plan_revised`，直接按原样收场 |
+
+**和 `plan_tasks_added` 的区别要画出来**：后者是计划**按原样长大**（PLANNING 任务拆下一层），
+前者是**原路走不通、换了条路**。混成一种显示，用户就看不出计划中途拐过弯。
+
+`plan_finished` 里的 `replans` 是这一轮重规划了几次。**注意它和 `status` 的组合**：
+
+| 组合 | 含义 | 界面该怎么说 |
+|---|---|---|
+| `COMPLETED` + `replans: 0` | 一次跑通 | 计划完成 |
+| `COMPLETED` + `replans: 1` | **中途换过路，最后还是达成了** | 计划完成，但值得提一句绕过弯 |
+| `FAILED` + `replans: 1` | 补救也没救回来 | 计划未完成 |
+
+中间那种最容易报错：`failed` 计数大于 0（确实有一步红过），但目标达成了。
+**别按「failed > 0 就是失败」去显示**——服务端已经在 `status` 里下好结论了，照着它说。
 
 ---
 
@@ -204,7 +248,10 @@ token 随进程生灭，每次启动都不一样。
        {"t":"plan_task_finished","taskId":"t1","status":"SUCCEEDED",…}
        {"t":"plan_tasks_added","parentId":"t1","tasks":[…]}   ← 仅 PLANNING 任务
        …
-       {"t":"plan_finished","status":"COMPLETED","succeeded":7,"failed":0,"skipped":0,…}
+       {"t":"plan_task_finished","taskId":"t3","status":"FAILED",…}
+       {"t":"plan_revised","failedTaskId":"t3","tasks":[…]}   ← 某步失败且补得回来时才有
+       …
+       {"t":"plan_finished","status":"COMPLETED","succeeded":7,"failed":1,"skipped":0,"replans":1,…}
        {"t":"busy","busy":false,"durationMs":42627}
 ```
 
@@ -231,6 +278,9 @@ token 随进程生灭，每次启动都不一样。
 | 没有任何连接时需要确认 | 直接否决，不执行 | — |
 | `cancel` | 调度器不再开新任务、掐断正在跑的子循环和规划请求 | 正在跑的那个任务会变 `FAILED`，其余 `SKIPPED` |
 | 规划失败（模型连 3 次给不出可用计划） | 发 `failed`，带原因 | 照常显示错误 |
+| 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |
+| 某步失败、但模型判断补不了 | 不发 `plan_revised`，照原样收场 | 照常显示失败 |
+| 重规划本身挂了（调用失败、给的图不合法） | 静默忽略，照原样收场 | 界面无感，和没配重规划一样 |
 | 没配 API key | `plan`/`prompt` 回 `error` | `ready.hasApiKey` 为 false 时就该禁用输入 |
 
 **取消的语义要分清**：计划整体是 `CANCELLED`（用户叫停），不是 `FAILED`（跑砸了）。
@@ -249,3 +299,8 @@ token 随进程生灭，每次启动都不一样。
 4. **别缓存任务列表当不可变**。`plan_tasks_added` 会往里插。
 5. **确认框不要做「本次都同意」**。每份计划都不一样，一次性授权掉后面所有计划
    是危险的——审批（`approval_request`）有 `always`，计划确认刻意没有。
+6. **`acceptance` 值得单独显示**。用户在确认计划那一刻，看的不只是「要做什么」，
+   更是「做到什么算完」——验收线划歪了，比步骤拆错更难在事后发现。
+7. **`{{t1}}` 原样显示**，别自己替换，理由见 3.4。
+8. **改道要和长大画得不一样**。`plan_revised` 说明原路走不通，
+   这是用户最该注意的一刻；`plan_tasks_added` 只是计划照常展开。

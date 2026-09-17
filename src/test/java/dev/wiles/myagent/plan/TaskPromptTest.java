@@ -88,4 +88,81 @@ class TaskPromptTest {
 
         assertFalse(prompt.contains("null"), "拼出 null 会把模型带偏：" + prompt);
     }
+
+    // ── 验收标准与数据流占位符 ──────────────────────────────────
+
+    @Test
+    @DisplayName("验收标准要交到子模型手上——它靠这个决定什么时候收口")
+    void userPromptCarriesAcceptance() {
+        Task task = new Task("n1", "改 README", TaskType.FILE_WRITE, List.of(),
+                "README 里写上了构建命令");
+
+        String prompt = TaskPrompt.user(task, List.of());
+
+        assertTrue(prompt.contains("README 里写上了构建命令"), prompt);
+        assertTrue(prompt.contains("算完成"), prompt);
+    }
+
+    @Test
+    @DisplayName("没有验收标准时不留一个空标题")
+    void omitsAcceptanceWhenAbsent() {
+        Task task = new Task("n1", "随便做点什么", TaskType.ANALYSIS, List.of());
+
+        assertFalse(TaskPrompt.user(task, List.of()).contains("算完成"));
+    }
+
+    @Test
+    @DisplayName("系统提示词里点明「达到完成标准就收口」")
+    void systemPromptMentionsStopCondition() {
+        Task task = new Task("n1", "改代码", TaskType.FILE_WRITE, List.of());
+
+        assertTrue(TaskPrompt.system(task, ROOT).contains("完成标准"));
+    }
+
+    @Test
+    @DisplayName("{{n1}} 被换成上游真正的产出——这才是数据流，不只是先后顺序")
+    void resolvesPlaceholders() {
+        Task task = new Task("n2", "把 {{n1}} 里的版本号写进 README",
+                TaskType.FILE_WRITE, List.of("n1"), "README 写上了版本号");
+
+        String prompt = TaskPrompt.user(task, List.of(done("n1", "pom 里用的是 Java 17")));
+
+        assertFalse(prompt.contains("{{n1}}"), "占位符没被替换: " + prompt);
+        assertTrue(prompt.contains("pom 里用的是 Java 17"), prompt);
+    }
+
+    @Test
+    @DisplayName("acceptance 里的占位符一样要替换")
+    void resolvesPlaceholdersInAcceptance() {
+        Task task = new Task("n2", "补测试", TaskType.FILE_WRITE, List.of("n1"),
+                "覆盖了 {{n1}} 列出的每一种状态");
+
+        String prompt = TaskPrompt.user(task, List.of(done("n1", "一共三种状态")));
+
+        assertFalse(prompt.contains("{{n1}}"), prompt);
+        assertTrue(prompt.contains("一共三种状态"), prompt);
+    }
+
+    @Test
+    @DisplayName("被占位符引用过的上游不再进产出区块——同一段文字塞两遍纯烧 token")
+    void inlinedUpstreamIsNotRepeated() {
+        Task task = new Task("n3", "按 {{n1}} 改代码", TaskType.FILE_WRITE,
+                List.of("n1", "n2"), "改完了");
+
+        String prompt = TaskPrompt.user(task, List.of(
+                done("n1", "版本是 Java 17"),
+                done("n2", "入口在 Main.java")));
+
+        assertEquals(1, prompt.split("版本是 Java 17", -1).length - 1,
+                "n1 的产出出现了不止一次: " + prompt);
+        assertTrue(prompt.contains("入口在 Main.java"), "没被引用的上游还是要给: " + prompt);
+    }
+
+    @Test
+    @DisplayName("上游是 null 列表也不炸")
+    void toleratesNullUpstream() {
+        Task task = new Task("n1", "干活", TaskType.ANALYSIS, List.of());
+
+        assertDoesNotThrow(() -> TaskPrompt.user(task, null));
+    }
 }

@@ -1,9 +1,16 @@
 package dev.wiles.myagent.server;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.plan.Plan;
+import dev.wiles.myagent.plan.Task;
+import dev.wiles.myagent.plan.TaskGraph;
+import dev.wiles.myagent.plan.TaskType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -148,5 +155,51 @@ class ProtocolTest {
         assertFalse(Protocol.bool(cmd, "approved", false));
         cmd.put("approved", true);
         assertTrue(Protocol.bool(cmd, "approved", false));
+    }
+    // ── 新增字段与新事件 ────────────────────────────────────────
+
+    @Test
+    @DisplayName("任务带上 acceptance——界面要让用户看到「做到什么算完」")
+    void taskCarriesAcceptance() {
+        Task t1 = new Task("t1", "读 pom.xml", TaskType.FILE_READ, List.of(), "说清 Java 版本");
+        Plan plan = new Plan("目标", TaskGraph.of(List.of(t1)));
+
+        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
+
+        assertEquals("说清 Java 版本", task.get("acceptance").asText());
+    }
+
+    @Test
+    @DisplayName("没写 acceptance 时字段是 null，不是漏掉——界面照约定自己判空")
+    void acceptanceIsNullNotMissing() {
+        Task t1 = new Task("t1", "干活", TaskType.FILE_READ, List.of());
+        Plan plan = new Plan("目标", TaskGraph.of(List.of(t1)));
+
+        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
+
+        assertTrue(task.has("acceptance"));
+        assertTrue(task.get("acceptance").isNull());
+    }
+
+    @Test
+    @DisplayName("plan_revised：说清哪一步倒了、补出了哪几步")
+    void encodesReplanned() {
+        Task failed = new Task("t2", "改文件", TaskType.FILE_WRITE, List.of());
+        Task recovery = new Task("r1", "换条路", TaskType.FILE_WRITE, List.of(), "改完了");
+
+        JsonNode n = Protocol.encodeReplanned(failed, List.of(recovery));
+
+        assertEquals("plan_revised", n.get("t").asText());
+        assertEquals("t2", n.get("failedTaskId").asText());
+        assertEquals(1, n.get("tasks").size());
+        assertEquals("r1", n.get("tasks").get(0).get("id").asText());
+        assertEquals("改完了", n.get("tasks").get(0).get("acceptance").asText());
+    }
+
+    @Test
+    @DisplayName("replan 能力要在 features 里宣告，界面才知道会有这条消息")
+    void announcesReplanFeature() {
+        assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
     }
 }

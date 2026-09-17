@@ -42,6 +42,17 @@ public final class PlanExecutor {
     };
     private BiConsumer<Task, List<Task>> onExpanded = (parent, added) -> {
     };
+    private BiConsumer<Task, List<Task>> onReplanned = (failed, recovery) -> {
+    };
+
+    /** 没配就退化成原来的行为：一步倒了，下游全跳过，计划就此打住。 */
+    private Replanner replanner;
+
+    /** 这一轮重规划过几次，上限见 {@link PlanLimits#MAX_REPLANS}。 */
+    private int replans;
+
+    /** 补救任务的 id。收尾时靠它判断这次失败到底有没有被挽回回来。 */
+    private final List<String> recoveryIds = new ArrayList<>();
 
     /** 用户叫停了。volatile 是因为置位的通常是另一个线程（监听 Ctrl-C 的那个）。 */
     private volatile boolean cancelled;
@@ -76,6 +87,28 @@ public final class PlanExecutor {
         return this;
     }
 
+    /**
+     * 配上重规划器，任务失败时才会尝试补救。
+     *
+     * <p>可选而不是构造参数，理由和 {@code AgentTaskRunner.withPlanner} 一样：
+     * 没有它整条链照样跑得通（失败就是失败），测试调度逻辑时也不必捏一个规划器出来。
+     */
+    public PlanExecutor withReplanner(Replanner replanner) {
+        this.replanner = replanner;
+        return this;
+    }
+
+    /**
+     * 某一步失败之后补出了一批救场任务。
+     *
+     * <p>界面必须知道——否则用户看到的是「某一步红了」，然后屏幕上莫名其妙
+     * 冒出几个计划里根本没有的任务在跑。
+     */
+    public PlanExecutor onReplanned(BiConsumer<Task, List<Task>> listener) {
+        this.onReplanned = listener;
+        return this;
+    }
+
     /** 叫停。当前正在跑的那个任务停不下来（那是执行体自己的事），但不会再开新的。 */
     public void cancel() {
         cancelled = true;
@@ -83,6 +116,8 @@ public final class PlanExecutor {
 
     public PlanResult execute(Plan plan) {
         cancelled = false;   // 上一轮的取消标志不能带到这一轮
+        replans = 0;
+        recoveryIds.clear();
         plan.start();
         TaskGraph graph = plan.graph();
 
@@ -101,7 +136,7 @@ public final class PlanExecutor {
                 break;
             }
 
-            runOne(graph, ready.get(0));
+            runOne(plan, graph, ready.get(0));
         }
 
         return settle(plan);
@@ -129,15 +164,38 @@ public final class PlanExecutor {
 
         if (cancelled) {
             plan.cancel();
+        } else if (recovered(plan.graph())) {
+            // 有任务红过，但补救任务把活全干完了。这跟「跑砸了」是两回事，
+            // 报成 FAILED 会让用户以为目标没达成，而其实达成了——只是绕了个弯
+            plan.complete();
         } else if (failed > 0 || skipped > 0) {
             plan.fail();
         } else {
             plan.complete();
         }
-        return new PlanResult(plan.status(), succeeded, failed, skipped);
+        return new PlanResult(plan.status(), succeeded, failed, skipped, replans);
     }
 
-    private void runOne(TaskGraph graph, Task task) {
+    /**
+     * 这次失败被补救回来了没有。
+     *
+     * <p>判据是<b>所有补救任务都成功了</b>：重规划时模型看得到被跳过的那些活，
+     * 它给出的补救步骤本来就该把那些活接过去。补救任务里但凡还有一个红的或没跑的，
+     * 就说明这一轮没救回来，老老实实报失败。
+     */
+    private boolean recovered(TaskGraph graph) {
+        if (recoveryIds.isEmpty()) {
+            return false;
+        }
+        for (String id : recoveryIds) {
+            if (graph.get(id).status() != TaskStatus.SUCCEEDED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void runOne(Plan plan, TaskGraph graph, Task task) {
         task.start();
         onStarted.accept(task);
         TaskOutcome outcome;
@@ -151,7 +209,7 @@ public final class PlanExecutor {
         }
 
         if (!outcome.ok()) {
-            failAndPropagate(graph, task, outcome.output());
+            failAndPropagate(plan, graph, task, outcome.output());
             return;
         }
 
@@ -162,7 +220,7 @@ public final class PlanExecutor {
                 graph.addSubTasks(outcome.subTasks());
             } catch (IllegalArgumentException e) {
                 log.warn("任务 {} 拆出的子任务不合法: {}", task.id(), e.getMessage());
-                failAndPropagate(graph, task, "子任务不合法: " + e.getMessage());
+                failAndPropagate(plan, graph, task, "子任务不合法: " + e.getMessage());
                 return;
             }
             onExpanded.accept(task, outcome.subTasks());
@@ -171,7 +229,7 @@ public final class PlanExecutor {
         onFinished.accept(task);
     }
 
-    private void failAndPropagate(TaskGraph graph, Task task, String error) {
+    private void failAndPropagate(Plan plan, TaskGraph graph, Task task, String error) {
         task.fail(error);
         onFinished.accept(task);
 
@@ -180,6 +238,49 @@ public final class PlanExecutor {
             log.info("任务 {} 失败，连带跳过 {} 个下游任务", task.id(), skipped.size());
         }
         skipped.forEach(onFinished);
+
+        // 传播完再重规划，顺序有讲究：模型要看到「哪些活被连累了」才知道补救要覆盖什么
+        tryReplan(plan, graph, task, error);
+    }
+
+    /**
+     * 一步倒了，试着补救一次。
+     *
+     * <p><b>这个方法里没有一条路会让计划跑不下去。</b>重规划本身是锦上添花——
+     * 模型不肯给、给的图不合法、调用直接挂了，统统只是「没救回来」，
+     * 照原样收场就是了。为了补救的失败而让整个计划炸掉，纯属得不偿失。
+     *
+     * <p>取消时不补救：用户已经说不要了，这会儿再去发一次模型调用只是在烧钱。
+     */
+    private void tryReplan(Plan plan, TaskGraph graph, Task failed, String error) {
+        if (replanner == null || cancelled || replans >= PlanLimits.MAX_REPLANS) {
+            return;
+        }
+
+        List<Task> recovery;
+        try {
+            recovery = replanner.replan(plan, failed, error);
+        } catch (RuntimeException e) {
+            log.info("任务 {} 失败后重规划没成: {}", failed.id(), e.getMessage());
+            return;
+        }
+        if (recovery == null || recovery.isEmpty()) {
+            // 模型明说这事儿做不成。这是个有用的答案，别当成错误
+            log.info("任务 {} 失败后，重规划认为补不了", failed.id());
+            return;
+        }
+
+        try {
+            graph.addTasks(recovery);
+        } catch (IllegalArgumentException e) {
+            log.warn("补救任务不合法，照原样收场: {}", e.getMessage());
+            return;
+        }
+
+        replans++;
+        recovery.forEach(task -> recoveryIds.add(task.id()));
+        log.info("任务 {} 失败后补出 {} 个救场任务", failed.id(), recovery.size());
+        onReplanned.accept(failed, recovery);
     }
 
     /** 依赖的任务，顺序按 dependencies 写的来，下游 prompt 里的上下文顺序才稳定。 */

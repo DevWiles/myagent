@@ -16,6 +16,7 @@ import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.plan.AgentTaskRunner;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.tool.Workspace;
@@ -114,7 +115,9 @@ public final class AgentServer extends WebSocketServer {
                         .onEvent(this::onAgentEvent)
                 : null;
         this.planner = config.hasApiKey()
-                ? new Planner(new DeepSeekClient(config)).readOnly(options.readOnly())
+                ? new Planner(new DeepSeekClient(config))
+                        .readOnly(options.readOnly())
+                        .context(PlanContext.of(workspace.root(), tools))
                 : null;
     }
 
@@ -289,7 +292,10 @@ public final class AgentServer extends WebSocketServer {
                     .onTaskStarted(task -> publish(Protocol.encodeTaskStarted(task)))
                     .onTaskFinished(task -> publish(Protocol.encodeTaskFinished(task)))
                     .onTasksAdded((parent, added) ->
-                            publish(Protocol.encodeAddedTasks(parent.id(), added)));
+                            publish(Protocol.encodeAddedTasks(parent.id(), added)))
+                    .withReplanner(planner::replan)
+                    .onReplanned((failed, recovery) ->
+                            publish(Protocol.encodeReplanned(failed, recovery)));
             runningTasks = runner;
             runningPlan = executor;
 
