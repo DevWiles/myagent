@@ -62,7 +62,7 @@ public final class Protocol {
      * 直接拒连——明明它只是用不了新功能，却连旧功能也没得用了。
      * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
      */
-    public static final List<String> FEATURES = List.of("plan", "replan");
+    public static final List<String> FEATURES = List.of("plan", "replan", "resume");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

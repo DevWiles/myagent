@@ -197,9 +197,10 @@ class ProtocolTest {
     }
 
     @Test
-    @DisplayName("replan 能力要在 features 里宣告，界面才知道会有这条消息")
-    void announcesReplanFeature() {
+    @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
+    void announcesFeatures() {
         assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
     }
 }

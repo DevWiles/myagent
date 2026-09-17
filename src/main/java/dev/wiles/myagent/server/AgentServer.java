@@ -13,12 +13,15 @@ import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
-import dev.wiles.myagent.plan.AgentTaskRunner;
 import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.PlanCheckpoint;
+import dev.wiles.myagent.plan.PlanExecuteAgent;
+import dev.wiles.myagent.plan.PlanListener;
 import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.PlanResult;
+import dev.wiles.myagent.plan.PlanStore;
 import dev.wiles.myagent.plan.Planner;
+import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 import org.java_websocket.WebSocket;
@@ -31,6 +34,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -67,13 +72,19 @@ public final class AgentServer extends WebSocketServer {
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
+    /** 计划存档。断了能接着跑，靠的是它。 */
     private final PlanConfirmation planConfirm;
     /** 规划器。和 agent 用各自的客户端：取消一个不该把另一个也掐了。 */
     private final Planner planner;
 
     /** 当前这一轮的计划执行器，Esc/cancel 要能够到它。 */
-    private volatile PlanExecutor runningPlan;
-    private volatile AgentTaskRunner runningTasks;
+    /**
+     * 「先规划后执行」的编排层。没有 API key 时是 null。
+     *
+     * <p>它顺带收走了原来那两个 {@code runningPlan} / {@code runningTasks} 字段——
+     * 那是为了叫停时能掐到正在跑的东西才挂在这儿的，现在取消归它管了。
+     */
+    private final PlanExecuteAgent planAgent;
 
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
@@ -119,6 +130,64 @@ public final class AgentServer extends WebSocketServer {
                         .readOnly(options.readOnly())
                         .context(PlanContext.of(workspace.root(), tools))
                 : null;
+        // 编排全交出去，这边只留「怎么问」和「怎么发事件」
+        this.planAgent = planner == null ? null
+                : new PlanExecuteAgent(planner, () -> new DeepSeekClient(config), tools,
+                        workspace.root(), PlanStore.inUserHome())
+                        .approval(plan -> planConfirm.confirm())
+                        .listener(new ProtocolPlanView());
+    }
+
+    /**
+     * 把一次「先规划后执行」翻成协议事件。
+     *
+     * <p>这个类里<b>只有翻译</b>：什么时候规划、什么时候存档、失败了要不要改道，
+     * 全归 {@link PlanExecuteAgent}。终端版那边是同一套编排配另一个 {@link PlanListener}——
+     * 这正是把它抽出来的理由，从前加个功能得在两处各改一遍，漏一处就是
+     * 「某个界面上这功能就是不灵」。
+     */
+    private final class ProtocolPlanView implements PlanListener {
+
+        @Override
+        public void onPlanCreated(Plan plan) {
+            publish(Protocol.encodePlan(plan));
+        }
+
+        @Override
+        public void onRejected(Plan plan) {
+            publish(Protocol.event("plan_finished").put("status", plan.status().name()));
+        }
+
+        @Override
+        public void onTaskStarted(Task task) {
+            publish(Protocol.encodeTaskStarted(task));
+        }
+
+        @Override
+        public void onTaskFinished(Task task) {
+            publish(Protocol.encodeTaskFinished(task));
+        }
+
+        @Override
+        public void onTasksAdded(Task parent, List<Task> added) {
+            publish(Protocol.encodeAddedTasks(parent.id(), added));
+        }
+
+        @Override
+        public void onReplanned(Task failed, List<Task> recovery) {
+            publish(Protocol.encodeReplanned(failed, recovery));
+        }
+
+        @Override
+        public void onAgentEvent(Task task, AgentEvent event) {
+            // 必须写全限定的外部类，否则解析到的是本类那个同名的两参方法，自己递归调自己
+            AgentServer.this.onAgentEvent(event);
+        }
+
+        @Override
+        public void onFinished(Plan plan, PlanResult result) {
+            publish(Protocol.encodePlanFinished(plan, result));
+        }
     }
 
     private static String newToken() {
@@ -210,6 +279,7 @@ public final class AgentServer extends WebSocketServer {
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
             case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
+            case "resume" -> handleResume(conn);
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
             case "reset" -> handleReset(conn);
@@ -272,65 +342,79 @@ public final class AgentServer extends WebSocketServer {
         worker.submit(() -> runPlan(goal));
     }
 
+    /**
+     * 接着跑上次没跑完的计划。
+     *
+     * <p>「有没有存档」这件事在这儿就查掉，而不是丢进后台线程再说——
+     * 没有存档是个该定向回给发命令那个连接的错误（`error` 只发给他一个人），
+     * 而后台线程手上没有 conn，只能广播，等于打扰了所有连着的界面。
+     */
+    private void handleResume(WebSocket conn) {
+        if (planner == null) {
+            send(conn, error("没有配置 API key，无法执行计划"));
+            return;
+        }
+        if (!planAgent.hasSavedPlan()) {
+            send(conn, error("这个工作区没有没跑完的计划"));
+            return;
+        }
+        if (!busy.compareAndSet(false, true)) {
+            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            return;
+        }
+        publish(Protocol.event("busy").put("busy", true));
+        worker.submit(this::runResume);
+    }
+
+    private void runResume() {
+        long startedAt = System.currentTimeMillis();
+        try {
+            if (planAgent.resume().isEmpty() && !planAgent.hasSavedPlan()) {
+                // 从 handleResume 查过到这儿之间，存档可能被删了（另一个会话跑完了它）。
+                // 用户否决也会返回 empty，但那时存档还在，且 onRejected 已经发过话了
+                publish(Protocol.event("failed").put("reason", "存档没了，没法接着跑"));
+            }
+        } catch (RuntimeException e) {
+            log.error("续跑挂了", e);
+            publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
+        } finally {
+            settleBusy(startedAt);
+        }
+    }
+
     private void runPlan(String goal) {
         long startedAt = System.currentTimeMillis();
         try {
-            Plan plan = planner.plan(goal);
-            publish(Protocol.encodePlan(plan));
-
-            if (!planConfirm.confirm()) {
-                plan.cancel();
-                publish(Protocol.event("plan_finished").put("status", plan.status().name()));
-                return;
-            }
-
-            AgentTaskRunner runner = new AgentTaskRunner(new DeepSeekClient(config), tools,
-                    workspace.root())
-                    .withPlanner(planner)
-                    .onEvent((task, event) -> onAgentEvent(event));
-            PlanExecutor executor = new PlanExecutor(runner)
-                    .onTaskStarted(task -> publish(Protocol.encodeTaskStarted(task)))
-                    .onTaskFinished(task -> publish(Protocol.encodeTaskFinished(task)))
-                    .onTasksAdded((parent, added) ->
-                            publish(Protocol.encodeAddedTasks(parent.id(), added)))
-                    .withReplanner(planner::replan)
-                    .onReplanned((failed, recovery) ->
-                            publish(Protocol.encodeReplanned(failed, recovery)));
-            runningTasks = runner;
-            runningPlan = executor;
-
-            PlanResult result = executor.execute(plan);
-            publish(Protocol.encodePlanFinished(plan, result));
-
+            planAgent.run(goal);
         } catch (RuntimeException e) {
             log.error("计划跑挂了", e);
             publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
         } finally {
-            runningPlan = null;
-            runningTasks = null;
-            busy.set(false);
-            ObjectNode idle = Protocol.event("busy");
-            idle.put("busy", false);
-            idle.put("durationMs", System.currentTimeMillis() - startedAt);
-            publish(idle);
+            settleBusy(startedAt);
         }
+    }
+
+    /** 上次没跑完的计划。没配 API key 时没有编排层，也就无从谈起。 */
+    private Optional<PlanCheckpoint> savedPlan() {
+        return planAgent == null ? Optional.empty() : planAgent.savedPlan();
+    }
+
+    /** 收工：清 busy 标志并广播。规划和续跑两条路都要走，抽出来免得漏一条。 */
+    private void settleBusy(long startedAt) {
+        busy.set(false);
+        ObjectNode idle = Protocol.event("busy");
+        idle.put("busy", false);
+        idle.put("durationMs", System.currentTimeMillis() - startedAt);
+        publish(idle);
     }
 
     private void handleCancel() {
         if (agent != null) {
             agent.cancel();
         }
-        // 计划模式下要叫停三处，漏一处按 Esc 就像没反应
-        PlanExecutor executor = runningPlan;
-        if (executor != null) {
-            executor.cancel();
-        }
-        AgentTaskRunner tasks = runningTasks;
-        if (tasks != null) {
-            tasks.cancel();
-        }
-        if (planner != null) {
-            planner.cancel();
+        // 计划模式下要叫停的那三处（调度器、执行体、规划器）归编排层管了
+        if (planAgent != null) {
+            planAgent.cancel();
         }
         planConfirm.cancelPending();            // 卡在计划确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行
@@ -374,6 +458,15 @@ public final class AgentServer extends WebSocketServer {
             n.put("tokens", agent.estimatedTokens());
             n.put("contextLimit", agent.contextLimit());
         }
+        // 上次没跑完的计划。放进首帧而不是让界面再问一次——
+        // 界面画第一屏时就该知道要不要摆出「接着跑」那个入口
+        savedPlan().ifPresent(checkpoint -> {
+            ObjectNode resumable = n.putObject("resumable");
+            resumable.put("goal", checkpoint.goal());
+            resumable.put("remaining", checkpoint.remaining());
+            resumable.put("total", checkpoint.tasks().size());
+            resumable.put("savedAt", checkpoint.savedAt());
+        });
         String rejection = WorkspaceGuard.rejectionReason(workspace.root());
         if (rejection != null) {
             n.put("workspaceWarning", rejection);   // 能走到这儿说明是 --unsafe 放行的
