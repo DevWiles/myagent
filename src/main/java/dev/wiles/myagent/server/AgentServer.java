@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.config.Config;
@@ -66,6 +67,14 @@ public final class AgentServer extends WebSocketServer {
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
+    /**
+     * 审计轨迹。
+     *
+     * 以前只有内置 CLI（{@link dev.wiles.myagent.Repl}）建审计，无头模式一条记录都不留——
+     * 也就是说用外部界面时，agent 改了什么文件、跑了什么命令、你批准过什么，全都查无对证。
+     * 那是个缺口，不是有意的设计。
+     */
+    private final AuditLog audit = AuditLog.forNewRun();
     private final PlanConfirmation planConfirm;
     /** 规划器。和 agent 用各自的客户端：取消一个不该把另一个也掐了。 */
     private final Planner planner;
@@ -87,6 +96,8 @@ public final class AgentServer extends WebSocketServer {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     /** 工具调用流水号，用来把 tool_started / tool_finished 配成一对。 */
     private final AtomicInteger toolSeq = new AtomicInteger(0);
+    /** 上一个 tool_started 的参数，等 tool_finished 到了一起写进审计。见 recordToAudit。 */
+    private volatile String pendingToolArgs;
     private final CountDownLatch stopped = new CountDownLatch(1);
 
     public AgentServer(CliOptions options, int port) {
@@ -104,9 +115,11 @@ public final class AgentServer extends WebSocketServer {
         this.approval = new RemoteApproval(this::publish, () -> !getConnections().isEmpty());
         this.planConfirm = new PlanConfirmation(this::publish, () -> !getConnections().isEmpty());
 
+        // 工具拿到的是**包了审计的**审批策略，和 Repl 的做法一致：
+        // 每次批准/拒绝都留一条记录，否则事后没法回答「这个文件是谁同意改的」
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace)
-                : BuiltinTools.createDefault(workspace, approval);
+                : BuiltinTools.createDefault(workspace, audit.audited(approval));
 
         this.agent = config.hasApiKey()
                 ? new Agent(new DeepSeekClient(config), tools,
@@ -141,6 +154,21 @@ public final class AgentServer extends WebSocketServer {
     /** 阻塞到服务停止。前台跑的时候用它挂住主线程。 */
     public void awaitStop() throws InterruptedException {
         stopped.await();
+    }
+
+    /**
+     * 停服时把审计日志关掉。
+     *
+     * 不关的话缓冲区里最后几条就丢了——而最后几条往往正是最想看的那几条
+     * （用户是因为哪一步不对才退出的）。
+     */
+    @Override
+    public void stop(int timeout) throws InterruptedException {
+        try {
+            super.stop(timeout);
+        } finally {
+            audit.close();
+        }
     }
 
     // ---------------------------------------------------------------- 连接
@@ -273,10 +301,12 @@ public final class AgentServer extends WebSocketServer {
         long startedAt = System.currentTimeMillis();
         try {
             Plan plan = planner.plan(goal);
+            audit.planCreated(plan);
             publish(Protocol.encodePlan(plan));
 
             if (!planConfirm.confirm()) {
                 plan.cancel();
+                audit.note("plan_rejected", "goal", plan.goal());
                 publish(Protocol.event("plan_finished").put("status", plan.status().name()));
                 return;
             }
@@ -286,14 +316,21 @@ public final class AgentServer extends WebSocketServer {
                     .withPlanner(planner)
                     .onEvent((task, event) -> onAgentEvent(event));
             PlanExecutor executor = new PlanExecutor(runner)
-                    .onTaskStarted(task -> publish(Protocol.encodeTaskStarted(task)))
-                    .onTaskFinished(task -> publish(Protocol.encodeTaskFinished(task)))
+                    .onTaskStarted(task -> {
+                        audit.taskStarted(task);
+                        publish(Protocol.encodeTaskStarted(task));
+                    })
+                    .onTaskFinished(task -> {
+                        audit.taskFinished(task);
+                        publish(Protocol.encodeTaskFinished(task));
+                    })
                     .onTasksAdded((parent, added) ->
                             publish(Protocol.encodeAddedTasks(parent.id(), added)));
             runningTasks = runner;
             runningPlan = executor;
 
             PlanResult result = executor.execute(plan);
+            audit.planFinished(plan, result);
             publish(Protocol.encodePlanFinished(plan, result));
 
         } catch (RuntimeException e) {
@@ -348,7 +385,24 @@ public final class AgentServer extends WebSocketServer {
         int seq = event instanceof AgentEvent.ToolStarted
                 ? toolSeq.incrementAndGet()
                 : toolSeq.get();
+        recordToAudit(event);
         publish(Protocol.encode(event, seq));
+    }
+
+    /**
+     * 把工具调用记进审计。
+     *
+     * 参数只在 ToolStarted 上有、结果只在 ToolFinished 上有，所以得把参数暂存一手
+     * 等结果到了再一起落盘（和 {@link dev.wiles.myagent.Repl} 的做法一致）。
+     * 工具调用是严格串行的，所以一个字段就够，不需要按流水号建表。
+     */
+    private void recordToAudit(AgentEvent event) {
+        if (event instanceof AgentEvent.ToolStarted t) {
+            pendingToolArgs = t.arguments();
+        } else if (event instanceof AgentEvent.ToolFinished t) {
+            audit.toolCall(null, t.tool(), pendingToolArgs, t.ok(), t.output());
+            pendingToolArgs = null;
+        }
     }
 
     /** 首帧：把界面画第一屏需要的所有静态信息一次给全，省掉一轮往返。 */
@@ -360,6 +414,9 @@ public final class AgentServer extends WebSocketServer {
         n.put("model", config.model());
         n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
         n.put("hasApiKey", config.hasApiKey());
+        // 界面退出时会把这个路径显示给用户，好让人知道去哪儿查这趟做了什么。
+        // 新增字段不升协议版本——界面本来就该忽略不认识的字段（见 docs/protocol.md 第 2 节）
+        n.put("auditLog", audit.file().toString());
         // 能力清单：界面据此决定要不要放出「先规划后执行」的入口
         ArrayNode features = n.putArray("features");
         Protocol.FEATURES.forEach(features::add);

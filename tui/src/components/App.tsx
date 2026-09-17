@@ -11,8 +11,9 @@
 
 import type { KeyEvent } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createEffect, Index, Show } from "solid-js"
+import { createEffect, Index, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
+import type { SessionState } from "../store.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
@@ -28,12 +29,26 @@ export type AppProps = {
   branch?: string
   /** 后端没了就调它，由入口决定怎么退出（要还原终端）。 */
   onClosed: (reason: string) => void
+  /**
+   * 挂载时把会话的两个出口交给入口：读状态的 accessor + 关后端的手。
+   *
+   * 为什么不学 opencode 用 context + Provider：那边有多个路由各自往上报收尾文案，
+   * 需要一个任意深度都能写入的口子；我们只有一个 App，收尾信息又完全是 SessionState
+   * 的派生量，直接把 accessor 递出去就够了，中间那层 context 是纯开销。
+   *
+   * 递 **accessor** 而不是快照：退出那一刻才求值，拿到的才是最新的数。
+   */
+  onMounted?: (handle: { state: Accessor<SessionState>; dispose: () => void }) => void
 }
 
 export function App(props: AppProps) {
   const dimensions = useTerminalDimensions()
   const session = createSession(props.options)
   const state = session.state
+
+  // 在组件体里直接调，不放 onMount：越早把 dispose 交出去越好——
+  // 在这之前按 Ctrl-C，退出路径就够不着已经 spawn 出来的 java 进程了
+  props.onMounted?.({ state, dispose: session.dispose })
 
   // 后端挂了就退出。不能在这儿直接 process.exit：终端还在 altscreen 模式里，
   // 得让入口先把 renderer destroy 掉，否则用户的终端会留在没有回显的状态

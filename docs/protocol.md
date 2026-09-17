@@ -87,12 +87,17 @@ token 随进程生灭，每次启动都不一样。
   "contextLimit": 65536,
   "features": ["plan"],
   "tools": [{"name": "read_file", "description": "…"}],
-  "workspaceWarning": "（可选）--unsafe 放行时的警告文案"
+  "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
+  "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl"
 }
 ```
 
 > ⚠️ `planMode` 是**只读模式**的历史字段名（对应 CLI 的 `--readonly`），
 > 和「先规划后执行」没有任何关系。名字保留是为了不破坏已有界面。
+
+`auditLog` 是本次运行的审计轨迹落在哪。界面退出时会把它显示给用户——
+界面活在备用屏里，退出后整段对话随屏幕消失，这个路径是唯一一条还能继续查的线索。
+**新增字段不升协议版本**（见第 2 节），老界面忽略它即可。
 
 ### 3.2 ReAct 过程事件
 

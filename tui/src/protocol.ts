@@ -38,6 +38,8 @@ export type ServerEvent =
       tokens?: number
       contextLimit?: number
       workspaceWarning?: string
+      /** 审计日志的位置。界面退出时显示给用户，好让人知道去哪儿查这趟做了什么。 */
+      auditLog?: string
       tools: ToolInfo[]
     }
   /** 第 step 轮开始，正在等模型响应。 */
