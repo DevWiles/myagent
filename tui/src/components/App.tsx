@@ -11,7 +11,7 @@
 
 import type { KeyEvent } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createEffect, For, Show } from "solid-js"
+import { createEffect, Index, Show } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
@@ -114,14 +114,22 @@ export function App(props: AppProps) {
 
             {/* streaming 只给最后一条、且会话还忙着的那条——
                 只有它的文本还会继续长，其余都已定稿 */}
-            <For each={state().entries}>
+            {/* ⚠️ 必须用 <Index> 而不是 <For>。
+                两者的区别是按什么复用：<For> 按**元素身份**，<Index> 按**位置**。
+                而 store 每收到一个 text_delta 就 replaceTail 一个新的 entry 对象
+                （immutable 更新，这本身是对的）——在 <For> 眼里最后一条每次都是
+                「一个全新的元素」，于是把整条消息的组件树销毁重建一遍，
+                里面所有已经渲染好的 markdown 块跟着全部重建。
+                实测就是这一处让早期块被重写 61 次；换成 <Index> 后位置不变、
+                组件实例保留，只有 props 更新，块级复用才真正生效。 */}
+            <Index each={state().entries}>
               {(entry, index) => (
                 <EntryView
-                  entry={entry}
-                  streaming={state().busy && index() === state().entries.length - 1}
+                  entry={entry()}
+                  streaming={state().busy && index === state().entries.length - 1}
                 />
               )}
-            </For>
+            </Index>
           </scrollbox>
         </box>
 
