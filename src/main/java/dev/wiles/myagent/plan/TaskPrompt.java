@@ -3,7 +3,10 @@ package dev.wiles.myagent.plan;
 import dev.wiles.myagent.agent.SystemPrompt;
 
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * 子任务的提示词。
@@ -33,6 +36,8 @@ public final class TaskPrompt {
                 %s
 
                 这一步的纪律:
+                - **下面会给出这一步的完成标准，达到它就收口**，不要再往下做，\
+也不要在没达到的情况下宣布做完了。
                 - 只做这个子任务要求的事。计划里别的活有别的步骤负责，**不要顺手做掉**——\
                 你以为的顺手，在别人那儿是重复劳动或者冲突。
                 - 做完用几句话交代产出。下游任务只能看到你这段交代，看不到你的执行过程，\
@@ -41,13 +46,35 @@ public final class TaskPrompt {
                 """.formatted(typeName(task.type()), rules(task.type()));
     }
 
+    /**
+     * 这一步要交给子模型的全部材料：任务 + 完成标准 + 上游产出。
+     *
+     * <p>{@code {{t1}}} 这类占位符在这里被换成上游真正的产出（见 {@link TaskRefs}）——
+     * <b>规划阶段写下的是「填谁的产出」，执行阶段才知道那产出具体是什么</b>。
+     *
+     * <p>被占位符引用过的上游<b>不再进下面的产出区块</b>：它的内容已经内联到句子里了，
+     * 再抄一遍就是把同一段文字塞进上下文两次，纯烧 token。
+     */
     public static String user(Task task, List<Task> upstream) {
-        StringBuilder sb = new StringBuilder("任务: ").append(task.description());
+        List<Task> sources = upstream == null ? List.of() : upstream;
+        String acceptance = Objects.toString(task.acceptance(), "");
+        Set<String> inlined = new LinkedHashSet<>(
+                TaskRefs.referencedIn(task.description() + "\n" + acceptance));
 
-        List<Task> withResult = upstream.stream().filter(t -> t.result() != null).toList();
-        if (!withResult.isEmpty()) {
+        StringBuilder sb = new StringBuilder("任务: ")
+                .append(TaskRefs.resolve(task.description(), sources));
+
+        if (!acceptance.isEmpty()) {
+            sb.append("\n\n做到这样就算完成: ").append(TaskRefs.resolve(acceptance, sources));
+        }
+
+        List<Task> rest = sources.stream()
+                .filter(t -> t.result() != null)
+                .filter(t -> !inlined.contains(t.id()))
+                .toList();
+        if (!rest.isEmpty()) {
             sb.append("\n\n上游任务的产出:\n");
-            for (Task up : withResult) {
+            for (Task up : rest) {
                 sb.append("\n【").append(up.id()).append(" ").append(up.description()).append("】\n")
                         .append(up.result()).append('\n');
             }

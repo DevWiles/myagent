@@ -42,6 +42,15 @@ public final class PlanExecutor {
     };
     private BiConsumer<Task, List<Task>> onExpanded = (parent, added) -> {
     };
+    private BiConsumer<Task, List<Task>> onReplanned = (failed, recovery) -> {
+    };
+
+    /** 没配就退化成原来的行为：一步倒了，下游全跳过，计划就此打住。 */
+    private Replanner replanner;
+
+    /** 该存档了。没配就不存，计划照跑，只是断了续不上。 */
+    private Consumer<Plan> onCheckpoint = plan -> {
+    };
 
     /** 用户叫停了。volatile 是因为置位的通常是另一个线程（监听 Ctrl-C 的那个）。 */
     private volatile boolean cancelled;
@@ -76,6 +85,44 @@ public final class PlanExecutor {
         return this;
     }
 
+    /**
+     * 配上重规划器，任务失败时才会尝试补救。
+     *
+     * <p>可选而不是构造参数，理由和 {@code AgentTaskRunner.withPlanner} 一样：
+     * 没有它整条链照样跑得通（失败就是失败），测试调度逻辑时也不必捏一个规划器出来。
+     */
+    public PlanExecutor withReplanner(Replanner replanner) {
+        this.replanner = replanner;
+        return this;
+    }
+
+    /**
+     * 某一步失败之后补出了一批救场任务。
+     *
+     * <p>界面必须知道——否则用户看到的是「某一步红了」，然后屏幕上莫名其妙
+     * 冒出几个计划里根本没有的任务在跑。
+     */
+    public PlanExecutor onReplanned(BiConsumer<Task, List<Task>> listener) {
+        this.onReplanned = listener;
+        return this;
+    }
+
+    /**
+     * 每了结一个任务就喊一次，让调用方把当前进度存下来。
+     *
+     * <p><b>为什么是一个任务一次</b>：存档的粒度直接决定崩溃后能恢复到多细。
+     * 整个计划跑完才存等于没存；一个任务一次，最坏情况只丢正在跑的那一个。
+     * 一次写盘几十 KB，和一次模型调用比可以忽略。
+     *
+     * <p>放在这个位置（一轮调度的末尾）而不是塞进 {@code onTaskFinished}：
+     * 失败传播和重规划都发生在一轮之内，等这一轮整个走完再存，
+     * 落盘的才是一个自洽的状态，而不是「任务已失败但补救任务还没进图」这种中间态。
+     */
+    public PlanExecutor onCheckpoint(Consumer<Plan> listener) {
+        this.onCheckpoint = listener;
+        return this;
+    }
+
     /** 叫停。当前正在跑的那个任务停不下来（那是执行体自己的事），但不会再开新的。 */
     public void cancel() {
         cancelled = true;
@@ -88,6 +135,12 @@ public final class PlanExecutor {
 
         while (!graph.isDone()) {
             if (cancelled) {
+                // 顺序要紧：**先存档，再把剩下的了结掉**。
+                // 存档要能续，靠的是里面那些任务还停在 PENDING、计划还停在 RUNNING；
+                // 等 skipAllPending 跑完再存，落盘的就是一份「全都了结了」的死图，
+                // 续无可续。而 Ctrl-C 恰恰是最常见的中断方式——这一行决定了
+                // 断点续跑到底是真能用，还是只在进程被 kill 时才用得上。
+                checkpoint(plan);
                 skipAllPending(graph, "已取消");
                 break;
             }
@@ -101,7 +154,8 @@ public final class PlanExecutor {
                 break;
             }
 
-            runOne(graph, ready.get(0));
+            runOne(plan, graph, ready.get(0));
+            checkpoint(plan);
         }
 
         return settle(plan);
@@ -129,15 +183,34 @@ public final class PlanExecutor {
 
         if (cancelled) {
             plan.cancel();
+        } else if (plan.isRecovered()) {
+            // 有任务红过，但补救任务把活全干完了。这跟「跑砸了」是两回事，
+            // 报成 FAILED 会让用户以为目标没达成，而其实达成了——只是绕了个弯
+            plan.complete();
         } else if (failed > 0 || skipped > 0) {
             plan.fail();
         } else {
             plan.complete();
         }
-        return new PlanResult(plan.status(), succeeded, failed, skipped);
+        return new PlanResult(plan.status(), succeeded, failed, skipped, plan.replans());
     }
 
-    private void runOne(TaskGraph graph, Task task) {
+    /**
+     * 存档永远不该把计划带走。
+     *
+     * <p>回调是外部实现（要写盘、可能碰到只读文件系统、磁盘满、权限不对）。
+     * 为了存不下这件事让一份正跑着的计划挂掉，是本末倒置——存档的意义本来就是
+     * 「万一断了还能接上」，它自己成了断的原因就荒唐了。
+     */
+    private void checkpoint(Plan plan) {
+        try {
+            onCheckpoint.accept(plan);
+        } catch (RuntimeException e) {
+            log.warn("存档回调抛异常，忽略: {}", e.toString());
+        }
+    }
+
+    private void runOne(Plan plan, TaskGraph graph, Task task) {
         task.start();
         onStarted.accept(task);
         TaskOutcome outcome;
@@ -151,7 +224,7 @@ public final class PlanExecutor {
         }
 
         if (!outcome.ok()) {
-            failAndPropagate(graph, task, outcome.output());
+            failAndPropagate(plan, graph, task, outcome.output());
             return;
         }
 
@@ -162,7 +235,7 @@ public final class PlanExecutor {
                 graph.addSubTasks(outcome.subTasks());
             } catch (IllegalArgumentException e) {
                 log.warn("任务 {} 拆出的子任务不合法: {}", task.id(), e.getMessage());
-                failAndPropagate(graph, task, "子任务不合法: " + e.getMessage());
+                failAndPropagate(plan, graph, task, "子任务不合法: " + e.getMessage());
                 return;
             }
             onExpanded.accept(task, outcome.subTasks());
@@ -171,7 +244,7 @@ public final class PlanExecutor {
         onFinished.accept(task);
     }
 
-    private void failAndPropagate(TaskGraph graph, Task task, String error) {
+    private void failAndPropagate(Plan plan, TaskGraph graph, Task task, String error) {
         task.fail(error);
         onFinished.accept(task);
 
@@ -180,6 +253,48 @@ public final class PlanExecutor {
             log.info("任务 {} 失败，连带跳过 {} 个下游任务", task.id(), skipped.size());
         }
         skipped.forEach(onFinished);
+
+        // 传播完再重规划，顺序有讲究：模型要看到「哪些活被连累了」才知道补救要覆盖什么
+        tryReplan(plan, graph, task, error);
+    }
+
+    /**
+     * 一步倒了，试着补救一次。
+     *
+     * <p><b>这个方法里没有一条路会让计划跑不下去。</b>重规划本身是锦上添花——
+     * 模型不肯给、给的图不合法、调用直接挂了，统统只是「没救回来」，
+     * 照原样收场就是了。为了补救的失败而让整个计划炸掉，纯属得不偿失。
+     *
+     * <p>取消时不补救：用户已经说不要了，这会儿再去发一次模型调用只是在烧钱。
+     */
+    private void tryReplan(Plan plan, TaskGraph graph, Task failed, String error) {
+        if (replanner == null || cancelled || !plan.canReplan()) {
+            return;
+        }
+
+        List<Task> recovery;
+        try {
+            recovery = replanner.replan(plan, failed, error);
+        } catch (RuntimeException e) {
+            log.info("任务 {} 失败后重规划没成: {}", failed.id(), e.getMessage());
+            return;
+        }
+        if (recovery == null || recovery.isEmpty()) {
+            // 模型明说这事儿做不成。这是个有用的答案，别当成错误
+            log.info("任务 {} 失败后，重规划认为补不了", failed.id());
+            return;
+        }
+
+        try {
+            graph.addTasks(recovery);
+        } catch (IllegalArgumentException e) {
+            log.warn("补救任务不合法，照原样收场: {}", e.getMessage());
+            return;
+        }
+
+        plan.recordReplan(recovery);
+        log.info("任务 {} 失败后补出 {} 个救场任务", failed.id(), recovery.size());
+        onReplanned.accept(failed, recovery);
     }
 
     /** 依赖的任务，顺序按 dependencies 写的来，下游 prompt 里的上下文顺序才稳定。 */

@@ -65,8 +65,26 @@ public final class TaskGraph {
      * 图就成了半截状态——这种脏数据比直接失败难查得多。
      */
     public void addSubTasks(Collection<Task> subTasks) {
+        addTasks(subTasks, "子任务");
+    }
+
+    /**
+     * 往图里追加一批<b>根任务</b>——重规划补救出来的那些。
+     *
+     * <p>和 {@link #addSubTasks} 是同一套原子性保证，区别只在语义：那边长出来的是
+     * 某个 PLANNING 任务的下一层，这边长出来的是「原来那条路走不通，换一条」。
+     *
+     * <p><b>新任务只能依赖已经成功的任务</b>，这一条由调用方在建任务时保证——
+     * 依赖一个已经 FAILED 或 SKIPPED 的任务，它永远等不到就绪，
+     * 而 {@code ready()} 看不出这种死等和「还没轮到」的区别，图就静默挂住了。
+     */
+    public void addTasks(Collection<Task> newTasks) {
+        addTasks(newTasks, "任务");
+    }
+
+    private void addTasks(Collection<Task> subTasks, String what) {
         if (subTasks == null || subTasks.isEmpty()) {
-            throw new IllegalArgumentException("要追加的子任务是空的");
+            throw new IllegalArgumentException("要追加的" + what + "是空的");
         }
         Map<String, Task> candidate = new LinkedHashMap<>(tasks);
         for (Task task : subTasks) {

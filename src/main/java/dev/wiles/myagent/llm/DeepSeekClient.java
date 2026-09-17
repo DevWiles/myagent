@@ -40,6 +40,8 @@ public final class DeepSeekClient implements LlmClient {
 
     private Double temperature;
     private Integer maxTokens;
+    /** 开了就在请求里带上 response_format，让服务端保证输出是合法 JSON。 */
+    private boolean jsonMode;
     /** 正在进行的请求，供 cancel() 掐断。 */
     private volatile Call currentCall;
 
@@ -65,14 +67,32 @@ public final class DeepSeekClient implements LlmClient {
                 .build();
     }
 
+    @Override
     public DeepSeekClient temperature(double value) {
         this.temperature = value;
         return this;
     }
 
+    @Override
     public DeepSeekClient maxTokens(int value) {
         this.maxTokens = value;
         return this;
+    }
+
+    @Override
+    public DeepSeekClient jsonMode(boolean on) {
+        this.jsonMode = on;
+        return this;
+    }
+
+    /**
+     * 开了 JSON 模式才带这个字段。
+     *
+     * <p>不能无条件带上 {@code {"type":"text"}}：有些 OpenAI 兼容网关不认这个取值，
+     * 会直接 400。原则和 {@code tools} 字段一样——<b>没要用的功能就别出现在报文里</b>。
+     */
+    private ResponseFormat responseFormat() {
+        return jsonMode ? ResponseFormat.JSON_OBJECT : null;
     }
 
     @Override
@@ -94,7 +114,8 @@ public final class DeepSeekClient implements LlmClient {
                 withTools ? "auto" : null,          // auto：由模型自行决定要不要调工具
                 temperature,
                 maxTokens,
-                false);                             // 流式输出留到后面再做
+                false,                              // 流式输出留到后面再做
+                responseFormat());
 
         String body = writeJson(payload);
         log.debug("-> {} ({} 条消息, {} 个工具)", config.chatCompletionsUrl(), messages.size(),
@@ -124,7 +145,8 @@ public final class DeepSeekClient implements LlmClient {
                 withTools ? tools : null,
                 withTools ? "auto" : null,
                 temperature, maxTokens,
-                true);                              // 唯一的区别就是这个 true
+                true,                               // 唯一的区别就是这个 true
+                responseFormat());
 
         String body = writeJson(payload);
         log.debug("-> {} (流式, {} 条消息, {} 个工具)", config.chatCompletionsUrl(),

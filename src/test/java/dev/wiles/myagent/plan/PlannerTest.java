@@ -23,6 +23,9 @@ class PlannerTest {
         final List<List<ChatMessage>> received = new ArrayList<>();
         final List<List<ToolSpec>> receivedTools = new ArrayList<>();
         RuntimeException blowUp;
+        Boolean jsonMode;
+        Double temperature;
+        Integer maxTokens;
 
         ScriptedLlm(String... replies) {
             script.addAll(List.of(replies));
@@ -38,6 +41,24 @@ class PlannerTest {
             String reply = script.isEmpty() ? "没词儿了" : script.poll();
             return new ChatResponse("x", "fake", List.of(new ChatResponse.Choice(
                     0, ChatMessage.assistant(reply), "stop")), null);
+        }
+
+        @Override
+        public LlmClient jsonMode(boolean on) {
+            this.jsonMode = on;
+            return this;
+        }
+
+        @Override
+        public LlmClient temperature(double value) {
+            this.temperature = value;
+            return this;
+        }
+
+        @Override
+        public LlmClient maxTokens(int value) {
+            this.maxTokens = value;
+            return this;
         }
 
         @Override
@@ -60,11 +81,11 @@ class PlannerTest {
     private static String validPlan() {
         return """
                 {"goal": "给 Task 加上重试能力", "tasks": [
-                  {"id": "t1", "type": "FILE_READ", "description": "读 Task.java", "dependsOn": []},
-                  {"id": "t2", "type": "FILE_READ", "description": "读 TaskTest", "dependsOn": []},
-                  {"id": "t3", "type": "FILE_WRITE", "description": "加 retry", "dependsOn": ["t1", "t2"]},
-                  {"id": "t4", "type": "FILE_WRITE", "description": "补测试", "dependsOn": ["t3"]},
-                  {"id": "t5", "type": "VERIFICATION", "description": "跑 mvn test", "dependsOn": ["t4"]}
+                  {"id": "t1", "type": "FILE_READ", "description": "读 Task.java", "acceptance": "读 Task.java——做完了", "dependsOn": []},
+                  {"id": "t2", "type": "FILE_READ", "description": "读 TaskTest", "acceptance": "读 TaskTest——做完了", "dependsOn": []},
+                  {"id": "t3", "type": "FILE_WRITE", "description": "加 retry", "acceptance": "加 retry——做完了", "dependsOn": ["t1", "t2"]},
+                  {"id": "t4", "type": "FILE_WRITE", "description": "补测试", "acceptance": "补测试——做完了", "dependsOn": ["t3"]},
+                  {"id": "t5", "type": "VERIFICATION", "description": "跑 mvn test", "acceptance": "跑 mvn test——做完了", "dependsOn": ["t4"]}
                 ]}
                 """;
     }
@@ -136,11 +157,11 @@ class PlannerTest {
     void retriesAfterCycle() {
         String cyclic = """
                 {"goal": "x", "tasks": [
-                  {"id": "t1", "type": "FILE_READ", "description": "a", "dependsOn": ["t5"]},
-                  {"id": "t2", "type": "FILE_READ", "description": "b", "dependsOn": ["t1"]},
-                  {"id": "t3", "type": "FILE_READ", "description": "c", "dependsOn": ["t2"]},
-                  {"id": "t4", "type": "FILE_READ", "description": "d", "dependsOn": ["t3"]},
-                  {"id": "t5", "type": "FILE_READ", "description": "e", "dependsOn": ["t4"]}
+                  {"id": "t1", "type": "FILE_READ", "description": "a", "acceptance": "a——做完了", "dependsOn": ["t5"]},
+                  {"id": "t2", "type": "FILE_READ", "description": "b", "acceptance": "b——做完了", "dependsOn": ["t1"]},
+                  {"id": "t3", "type": "FILE_READ", "description": "c", "acceptance": "c——做完了", "dependsOn": ["t2"]},
+                  {"id": "t4", "type": "FILE_READ", "description": "d", "acceptance": "d——做完了", "dependsOn": ["t3"]},
+                  {"id": "t5", "type": "FILE_READ", "description": "e", "acceptance": "e——做完了", "dependsOn": ["t4"]}
                 ]}
                 """;
         ScriptedLlm llm = new ScriptedLlm(cyclic, validPlan());
@@ -190,8 +211,8 @@ class PlannerTest {
     void plansSubTasks() {
         String subPlan = """
                 {"tasks": [
-                  {"id": "t1.1", "type": "FILE_WRITE", "description": "改 A", "dependsOn": []},
-                  {"id": "t1.2", "type": "VERIFICATION", "description": "跑测试", "dependsOn": ["t1.1"]}
+                  {"id": "t1.1", "type": "FILE_WRITE", "description": "改 A", "acceptance": "改 A——做完了", "dependsOn": []},
+                  {"id": "t1.2", "type": "VERIFICATION", "description": "跑测试", "acceptance": "跑测试——做完了", "dependsOn": ["t1.1"]}
                 ]}
                 """;
         ScriptedLlm llm = new ScriptedLlm("我想想……", subPlan);
@@ -208,7 +229,7 @@ class PlannerTest {
     @DisplayName("子规划的提示词要带上父任务的描述和它刚摸到的情况")
     void subPlanPromptCarriesContext() {
         ScriptedLlm llm = new ScriptedLlm("""
-                {"tasks": [{"id": "t1.1", "type": "FILE_WRITE", "description": "改", "dependsOn": []}]}
+                {"tasks": [{"id": "t1.1", "type": "FILE_WRITE", "description": "改", "acceptance": "改——做完了", "dependsOn": []}]}
                 """);
         Task parent = new Task("t1", "摸清要改哪儿", TaskType.PLANNING, List.of());
 
@@ -225,11 +246,11 @@ class PlannerTest {
     void readOnlyIsMentionedInThePrompt() {
         ScriptedLlm llm = new ScriptedLlm("""
                 {"goal": "看看代码", "tasks": [
-                  {"id": "t1", "type": "FILE_READ", "description": "读 a", "dependsOn": []},
-                  {"id": "t2", "type": "FILE_READ", "description": "读 b", "dependsOn": []},
-                  {"id": "t3", "type": "FILE_READ", "description": "读 c", "dependsOn": []},
-                  {"id": "t4", "type": "FILE_READ", "description": "读 d", "dependsOn": []},
-                  {"id": "t5", "type": "ANALYSIS", "description": "总结", "dependsOn": ["t1"]}
+                  {"id": "t1", "type": "FILE_READ", "description": "读 a", "acceptance": "读 a——做完了", "dependsOn": []},
+                  {"id": "t2", "type": "FILE_READ", "description": "读 b", "acceptance": "读 b——做完了", "dependsOn": []},
+                  {"id": "t3", "type": "FILE_READ", "description": "读 c", "acceptance": "读 c——做完了", "dependsOn": []},
+                  {"id": "t4", "type": "FILE_READ", "description": "读 d", "acceptance": "读 d——做完了", "dependsOn": []},
+                  {"id": "t5", "type": "ANALYSIS", "description": "总结", "acceptance": "总结——做完了", "dependsOn": ["t1"]}
                 ]}
                 """);
 
@@ -243,11 +264,11 @@ class PlannerTest {
     void readOnlyRejectsWriteTasks() {
         ScriptedLlm llm = new ScriptedLlm(validPlan(), """
                 {"goal": "只看不改", "tasks": [
-                  {"id": "t1", "type": "FILE_READ", "description": "读 a", "dependsOn": []},
-                  {"id": "t2", "type": "FILE_READ", "description": "读 b", "dependsOn": []},
-                  {"id": "t3", "type": "FILE_READ", "description": "读 c", "dependsOn": []},
-                  {"id": "t4", "type": "FILE_READ", "description": "读 d", "dependsOn": []},
-                  {"id": "t5", "type": "ANALYSIS", "description": "总结", "dependsOn": ["t1"]}
+                  {"id": "t1", "type": "FILE_READ", "description": "读 a", "acceptance": "读 a——做完了", "dependsOn": []},
+                  {"id": "t2", "type": "FILE_READ", "description": "读 b", "acceptance": "读 b——做完了", "dependsOn": []},
+                  {"id": "t3", "type": "FILE_READ", "description": "读 c", "acceptance": "读 c——做完了", "dependsOn": []},
+                  {"id": "t4", "type": "FILE_READ", "description": "读 d", "acceptance": "读 d——做完了", "dependsOn": []},
+                  {"id": "t5", "type": "ANALYSIS", "description": "总结", "acceptance": "总结——做完了", "dependsOn": ["t1"]}
                 ]}
                 """);
 
@@ -265,5 +286,116 @@ class PlannerTest {
 
         assertEquals(5, new Planner(llm).plan("随便").graph().size());
         assertEquals(1, llm.calls());
+    }
+    @Test
+    @DisplayName("构造时就把三个旋钮拧好：要 JSON、低温、封顶")
+    void configuresTheClientForStructuredOutput() {
+        ScriptedLlm llm = new ScriptedLlm(validPlan());
+
+        new Planner(llm).plan("随便");
+
+        assertEquals(Boolean.TRUE, llm.jsonMode, "没开 JSON 模式，会悄悄多几轮重试");
+        assertEquals(Planner.PLANNING_TEMPERATURE, llm.temperature);
+        assertEquals(Planner.PLANNING_MAX_TOKENS, llm.maxTokens,
+                "开了 JSON 模式不封顶，截断时可能一直吐空白");
+    }
+
+    @Test
+    @DisplayName("现场信息进了系统提示词，模型不必再靠探路任务去摸")
+    void contextReachesTheSystemPrompt() {
+        ScriptedLlm llm = new ScriptedLlm(validPlan());
+        PlanContext ctx = new PlanContext("/tmp/proj", "src/\n  Main.java",
+                List.of(new PlanContext.ToolBrief("read_file", "读文件。")), List.of("sudo"));
+
+        new Planner(llm).context(ctx).plan("改点东西");
+
+        String system = llm.received.get(0).get(0).content();
+        assertTrue(system.contains("Main.java"), system);
+        assertTrue(system.contains("read_file"), system);
+        assertTrue(system.contains("sudo"), system);
+    }
+    // ── 重规划 ──────────────────────────────────────────────────
+
+    /** 造一份跑到一半的计划：t1 成了，t2 倒了，t3 被连累跳过。 */
+    private static Plan halfRunPlan() {
+        Task t1 = new Task("t1", "读 pom.xml", TaskType.FILE_READ, List.of(), "Java 版本是 17");
+        Task t2 = new Task("t2", "改 App.java", TaskType.FILE_WRITE, List.of("t1"), "改完了");
+        Task t3 = new Task("t3", "跑测试", TaskType.VERIFICATION, List.of("t2"), "测试通过");
+        Plan plan = new Plan("给项目加上重试", TaskGraph.of(List.of(t1, t2, t3)));
+
+        plan.start();
+        t1.start();
+        t1.succeed("pom 里写的是 Java 17");
+        t2.start();
+        t2.fail("App.java 不存在");
+        plan.graph().propagateFailure("t2");
+        return plan;
+    }
+
+    @Test
+    @DisplayName("补救提示词里四样都在：原目标、已有成果、失败原因、还没干的活")
+    void replanPromptCarriesTheWholeSituation() {
+        ScriptedLlm llm = new ScriptedLlm("""
+                {"tasks": [{"id": "r1", "type": "FILE_READ", "description": "找 App.java 的真实位置",
+                            "acceptance": "给出实际路径", "dependsOn": []}]}
+                """);
+        Plan plan = halfRunPlan();
+
+        List<Task> recovery = new Planner(llm)
+                .replan(plan, plan.graph().get("t2"), "App.java 不存在");
+
+        assertEquals(1, recovery.size());
+        String user = llm.lastUserMessage();
+        assertTrue(user.contains("给项目加上重试"), "缺原目标: " + user);
+        assertTrue(user.contains("pom 里写的是 Java 17"), "缺已有成果，它会重做一遍: " + user);
+        assertTrue(user.contains("App.java 不存在"), "缺失败原因，它会原样再试一遍: " + user);
+        assertTrue(user.contains("跑测试"), "缺被跳过的活，它只会修那一步: " + user);
+    }
+
+    @Test
+    @DisplayName("模型交白卷：原样返回空列表，不当成错误重试")
+    void replanCanGiveUp() {
+        ScriptedLlm llm = new ScriptedLlm("{\"tasks\": []}");
+        Plan plan = halfRunPlan();
+
+        assertTrue(new Planner(llm).replan(plan, plan.graph().get("t2"), "缺依赖").isEmpty());
+        assertEquals(1, llm.calls(), "交白卷不该触发重试");
+    }
+
+    @Test
+    @DisplayName("补救计划不合法时，错误照样回灌重试")
+    void replanRetriesOnBadOutput() {
+        ScriptedLlm llm = new ScriptedLlm(
+                "我觉得这事儿得再商量商量",
+                """
+                {"tasks": [{"id": "r1", "type": "FILE_READ", "description": "查清楚",
+                            "acceptance": "查到了", "dependsOn": []}]}
+                """);
+        Plan plan = halfRunPlan();
+
+        List<Task> recovery = new Planner(llm)
+                .replan(plan, plan.graph().get("t2"), "挂了");
+
+        assertEquals(1, recovery.size());
+        assertEquals(2, llm.calls());
+    }
+
+    @Test
+    @DisplayName("只读模式下补救也不许规划写任务")
+    void replanRespectsReadOnly() {
+        ScriptedLlm llm = new ScriptedLlm("""
+                {"tasks": [{"id": "r1", "type": "FILE_WRITE", "description": "改文件",
+                            "acceptance": "改完", "dependsOn": []}]}
+                """);
+        Plan plan = halfRunPlan();
+
+        assertThrows(PlanningException.class, () -> new Planner(llm).readOnly(true)
+                .replan(plan, plan.graph().get("t2"), "挂了"));
+
+        String system = llm.received.get(0).get(0).content();
+        assertTrue(system.contains("只读模式"), system);
+        // 光靠提示词不够，产出里还得再校验一遍——这条回灌的错误就是第二道防线
+        assertTrue(llm.received.get(1).stream().anyMatch(m -> m.content().contains("只读模式")),
+                "写任务被打回时，理由要回灌给模型");
     }
 }
