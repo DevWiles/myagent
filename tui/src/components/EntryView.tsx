@@ -10,7 +10,7 @@
  */
 
 import { TextAttributes } from "@opentui/core"
-import { createMemo, For, Match, Show, Switch } from "solid-js"
+import { For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { syntaxStyleFor, useTheme } from "../theme.ts"
@@ -65,68 +65,38 @@ function UserEntry(props: { text: string }) {
 }
 
 /**
- * 取出这段文本里**已经定型**的部分，没写完的最后半行丢掉。
+ * 模型的回复。
  *
- * ## 边界为什么是「行」而不是「空行」
+ * **流式期间是纯文本，收完再整体渲染成 Markdown。**
  *
- * 一度用空行做边界（markdown 里空行分隔块），但那个粒度太粗：
- * 一个标题带九条嵌套列表，中间一个空行都没有，于是整坨算一个块，
- * 要等全部写完才「啪」地落下来一大片。
+ * 为什么不边流边渲染：`<markdown>` 每次 content 变化都要重新解析整段文本、
+ * 重建整棵渲染树。不管把更新粒度调到多粗（试过逐字符、整块、整行三档），
+ * 只要还在流式期间反复重建，屏幕就会闪——粒度只改变闪的频率，不改变它闪。
  *
- * Notion 那种「一个 block 渲染完才出现」里的 block，其实是**每个列表项
- * 各自一个 block**，不是整张列表一个。对应到这里就是：以完整的行为单位。
+ * 所以干脆分成两个阶段：
+ * - 流式中：一个 `<text>`，内容只增不改，没有解析也没有树重建，滚动平顺
+ * - 流完了：换成 `<markdown>`，一次成型
  *
- * 行一写完就定型了：`## 标题` 是标题、`- 项一` 是列表项、代码行是代码行，
- * 都不会因为后面来了什么而改变身份。没写完的半行才是会骗人的那个
- * （`## 标` 不是合法标题，只能先当普通文字画出来，`##` 就露出来了）。
- *
- * ## 未闭合的代码围栏不用特殊处理
- *
- * ```` ```java ```` 开了还没收尾时，marked 会把后面已有的内容全当代码——
- * 而此刻「后面已有的内容」本来就都是代码，所以这个判断是对的。
- * 之后每来一行，代码块只是往下长，不会发生「先是代码、后来又不是」的变身。
- */
-export function settledMarkdown(text: string): string {
-  const lastBreak = text.lastIndexOf("\n")
-  return lastBreak < 0 ? "" : text.slice(0, lastBreak + 1)
-}
-
-/**
- * 模型的回复，按 Markdown 渲染。
- *
- * 用 OpenTUI 内置的 `<markdown>`，不自己解析：它内部走 TreeSitter，
- * 连代码块的语法高亮一起给了，自己写一个解析器只会得到一个更差的版本。
- *
- * ## 流式按「行」推，不按字符推
- *
- * text_delta 是一个字一个字过来的，直接喂给渲染器有两个毛病：
- *
- * 1. **会看见 markdown 源码**。半行 `## 标` 还不是合法标题，
- *    渲染器只能先当普通文字画出来，`##` 就露在屏幕上了。
- *    （OpenTUI 的 `streaming` 选项正是这个行为：最后一块按未定稿处理。）
- * 2. **抖得厉害**。每来一个字符就重排一次版面，一秒几十次。
- *
- * 所以这里只把**已经写完的整行**推给渲染器（见 settledMarkdown）。
- * 屏幕上出现的每一行都已经是最终形态：标题就是标题、列表项就是列表项，
- * 不会先露出源码再变身。以行为单位出现，而不是逐字打字机。
+ * 代价是流式期间能看见 `##`、`**` 这些源码标记，结束时有一次「变身」。
+ * 这是刻意换来的：源码标记只是不好看，闪烁是没法看。
  */
 function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
 
-  const content = createMemo(() => (props.streaming ? settledMarkdown(props.text) : props.text))
-
   return (
     <box paddingTop={1}>
-      {/* ⚠️ syntaxStyle 必须写在 content **前面**。
-          Solid 的 reconciler 按 JSX 里的书写顺序依次调 setter，而设置 content 会
-          立刻触发一次解析；syntaxStyle 还没赋值的话，那一趟解析查不到任何配色，
-          整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
-          去掉星号，**只是颜色全错**，非常难发现。
-          （这个顺序依赖是 OpenTUI 自己源码注释里写明的。）
-
-          streaming 恒为 false：我们喂进去的内容总是若干个完整的行，
-          不需要它再替我们保留一个「未定稿的尾块」——那正是会露出源码的东西。 */}
-      <markdown syntaxStyle={syntaxStyleFor(theme)} content={content()} streaming={false} />
+      <Show
+        when={!props.streaming}
+        fallback={<text fg={theme.text}>{props.text}</text>}
+      >
+        {/* ⚠️ syntaxStyle 必须写在 content **前面**。
+            Solid 的 reconciler 按 JSX 里的书写顺序依次调 setter，而设置 content 会
+            立刻触发一次解析；syntaxStyle 还没赋值的话，那一趟解析查不到任何配色，
+            整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
+            去掉星号，**只是颜色全错**，非常难发现。
+            （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
+        <markdown syntaxStyle={syntaxStyleFor(theme)} content={props.text} streaming={false} />
+      </Show>
     </box>
   )
 }
