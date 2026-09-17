@@ -37,8 +37,25 @@ cd 你要让它干活的目录
 配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
 
 ```json
-{ "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat" }
+{ "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com",
+  "model": "deepseek-chat", "contextTokens": 64000 }
 ```
+
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|---|---|---|---|
+| `apiKey` | `DEEPSEEK_API_KEY` | 无 | 没有它只能裸跑界面 |
+| `baseUrl` | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
+| `model` | `DEEPSEEK_MODEL` | `deepseek-chat` | |
+| `contextTokens` | `MYAGENT_CONTEXT_TOKENS` | `64000` | 上下文窗口，用到 75% 就触发压缩 |
+
+`contextTokens` 除了换模型时要改，还有个用处是**把压缩逼出来**：默认值下得聊到
+48,000 token 才会压缩一次，手工试不出来。调到 4,000（下限）几轮对话就能触发：
+
+```bash
+MYAGENT_CONTEXT_TOKENS=4000 ./myagent-tui
+```
+
+配错不会让程序起不来——不是整数就退回默认值，小于下限会抬上去，两种都打一行警告。
 
 ## 上手
 

@@ -3,6 +3,7 @@ package dev.wiles.myagent.llm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.config.Config;
+import dev.wiles.myagent.context.ContextManager;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -33,7 +34,8 @@ class DeepSeekClientTest {
     void setUp() throws Exception {
         server = new MockWebServer();
         server.start();
-        Config config = new Config("sk-test-key", server.url("/").toString(), "deepseek-chat");
+        Config config = new Config("sk-test-key", server.url("/").toString(), "deepseek-chat",
+                ContextManager.DEFAULT_MAX_TOKENS);
         OkHttpClient http = new OkHttpClient.Builder()
                 .callTimeout(Duration.ofSeconds(5))
                 .build();
@@ -272,7 +274,8 @@ class DeepSeekClientTest {
     @Test
     @DisplayName("没有 API key 时构造即失败，提示怎么配")
     void missingApiKey() {
-        Config empty = new Config(null, Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL);
+        Config empty = new Config(null, Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL,
+                ContextManager.DEFAULT_MAX_TOKENS);
         LlmException e = assertThrows(LlmException.class, () -> new DeepSeekClient(empty));
         assertTrue(e.getMessage().contains("DEEPSEEK_API_KEY"));
     }

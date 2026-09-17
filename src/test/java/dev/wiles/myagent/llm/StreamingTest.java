@@ -2,6 +2,7 @@ package dev.wiles.myagent.llm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.config.Config;
+import dev.wiles.myagent.context.ContextManager;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -45,7 +46,8 @@ class StreamingTest {
         server = new MockWebServer();
         server.start();
         client = new DeepSeekClient(
-                new Config("sk-test", server.url("/").toString(), "deepseek-chat"),
+                new Config("sk-test", server.url("/").toString(), "deepseek-chat",
+                        ContextManager.DEFAULT_MAX_TOKENS),
                 new OkHttpClient.Builder().callTimeout(Duration.ofSeconds(5)).build());
     }
 

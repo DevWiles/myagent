@@ -37,8 +37,27 @@ public final class ContextManager {
 
     private static final Logger log = LoggerFactory.getLogger(ContextManager.class);
 
-    /** DeepSeek 对话模型的上下文窗口。换模型记得改这里。 */
+    /**
+     * 上下文窗口的默认值，按 DeepSeek 对话模型来。
+     *
+     * <p>可以用 {@code MYAGENT_CONTEXT_TOKENS} 或 config.json 的 {@code contextTokens} 改，
+     * 见 {@code Config}。做成可配不只是为了换模型——<b>压缩这条路本来没法验证</b>：
+     * 64,000 的 75% 是 48,000 token，手工聊不到那个量，
+     * 于是「压缩时顺手捡记忆」只有单元测试，没有一次真实运行证据。
+     */
     public static final int DEFAULT_MAX_TOKENS = 64_000;
+
+    /**
+     * 配得再小也不能低于这个数，否则压缩会压了等于没压。
+     *
+     * <p>这个下限是算出来的，不是拍的。压缩的目标预算是
+     * {@code maxTokens × TARGET_RATIO(0.4) − 工具菜单}，而工具菜单实测约 700 token
+     * （5 个内置工具；带上 remember/recall 约 1,200）。代进去：
+     * 4,000 × 0.4 − 1,200 = 400 token 才是留给历史的空间，已经是勉强能用的下限。
+     * 再低下去这个预算就是负数，{@code findSafeCutPoint} 会把能丢的全丢光，
+     * 而压完还是超标——会话表现为每轮都在压缩，且什么都记不住。
+     */
+    public static final int MIN_MAX_TOKENS = 4_000;
     /** 用到这个比例就动手。留足余量，因为 token 是估出来的，不是数出来的。 */
     public static final double DEFAULT_COMPACT_RATIO = 0.75;
     /** 压缩后希望降到的比例。降得太浅会导致刚压完没几轮又要压。 */

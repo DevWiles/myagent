@@ -160,7 +160,8 @@ public final class Repl {
 
         Config loaded = Config.load();
         this.config = options.model() == null ? loaded
-                : new Config(loaded.apiKey(), loaded.baseUrl(), options.model());
+                : new Config(loaded.apiKey(), loaded.baseUrl(), options.model(),
+                        loaded.contextTokens());
 
         this.workspace = new Workspace(options.workspace());
         // raw 模式拿不到就退化成按行读，管道和重定向下都是这条路径
@@ -223,7 +224,8 @@ public final class Repl {
      * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
      */
     private ContextManager contextManager(boolean readOnly) {
-        ContextManager context = new ContextManager();
+        ContextManager context =
+                new ContextManager(config.contextTokens(), ContextManager.DEFAULT_COMPACT_RATIO);
         if (readOnly) {
             return context;
         }
