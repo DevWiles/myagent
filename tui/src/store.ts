@@ -32,6 +32,10 @@ export type PlanTask = {
   id: string
   type: string
   description: string
+  /** 做到什么算完。可能没有——老计划里没这个字段。 */
+  acceptance?: string
+  /** 这一步是失败后补出来的救场任务。面板上要和原计划的步骤区分开。 */
+  recovery?: boolean
   /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
   status: string
   parentId: string | null
@@ -88,6 +92,8 @@ export type ReadyInfo = {
   workspaceWarning?: string
   /** 审计日志的位置。退出时的收尾信息要用它。 */
   auditLog?: string
+  /** 上次没跑完的计划。没有就是 undefined。 */
+  resumable?: { goal: string; remaining: number; total: number; savedAt: number }
 }
 
 export type SessionState = {
@@ -102,6 +108,17 @@ export type SessionState = {
   approval: Approval | null
   /** 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。 */
   planConfirm: { id: number } | null
+  /**
+   * 底部那块计划面板该显示哪份计划，指向 entries 里的某条 plan。
+   *
+   * **存 key 而不是存一份 PlanData**：计划在 transcript 里已经有一份了，
+   * 再复制一份到 state 上，两处各更新各的，迟早对不上——而这种不一致的表现是
+   * 「面板上还是 PENDING，往上滚那份已经打勾了」，看着像 bug 其实是设计错了。
+   *
+   * 生命周期：plan_created 时指上，**用户发下一句话时清掉**。
+   * 所以跑完的计划会一直留在屏幕底下，不会刚看完就消失。
+   */
+  activePlanKey: string | null
   tokens: number
   contextLimit: number
   /** 上一轮耗时，画在状态栏上。 */
@@ -119,6 +136,7 @@ const EMPTY_STATE: SessionState = {
   step: 0,
   approval: null,
   planConfirm: null,
+  activePlanKey: null,
   tokens: 0,
   contextLimit: 0,
   lastDurationMs: null,
@@ -193,7 +211,17 @@ export class SessionStore {
       entries: [...this.state.entries, { kind: 'user', key: this.nextKey('user'), text }],
       step: 0,
       startedAt: Date.now(),
+      // 说下一句了，底部那块计划面板该让位——上一份计划的痕迹在 transcript 里还留着
+      activePlanKey: null,
     })
+  }
+
+  /** 去掉「上次有计划没跑完」那条，其余 ready 信息原样保留。 */
+  private clearResumable(): ReadyInfo | null {
+    const ready = this.state.ready
+    if (!ready?.resumable) return ready
+    const { resumable, ...rest } = ready
+    return rest
   }
 
   /** 本地提示（错误、帮助、连接状态）。不经过后端。 */
@@ -260,6 +288,7 @@ export class SessionStore {
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
+            resumable: event.resumable,
           },
           busy: event.busy,
           tokens: event.tokens ?? 0,
@@ -396,15 +425,26 @@ export class SessionStore {
         this.notice('error', event.message)
         return
 
+      case 'mode_switched': {
+        // 用一条普通提示带过，不占计划面板的位置——它马上就要出来了。
+        // 要紧的是把「凭什么这么判」摆出来：用户发的是一句话，屏幕上却冒出个计划，
+        // 不说清楚他只会觉得莫名其妙，也没机会说「不用，直接做」
+        this.notice('info', event.reason ? `${event.reason}，先拆个计划` : '这件事先拆个计划')
+        return
+      }
+
       case 'plan_created': {
         const key = this.nextKey('plan')
         this.planKey = key
+        // 提示该收了：存档要么刚被续上，要么正被这份新计划覆盖，
+        // 留着它会指向一份已经不存在的进度
+        this.set({ activePlanKey: key, ready: this.clearResumable() })
         this.append({
           kind: 'plan',
           key,
           plan: {
             goal: event.goal,
-            tasks: event.tasks.map(fromWire),
+            tasks: event.tasks.map(task => fromWire(task)),
             layers: event.layers,
             status: 'CREATED',
           },
@@ -435,9 +475,23 @@ export class SessionStore {
         this.updatePlan(plan => {
           const tasks = [...plan.tasks]
           let at = tasks.findIndex(task => task.id === event.parentId)
-          if (at < 0) return { ...plan, tasks: [...tasks, ...event.tasks.map(fromWire)] }
+          if (at < 0) return { ...plan, tasks: [...tasks, ...event.tasks.map(task => fromWire(task))] }
           while (at + 1 < tasks.length && tasks[at + 1]?.parentId === event.parentId) at++
-          tasks.splice(at + 1, 0, ...event.tasks.map(fromWire))
+          tasks.splice(at + 1, 0, ...event.tasks.map(task => fromWire(task)))
+          return { ...plan, tasks }
+        })
+        return
+      }
+
+      case 'plan_revised': {
+        // 改道：补救任务接在**失败的那一步**后面，而不是甩到末尾。
+        // 甩到末尾的话，用户得自己在一堆步骤里找「这几个是来救谁的」
+        this.updatePlan(plan => {
+          const tasks = [...plan.tasks]
+          const at = tasks.findIndex(task => task.id === event.failedTaskId)
+          const recovered = event.tasks.map(task => fromWire(task, true))
+          if (at < 0) return { ...plan, tasks: [...tasks, ...recovered] }
+          tasks.splice(at + 1, 0, ...recovered)
           return { ...plan, tasks }
         })
         return
@@ -464,13 +518,22 @@ export class SessionStore {
   }
 }
 
-function fromWire(task: PlanTaskWire): PlanTask {
+/**
+ * ⚠️ **调用时不要写 `map(fromWire)`**，要写 `map(task => fromWire(task))`。
+ *
+ * Array.map 会把 (元素, 下标, 数组) 三个参数全传进来，于是下标就成了第二个参数 recovery——
+ * 第 0 个任务侥幸没事（0 是 falsy），第 1 个开始全被标成救场任务。
+ * 这种错不会报错，只会让面板上凭空多出一堆「改道」标记。
+ */
+function fromWire(task: PlanTaskWire, recovery = false): PlanTask {
   return {
     id: task.id,
     type: task.type,
     description: task.description,
+    acceptance: task.acceptance ?? undefined,
     status: task.status,
     parentId: task.parentId ?? null,
     dependsOn: task.dependsOn ?? [],
+    ...(recovery ? { recovery: true } : {}),
   }
 }

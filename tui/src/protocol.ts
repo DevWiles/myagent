@@ -17,6 +17,8 @@ export type PlanTaskWire = {
   id: string
   type: string
   description: string
+  /** 做到什么算这一步完成。老计划里可能是 null。 */
+  acceptance?: string | null
   status: string
   parentId: string | null
   dependsOn: string[]
@@ -40,6 +42,12 @@ export type ServerEvent =
       workspaceWarning?: string
       /** 审计日志的位置。界面退出时显示给用户，好让人知道去哪儿查这趟做了什么。 */
       auditLog?: string
+      /**
+       * 这个工作区上次没跑完的计划。没有就没这个字段。
+       *
+       * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
+       */
+      resumable?: { goal: string; remaining: number; total: number; savedAt: number }
       tools: ToolInfo[]
     }
   /** 第 step 轮开始，正在等模型响应。 */
@@ -77,6 +85,18 @@ export type ServerEvent =
     }
   /** PLANNING 任务拆出了子任务，图长大了。就地插到父任务下面，别重画整张图。 */
   | { t: 'plan_tasks_added'; parentId: string; tasks: PlanTaskWire[] }
+  /**
+   * 某一步失败后，后端补出了一批救场任务。这是**改道**，
+   * 和 plan_tasks_added 的「计划照常长大」不是一回事，面板上该看得出区别。
+   */
+  | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
+  /**
+   * 一条 prompt 被自动改走规划了，reason 是后端给的判断依据。
+   *
+   * 不显示它的话，用户发的是普通一句话、屏幕上却冒出个计划面板——
+   * 他会完全不知道发生了什么，也没机会说「不用，直接做」。
+   */
+  | { t: 'mode_switched'; mode: string; reason: string }
   /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
   | {
       t: 'plan_finished'
@@ -85,6 +105,8 @@ export type ServerEvent =
       failed?: number
       skipped?: number
       durationMs?: number
+      /** 中途重规划了几次。COMPLETED 且大于 0，说明绕过弯但目标达成了。 */
+      replans?: number
     }
 
 // ------------------------------------------------------------ 客户端 → 服务端
@@ -94,6 +116,8 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 export type ClientCommand =
   | { t: 'prompt'; text: string }
   | { t: 'plan'; goal: string }
+  /** 接着跑上次没跑完的计划。没有存档时后端回 error。 */
+  | { t: 'resume' }
   | { t: 'plan_confirm_reply'; id: number; approved: boolean }
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }

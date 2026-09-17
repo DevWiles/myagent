@@ -39,6 +39,34 @@ public interface LlmClient {
         return response;
     }
 
+    /**
+     * 要求服务端保证输出是合法 JSON（见 {@link ResponseFormat}）。
+     *
+     * <p>做成 default 空实现而不是抽象方法：这是<b>可选的优化</b>，不是所有后端都支持，
+     * 也不是所有实现都该被迫处理它。不支持的实现原样返回自己，上层照跑不误——
+     * 反正解析失败还有回灌重试兜着。测试里的假客户端也因此一行都不用改。
+     *
+     * @return 自己，便于链式调用
+     */
+    default LlmClient jsonMode(boolean on) {
+        return this;
+    }
+
+    /** 采样温度。结构化输出该压低，闲聊该放开，所以得能按用途分别设。 */
+    default LlmClient temperature(double value) {
+        return this;
+    }
+
+    /**
+     * 单次回答的 token 上限。
+     *
+     * <p>开了 JSON 模式就<b>必须</b>设这个：输出被截断时，服务端可能一直吐空白，
+     * 不封顶就会一路烧到额度见底。
+     */
+    default LlmClient maxTokens(int value) {
+        return this;
+    }
+
     /** 当前使用的模型名，用于展示和日志。 */
     String modelName();
 

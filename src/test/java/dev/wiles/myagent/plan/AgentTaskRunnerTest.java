@@ -249,8 +249,8 @@ class AgentTaskRunnerTest {
         llm.reply = messages -> isSubPlanRequest(messages)
                 ? """
                 {"tasks": [
-                  {"id": "t1.1", "type": "FILE_WRITE", "description": "改 A", "dependsOn": []},
-                  {"id": "t1.2", "type": "VERIFICATION", "description": "跑测试", "dependsOn": ["t1.1"]}
+                  {"id": "t1.1", "type": "FILE_WRITE", "description": "改 A", "acceptance": "改 A——做完了", "dependsOn": []},
+                  {"id": "t1.2", "type": "VERIFICATION", "description": "跑测试", "acceptance": "跑测试——做完了", "dependsOn": ["t1.1"]}
                 ]}
                 """
                 : "看下来要改两处";

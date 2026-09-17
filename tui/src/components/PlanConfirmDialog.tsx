@@ -29,7 +29,7 @@ export function PlanConfirmDialog() {
       </text>
 
       <box paddingTop={1}>
-        <text fg={theme.subtle}>计划在上方——往上滚可以完整过一遍再决定</text>
+        <text fg={theme.subtle}>计划就在下面的面板里，步骤多的话往上滚有完整版</text>
       </box>
 
       <box flexDirection="row" paddingTop={1}>

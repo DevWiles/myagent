@@ -89,6 +89,61 @@ class DeepSeekClientTest {
     }
 
     @Test
+    @DisplayName("开了 JSON 模式，报文里带上 response_format，让服务端保证输出合法")
+    void jsonModeIsSentToTheServer() throws Exception {
+        server.enqueue(jsonResponse("""
+                {"id": "c", "model": "deepseek-chat",
+                 "choices": [{"index": 0,
+                   "message": {"role": "assistant", "content": "{\\"goal\\":\\"x\\"}"},
+                   "finish_reason": "stop"}]}
+                """));
+
+        client.jsonMode(true).temperature(0.2).maxTokens(4096)
+                .chat(List.of(ChatMessage.user("输出一个 JSON")));
+
+        JsonNode sent = MAPPER.readTree(server.takeRequest().getBody().readUtf8());
+        assertEquals("json_object", sent.get("response_format").get("type").asText());
+        assertEquals(0.2, sent.get("temperature").asDouble(), 1e-9);
+        assertEquals(4096, sent.get("max_tokens").asInt());
+    }
+
+    @Test
+    @DisplayName("没开 JSON 模式时 response_format 整个字段都不出现——有网关不认 type:text")
+    void responseFormatAbsentByDefault() throws Exception {
+        server.enqueue(jsonResponse("""
+                {"id": "c", "model": "deepseek-chat",
+                 "choices": [{"index": 0,
+                   "message": {"role": "assistant", "content": "好"},
+                   "finish_reason": "stop"}]}
+                """));
+
+        client.chat(List.of(ChatMessage.user("你好")));
+
+        JsonNode sent = MAPPER.readTree(server.takeRequest().getBody().readUtf8());
+        assertFalse(sent.has("response_format"), sent.toString());
+    }
+
+    @Test
+    @DisplayName("JSON 模式关得掉——同一个客户端换个用途还能用")
+    void jsonModeCanBeTurnedOff() throws Exception {
+        for (int i = 0; i < 2; i++) {
+            server.enqueue(jsonResponse("""
+                    {"id": "c", "model": "deepseek-chat",
+                     "choices": [{"index": 0,
+                       "message": {"role": "assistant", "content": "好"},
+                       "finish_reason": "stop"}]}
+                    """));
+        }
+
+        client.jsonMode(true).chat(List.of(ChatMessage.user("一")));
+        server.takeRequest();
+
+        client.jsonMode(false).chat(List.of(ChatMessage.user("二")));
+        JsonNode sent = MAPPER.readTree(server.takeRequest().getBody().readUtf8());
+        assertFalse(sent.has("response_format"), sent.toString());
+    }
+
+    @Test
     @DisplayName("工具调用：工具清单正确发出，模型返回的 tool_calls 被正确解析")
     void toolCall() throws Exception {
         server.enqueue(jsonResponse("""

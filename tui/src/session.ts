@@ -22,6 +22,8 @@ export type Session = {
   prompt: (text: string) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string) => void
+  /** 接着跑上次没跑完的计划。后端没宣告 resume 能力、或没有存档时不要调。 */
+  resume: () => void
   /** 回应审批请求。 */
   approve: (id: number, decision: "yes" | "no" | "always") => void
   /** 回应计划确认。 */
@@ -152,6 +154,12 @@ export function createSession(options: BackendOptions): Session {
     plan(goal) {
       store.submitPrompt(`/plan ${goal}`)
       backend?.send({ t: "plan", goal })
+    },
+    resume() {
+      // 和 prompt 一样先记一条：从按回车到后端把计划捞回来有肉眼可见的停顿，
+      // 屏幕上什么都不留的话像是按键丢了
+      store.submitPrompt("/resume")
+      backend?.send({ t: "resume" })
     },
     approve(id, decision) {
       // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，

@@ -1,7 +1,7 @@
 /**
  * 顶层界面。
  *
- * 布局自上而下：欢迎框 → 对话区 → 输入框 → 状态栏。
+ * 布局自上而下：欢迎框 → 对话区 → 输入框 → 计划面板 → 状态栏。
  * 伸缩交给 Yoga 算，不自己数行数——自己算视口高度是 Ink 版早期踩过的坑，
  * 终端一缩放就错位。
  *
@@ -20,6 +20,7 @@ import { dark, ThemeProvider } from "../theme.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
+import { PlanPanel } from "./PlanPanel.tsx"
 import { PromptInput } from "./PromptInput.tsx"
 import { StatusLine } from "./StatusLine.tsx"
 import { Welcome } from "./Welcome.tsx"
@@ -58,6 +59,36 @@ export function App(props: AppProps) {
   })
 
   const workspace = () => tildify(state().ready?.workspace ?? props.options.workspace)
+
+  /**
+   * 底部面板要显示的那份计划。
+   *
+   * <p>从 transcript 里按 key 取，而不是另存一份——两份状态各更新各的，
+   * 迟早出现「面板上还是 PENDING，滚上去那份已经打勾了」。
+   */
+  const activePlan = () => {
+    const key = state().activePlanKey
+    if (!key) return null
+    const entry = state().entries.find(item => item.key === key)
+    return entry && entry.kind === "plan" ? entry.plan : null
+  }
+
+  /**
+   * 分给计划面板的行数。
+   *
+   * <p>面板占的每一行都是从对话区身上抢的，所以给它一个**硬预算**：屏幕的四成，
+   * 再多也不超过 16 行。没有上限的话，一份十几步的计划能把对话区挤到只剩一条缝——
+   * 而用户这时候想看的恰恰是正在跑的那一步的输出。
+   */
+  const planRows = () => Math.max(4, Math.min(16, Math.floor(dimensions().height * 0.4)))
+
+  /**
+   * 后端说这个工作区有没跑完的计划，而且它确实支持续跑。
+   *
+   * <p>两个条件都要查：老后端没有 resume 能力，这时候放出入口只会让用户敲了没反应。
+   */
+  const canResume = () =>
+    Boolean(state().ready?.resumable) && Boolean(state().ready?.features.includes("resume"))
 
   /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
   const pending = () => state().approval !== null || state().planConfirm !== null
@@ -148,6 +179,20 @@ export function App(props: AppProps) {
           </scrollbox>
         </box>
 
+        {/* 上次没跑完的计划。摆在输入框上方而不是塞进欢迎框里——
+            欢迎框会被对话顶上去滚走，而这条得一直看得见：
+            后端在「被叫停」之后是留着存档的，用户随时可能回来接着跑 */}
+        <Show when={canResume() && !state().busy}>
+          <box flexShrink={0} paddingLeft={1} flexDirection="row">
+            <text fg={dark.warning}>⏸ 上次有一份计划没跑完：</text>
+            <text fg={dark.text}>{state().ready!.resumable!.goal}</text>
+            <text fg={dark.subtle}>
+              （还剩 {state().ready!.resumable!.remaining} /{" "}
+              {state().ready!.resumable!.total} 步，输入 /resume 接着跑）
+            </text>
+          </box>
+        </Show>
+
         {/* 没有 API key 时先说清楚，否则用户发一句话才看到报错 */}
         <Show when={state().ready && !state().ready!.hasApiKey}>
           <box paddingLeft={1}>
@@ -189,9 +234,24 @@ export function App(props: AppProps) {
             // /plan 开头走规划模式，但后端没宣告 plan 能力时退回普通对话
             const planGoal = value.startsWith("/plan ") ? value.slice(6).trim() : null
             if (planGoal && state().ready?.features.includes("plan")) session.plan(planGoal)
+            else if (value.trim() === "/resume" && canResume()) session.resume()
             else session.prompt(value)
           }}
         />
+
+        {/* 计划面板钉在输入框下边：出现时把输入框往上顶，
+            执行完不收走——用户说下一句话才让位（见 store 的 activePlanKey） */}
+        <Show when={activePlan()}>
+          {(plan) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <PlanPanel
+                plan={plan()}
+                columns={dimensions().width - 2}
+                maxRows={planRows()}
+              />
+            </box>
+          )}
+        </Show>
 
         <StatusLine
           model={state().ready?.model ?? "未连接"}
