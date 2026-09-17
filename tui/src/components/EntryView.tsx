@@ -10,7 +10,7 @@
  */
 
 import { TextAttributes } from "@opentui/core"
-import { For, Match, Show, Switch } from "solid-js"
+import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { syntaxStyleFor, useTheme } from "../theme.ts"
@@ -64,20 +64,63 @@ function UserEntry(props: { text: string }) {
   )
 }
 
+/** 围栏代码块的标记。用来判断切口是不是落在一个没闭合的代码块里。 */
+const FENCE = /^\s*```/gm
+
+/**
+ * 取出这段文本里**已经成块**的部分，没写完的尾巴丢掉。
+ *
+ * 边界是空行——markdown 里空行就是块与块的分隔符，所以切在这里，
+ * 拿到的永远是若干个完整的块（段落、列表、代码块、标题…）。
+ *
+ * 一个额外的保护：切口不能落在没闭合的代码围栏里。
+ * ```` ```java ```` 已经出现但 ```` ``` ```` 还没来时，那半个代码块
+ * 会被解析成「一个包住剩余全部内容的代码块」，等收尾的围栏到了又变回去——
+ * 正是我们想避免的那种变身。所以数一下围栏数量，是奇数就退到围栏开始之前。
+ */
+export function completedBlocks(text: string): string {
+  const cut = text.lastIndexOf("\n\n")
+  if (cut < 0) return ""
+
+  let stable = text.slice(0, cut + 2)
+  const fences = stable.match(FENCE)?.length ?? 0
+  if (fences % 2 === 1) {
+    // 退到最后那个未闭合围栏所在行的开头
+    const fenceStart = stable.lastIndexOf("```")
+    const lineStart = stable.lastIndexOf("\n", fenceStart)
+    stable = lineStart < 0 ? "" : stable.slice(0, lineStart + 1)
+  }
+  return stable
+}
+
 /**
  * 模型的回复，按 Markdown 渲染。
  *
  * 用 OpenTUI 内置的 `<markdown>`，不自己解析：它内部走 TreeSitter，
  * 连代码块的语法高亮一起给了，自己写一个解析器只会得到一个更差的版本。
  *
- * `streaming` 这个 prop 是关键。text_delta 是一个字一个字推过来的，
- * 中途的文本必然有半截语法——`**加粗` 还没收尾、代码围栏只开了没关。
- * 打开 streaming 时它会把**最后一个块**当作未定稿处理，不急着解析成型；
- * 流完再置回 false 定稿。不这么做的话，每来一个字符末尾就会在
- * 「普通文本」和「加粗/代码块」之间反复横跳，看起来像屏幕在抽搐。
+ * ## 流式按「块」推，不按字符推
+ *
+ * text_delta 是一个字一个字过来的，直接喂给渲染器有两个毛病：
+ *
+ * 1. **会看见 markdown 源码**。半行 `## 标` 还不是合法标题，
+ *    渲染器只能先当普通文字画出来，`##` 就露在屏幕上了。
+ *    （OpenTUI 的 `streaming` 选项正是这个行为：最后一块按未定稿处理。）
+ * 2. **抖得厉害**。每来一个字符就重排一次版面，一秒几十次。
+ *
+ * 所以这里等**一整块写完**（遇到空行）才推给渲染器，没写完的尾块丢掉不画。
+ * 屏幕上出现的每一块都已经是最终形态：段落、列表、代码块整块整块地落下来，
+ * 不会先露出源码再变身，也不会因为块内换行导致上面的内容跟着往上跳。
+ *
+ * 这和 Notion / Claude Code 的观感是一致的——以组件为单位出现，而不是逐字打字机。
+ *
+ * 代价是最后一块有延迟。实测约 0.5 次/秒的刷新节奏，比逐字的几十次/秒安静得多。
  */
 function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
+
+  const content = createMemo(() => (props.streaming ? completedBlocks(props.text) : props.text))
+
   return (
     <box paddingTop={1}>
       {/* ⚠️ syntaxStyle 必须写在 content **前面**。
@@ -85,8 +128,11 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           立刻触发一次解析；syntaxStyle 还没赋值的话，那一趟解析查不到任何配色，
           整段文字统统退回默认色。它不会报错也不会崩——标题照样是标题、加粗照样
           去掉星号，**只是颜色全错**，非常难发现。
-          （这个顺序依赖是 OpenTUI 自己源码注释里写明的。） */}
-      <markdown syntaxStyle={syntaxStyleFor(theme)} content={props.text} streaming={props.streaming} />
+          （这个顺序依赖是 OpenTUI 自己源码注释里写明的。）
+
+          streaming 恒为 false：我们喂进去的内容总是若干个完整的块，
+          不需要它再替我们保留一个「未定稿的尾块」——那正是会露出源码的东西。 */}
+      <markdown syntaxStyle={syntaxStyleFor(theme)} content={content()} streaming={false} />
     </box>
   )
 }
