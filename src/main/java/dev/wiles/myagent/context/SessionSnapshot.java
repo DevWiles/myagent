@@ -28,22 +28,39 @@ import java.util.List;
  * 拿到别的项目里接着说，模型会拿 A 项目的结论去改 B 项目。
  * model 只用来在提示语里告诉用户「上次是用哪个模型聊的」，不做拦截。
  *
+ * <h3>为什么要记 id</h3>
+ * 一个工作区下并排躺着多份会话（见 {@link SessionStore}），
+ * 而每聊一轮都要往<b>自己那一份</b>里回写。id 只写在文件名上是不够的：
+ * 文件被手工拷过、改过名之后，内容和名字就对不上了，
+ * 而这种串档的现象是「续聊续出了另一段对话」，比读不出来难查得多。
+ * 所以名字里有、内容里也有，{@code load} 时两边对一道。
+ *
  * @param format   存档格式版本。对不上就当没有——宁可重来，也不能按旧结构解析出错误的历史
+ * @param id       会话 id，同时是文件名，见 {@link SessionId}
  * @param workspace 存档属于哪个工作区，绝对路径
  * @param model    上次用的模型
- * @param savedAt  存的时刻，epoch 毫秒
+ * @param startedAt 这段对话最早那一句的时刻，epoch 毫秒
+ * @param savedAt  最后一次存盘的时刻，epoch 毫秒
  * @param messages 对话内容，<b>不含 system</b>
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SessionSnapshot(
         int format,
+        String id,
         String workspace,
         String model,
+        long startedAt,
         long savedAt,
         List<ChatMessage> messages) {
 
-    /** 当前格式版本。改了消息结构就把它 +1，老存档会被自动忽略。 */
-    public static final int FORMAT = 1;
+    /**
+     * 当前格式版本。改了消息结构就把它 +1，老存档会被自动忽略。
+     *
+     * <p>2：一个工作区从「一份档」改成「一份一个会话」，多了 {@code id} 和
+     * {@code startedAt}。格式 1 的老档不是丢掉，而是由
+     * {@link SessionStore} 收成历史里的一条会话。
+     */
+    public static final int FORMAT = 2;
 
     public SessionSnapshot {
         messages = List.copyOf(messages == null ? List.of() : messages);
@@ -54,20 +71,25 @@ public record SessionSnapshot(
      *
      * @param history 完整历史，<b>包含</b> index 0 的 system；这里会把它摘掉
      */
-    public static SessionSnapshot of(List<ChatMessage> history, Path workspace,
-                                     String model, long now) {
+    public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
+                                     String model, long startedAt, long now) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
-        return new SessionSnapshot(FORMAT,
+        return new SessionSnapshot(FORMAT, id,
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
-                model, now, conversation);
+                model, startedAt, now, conversation);
     }
 
-    /** 格式对得上、而且确实有内容可恢复。 */
+    /**
+     * 格式对得上、id 能用、而且确实有内容可恢复。
+     *
+     * <p>id 不合格也算不可恢复：接着聊的每一轮都要往这份档里回写，
+     * 而回写要拿 id 拼文件名。恢复得了却存不回去，等于这段对话再也不会被保存。
+     */
     @JsonIgnore
     public boolean isRestorable() {
-        return format == FORMAT && !messages.isEmpty();
+        return format == FORMAT && SessionId.isValid(id) && !messages.isEmpty();
     }
 
     /** 是这个工作区的吗。哈希可能撞，用户也可能手工拷过存档文件，所以要再验一道。 */
@@ -95,6 +117,12 @@ public record SessionSnapshot(
         return (int) restorable().stream()
                 .filter(m -> ChatMessage.ROLE_USER.equals(m.role()))
                 .count();
+    }
+
+    /** 砍成列表里的一行。正文留在这儿，别跟着摘要一起走，理由见 {@link SessionSummary}。 */
+    @JsonIgnore
+    public SessionSummary summary() {
+        return new SessionSummary(id, model, startedAt, savedAt, turns(), firstUserMessage());
     }
 
     /** 上次用户说的第一句话，用来在提示语里告诉他「上次在聊什么」。 */

@@ -5,6 +5,7 @@ import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.memory.MemoryEntry;
 import dev.wiles.myagent.memory.MemoryScope;
@@ -89,6 +90,19 @@ public final class Repl {
     private final AuditLog audit = AuditLog.forNewRun();
     /** 当前正在执行的任务 id；不在计划模式下是 null。工具调用靠它归到某个任务名下。 */
     private String currentTaskId;
+
+    /**
+     * 这次运行往<b>哪一份</b>会话存档里写。
+     *
+     * <p>一个工作区下并排放着多份会话（见 {@link SessionStore}），所以「存哪儿」
+     * 不再是个定死的答案，得有人攥着当前这一份的 id。接回一段旧会话时把它换成那段的 id，
+     * 于是后面每一轮都续在同一份上——否则接着聊的内容会另起一份，
+     * 而原来那段永远停在被接回来的那一刻。
+     */
+    private String sessionId = SessionId.create(System.currentTimeMillis());
+
+    /** 当前这段对话最早那一句的时刻。接回旧会话时要换成那段的，不能刷成现在。 */
+    private long sessionStartedAt = System.currentTimeMillis();
 
     /** 攒够一行再渲染：Markdown 的行内标记要整行到齐才能判断闭合。 */
     private final StringBuilder pendingLine = new StringBuilder();
@@ -313,7 +327,8 @@ public final class Repl {
      */
     private void saveSession() {
         if (agent != null) {
-            sessions.save(agent.history(), workspace.root(), config.model());
+            sessions.save(sessionId, agent.history(), workspace.root(),
+                    config.model(), sessionStartedAt);
         }
     }
 
@@ -329,7 +344,7 @@ public final class Repl {
             emit(noKeyMessage());
             return;
         }
-        var snapshot = sessions.peek(workspace.root());
+        var snapshot = sessions.latest(workspace.root());
         if (snapshot.isEmpty()) {
             emit(Ansi.dim("这个工作区没有可以接着聊的会话。"));
             return;
@@ -340,6 +355,9 @@ public final class Repl {
             return;
         }
         int restored = agent.restore(snapshot.get().restorable());
+        // 从这一刻起，每轮都续写在被接回来的那一份上
+        sessionId = snapshot.get().id();
+        sessionStartedAt = snapshot.get().startedAt();
         emit(Ansi.dim("接上了上次的对话（" + restored + " 条消息，"
                 + snapshot.get().turns() + " 轮）。首句是：" + snapshot.get().firstUserMessage()));
     }
@@ -844,7 +862,10 @@ public final class Repl {
                     agent.reset();
                 }
                 // 存档也得删。留着的话下次启动会提示恢复一段用户刚刚明确表示不要的对话
-                sessions.delete(workspace.root());
+                sessions.delete(workspace.root(), sessionId);
+                // 清空等于「这段不要了，从头开始」，那就是另一次会话，换个 id 重新记
+                sessionId = SessionId.create(System.currentTimeMillis());
+                sessionStartedAt = System.currentTimeMillis();
                 emit(Ansi.dim("对话历史已清空。"));
                 return true;
             }
@@ -1037,7 +1058,7 @@ public final class Repl {
         }
         // 会话存档同理：不提一句，它就等于不存在
         if (agent != null) {
-            sessions.peek(workspace.root()).ifPresent(snapshot -> {
+            sessions.latest(workspace.root()).ifPresent(snapshot -> {
                 emit(Ansi.dim("上次在这儿聊过 " + snapshot.turns() + " 轮：「"
                         + oneLine(snapshot.firstUserMessage(), Math.max(20, width - 40))
                         + "」  输入 /continue 接着聊"));

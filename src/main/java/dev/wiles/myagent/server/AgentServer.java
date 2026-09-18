@@ -7,6 +7,7 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.memory.MemoryEntry;
 import dev.wiles.myagent.memory.MemoryScope;
@@ -84,6 +85,15 @@ public final class AgentServer extends WebSocketServer {
     private final ToolRegistry tools;
     private final Agent agent;
     private final RemoteApproval approval;
+
+    /**
+     * 当前往哪一份会话存档里写，以及这段对话是什么时候开始的。
+     *
+     * <p>和 {@link dev.wiles.myagent.Repl} 里那两个字段是同一回事，理由也一样。
+     * {@code volatile}：存盘发生在 worker 线程，换 id 发生在连接线程。
+     */
+    private volatile String sessionId = SessionId.create(System.currentTimeMillis());
+    private volatile long sessionStartedAt = System.currentTimeMillis();
     /**
      * 审计轨迹。
      *
@@ -393,7 +403,8 @@ public final class AgentServer extends WebSocketServer {
                 publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
             } finally {
                 // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
-                sessions.save(agent.history(), workspace.root(), config.model());
+                sessions.save(sessionId, agent.history(), workspace.root(),
+                        config.model(), sessionStartedAt);
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
@@ -469,7 +480,7 @@ public final class AgentServer extends WebSocketServer {
             send(conn, error("正在处理中，不能恢复会话"));
             return;
         }
-        var snapshot = sessions.peek(workspace.root());
+        var snapshot = sessions.latest(workspace.root());
         if (snapshot.isEmpty()) {
             send(conn, error("这个工作区没有可以接着聊的会话"));
             return;
@@ -481,6 +492,9 @@ public final class AgentServer extends WebSocketServer {
         }
 
         int restored = agent.restore(snapshot.get().restorable());
+        // 从这一刻起，每轮都续写在被接回来的那一份上
+        sessionId = snapshot.get().id();
+        sessionStartedAt = snapshot.get().startedAt();
         ObjectNode done = Protocol.event("session_restored");
         done.put("messages", restored);
         done.put("turns", snapshot.get().turns());
@@ -554,7 +568,10 @@ public final class AgentServer extends WebSocketServer {
             agent.reset();
         }
         // 存档也得删——留着的话下次连上来还会提示恢复一段用户刚表示不要的对话
-        sessions.delete(workspace.root());
+        sessions.delete(workspace.root(), sessionId);
+        // 清空等于「这段不要了，从头开始」，那就是另一次会话，换个 id 重新记
+        sessionId = SessionId.create(System.currentTimeMillis());
+        sessionStartedAt = System.currentTimeMillis();
         approval.reset();
         publish(Protocol.event("reset_done"));
     }
@@ -616,7 +633,7 @@ public final class AgentServer extends WebSocketServer {
         });
         // 上次没聊完的对话，同理放进首帧
         if (agent != null) {
-            sessions.peek(workspace.root()).ifPresent(snapshot -> {
+            sessions.latest(workspace.root()).ifPresent(snapshot -> {
                 ObjectNode continuable = n.putObject("continuable");
                 continuable.put("turns", snapshot.turns());
                 continuable.put("messages", snapshot.restorable().size());
