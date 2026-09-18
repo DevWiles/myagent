@@ -3,6 +3,7 @@ package dev.wiles.myagent;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.audit.AuditLog;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.Interruption;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.SessionId;
@@ -313,6 +314,14 @@ public final class Repl {
         return false;
     }
 
+    /**
+     * 跑一轮：说话、存盘、断了就提一句。
+     *
+     * <p>一次性模式（{@code -p}）和交互模式都走这儿。<b>两边必须走同一个方法</b>——
+     * 这三件事里漏掉任何一件都不报错，只是悄悄少一个功能，
+     * 而「存盘漏了」的现象是「/continue 说没有会话可接」，
+     * 谁也不会想到问题出在两条路各写了一遍。
+     */
     private void runOnce(String prompt) {
         if (agent == null) {
             emit(noKeyMessage());
@@ -320,7 +329,30 @@ public final class Repl {
         }
         runInterruptible(prompt);   // 内容已经通过流式回调打印过了
         saveSession();
+        announceUnfinished();
         emit("");
+    }
+
+    /**
+     * 这一轮断在半路时提一句「还能接着干」。
+     *
+     * <p>这句话是整个断点续做里<b>用户唯一能感知到的部分</b>。机制全在下面两层：
+     * {@code Agent} 把断掉的现场封口留在历史里，{@code saveSession} 顺手存了盘。
+     * 但用户看到的只是一行「调用模型失败」——他会以为这一轮白干了，
+     * 于是把原来那句话重新打一遍，让模型把已经做完的事再做一次。
+     * 那个信息差就是这句提示要消掉的东西。
+     *
+     * <p>不需要任何关键词：说「继续」管用，是因为现场就在上下文里，
+     * 模型自己看得懂断在哪。说「接着来」「往下」一样管用。
+     */
+    private void announceUnfinished() {
+        if (agent == null) {
+            return;
+        }
+        agent.unfinished().ifPresent(broke -> emit(Ansi.yellow("⚠ ")
+                + Ansi.dim("这一轮" + broke.describe()
+                + "。已经做完的部分都留着了，说一句「继续」就接着干。")));
+
     }
 
     /**
@@ -553,8 +585,11 @@ public final class Repl {
                 emit("");
                 continue;
             }
-            runInterruptible(line);
-            emit("");
+            // 走 runOnce 而不是直接 runInterruptible：存盘和「这轮没做完」的提示都挂在它上面。
+            // 原来这里绕开了它，于是交互模式下每轮存一次根本没发生过——
+            // 盘上那些存档全是无头版（AgentServer）留下的，终端自己聊的从来没留下过。
+            // 现象是「/continue 说没有可以接着聊的会话」，而你明明刚聊了半小时
+            runOnce(line);
         }
         emit(Ansi.dim("bye."));
     }

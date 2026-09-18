@@ -109,6 +109,70 @@ public final class HistoryRepair {
         return copy(conversation, safeEnd);
     }
 
+    /**
+     * 把一轮<b>刚断在半路</b>的对话封口：残缺的地方补上说明，而不是截掉。
+     *
+     * <h3>为什么要有「补齐」这条路，{@link #repair} 不够吗</h3>
+     * 两者要的东西不一样。{@code repair} 处理的是<b>从盘上捞回来的陈年历史</b>，
+     * 目标只有「别炸」，切干净最省事。这里处理的是<b>刚刚断掉的这一轮</b>，
+     * 而这一轮的现场恰恰是最值钱的东西：断网前已经读过哪三个文件、
+     * 已经改了哪两处、卡在哪一步没做完。截掉等于把现场抹了，
+     * 用户说一句「继续」时，模型的上下文里什么都没有，只能从头再猜一遍。
+     *
+     * <p>补齐同样能满足那条硬约束（每个 {@code tool_call} 都有对应结果），
+     * 只不过结果的内容是「(中断，这一步没有执行)」。
+     * 模型读到这条就明白：这一步是被打断的，不是做过的。
+     *
+     * <h3>为什么末尾一定要收成一条 assistant 消息</h3>
+     * 断点可能停在 user 消息上（请求都没发出去就断网了）。那样历史末尾是 user，
+     * 用户再说一句「继续」就成了连续两条 user——多数模型忍得下，
+     * 但 reasoner 一类对消息交替有硬要求的会直接拒。所以补一条 assistant，
+     * 由「模型自己」交代这轮断了：既保住了交替，也让续做的意图写在上下文里。
+     *
+     * @param note 断的原因，会出现在补齐的消息里，比如「网络错误」「已取消」
+     * @return 新的 list，原 list 不动
+     */
+    public static List<ChatMessage> seal(List<ChatMessage> conversation, String note) {
+        if (conversation == null || conversation.isEmpty()) {
+            return List.of();
+        }
+        String reason = note == null || note.isBlank() ? "中断" : note.strip();
+        List<ChatMessage> sealed = new ArrayList<>(conversation);
+
+        // 一、补齐所有没等到结果的 tool_call
+        Set<String> answered = new HashSet<>();
+        for (ChatMessage message : sealed) {
+            if (ChatMessage.ROLE_TOOL.equals(message.role()) && message.toolCallId() != null) {
+                answered.add(message.toolCallId());
+            }
+        }
+        for (ChatMessage message : List.copyOf(sealed)) {
+            for (ToolCall call : message.toolCallsOrEmpty()) {
+                if (!answered.contains(call.id())) {
+                    sealed.add(ChatMessage.toolResult(call.id(),
+                            "(" + reason + "，这一步没有执行)"));
+                }
+            }
+        }
+
+        // 二、末尾收成一条「模型说的话」，下一句用户输入才接得上
+        ChatMessage last = sealed.get(sealed.size() - 1);
+        if (!ChatMessage.ROLE_ASSISTANT.equals(last.role()) || last.hasToolCalls()) {
+            sealed.add(ChatMessage.assistant("(上一轮" + reason + "，没有做完)"));
+        }
+
+        // 三、兜底。补齐只在「残缺都在末尾」时成立，而那是 Agent 循环的形状决定的，
+        // 不是这个函数能保证的。万一补完还是不自洽，退回截断——
+        // 丢掉现场总比留一个每次请求都 400 的定时炸弹好
+        if (!isIntact(sealed)) {
+            log.warn("封口后历史仍不自洽（{} 条），退回截断", sealed.size());
+            List<ChatMessage> fallback = new ArrayList<>(repair(conversation));
+            fallback.add(ChatMessage.assistant("(上一轮" + reason + "，没有做完)"));
+            return fallback;
+        }
+        return sealed;
+    }
+
     /** 这段历史本来就是自洽的吗——修完还是原样，就说明没动过刀。 */
     public static boolean isIntact(List<ChatMessage> conversation) {
         return repair(conversation).size() == (conversation == null ? 0 : conversation.size());

@@ -139,4 +139,78 @@ class HistoryRepairTest {
         HistoryRepair.repair(broken);
         assertEquals(before, broken.size());
     }
+
+    // ---------- seal：把刚断掉的这一轮封口，而不是截掉 ----------
+
+    @Test
+    @DisplayName("没等到结果的 tool_call 被补上说明，现场一条不丢")
+    void fillsInMissingToolResults() {
+        List<ChatMessage> broken = new java.util.ArrayList<>();
+        broken.add(ChatMessage.user("改三个文件"));
+        broken.add(callsTools("c1", "c2"));
+        broken.add(ChatMessage.toolResult("c1", "第一个改好了"));   // c2 的结果永远不会来
+
+        List<ChatMessage> sealed = HistoryRepair.seal(broken, "网络错误");
+
+        assertTrue(HistoryRepair.isIntact(sealed), "封口之后必须自洽，否则下一句话发不出去");
+        assertEquals("改三个文件", sealed.get(0).content());
+        assertEquals("第一个改好了", sealed.get(2).content(), "已经做完的那一步得留着");
+        ChatMessage filled = sealed.get(3);
+        assertEquals(ChatMessage.ROLE_TOOL, filled.role());
+        assertEquals("c2", filled.toolCallId());
+        assertTrue(filled.content().contains("没有执行"),
+                "内容要说清这一步是被打断的，不是做过的——不然模型会当成已完成");
+    }
+
+    @Test
+    @DisplayName("末尾收成一条 assistant：用户下一句才不会变成连续两条 user")
+    void endsOnAnAssistantMessage() {
+        List<ChatMessage> nothingHappened = List.of(ChatMessage.user("干活"));
+
+        List<ChatMessage> sealed = HistoryRepair.seal(nothingHappened, "连不上");
+
+        assertEquals(2, sealed.size());
+        assertEquals(ChatMessage.ROLE_ASSISTANT, sealed.get(1).role());
+        assertTrue(sealed.get(1).content().contains("连不上"));
+        assertFalse(sealed.get(1).hasToolCalls());
+    }
+
+    @Test
+    @DisplayName("已经收口的历史不再多加一句——没断的东西不用封")
+    void doesNotDoubleSealAFinishedTurn() {
+        List<ChatMessage> done = completeTurn("call-1");
+        assertEquals(done, HistoryRepair.seal(done, "网络错误"));
+    }
+
+    @Test
+    @DisplayName("补完还是不自洽（残缺在中间）就退回截断——丢现场也比留个定时炸弹好")
+    void fallsBackToTruncationWhenSealingCannotFixIt() {
+        List<ChatMessage> weird = new java.util.ArrayList<>(completeTurn("call-1"));
+        weird.add(callsTools("call-2"));          // 点了工具
+        weird.add(ChatMessage.user("又说了一句"));  // 结果没回来就接了别的，残缺卡在中间
+        weird.add(ChatMessage.assistant("好"));
+
+        List<ChatMessage> sealed = HistoryRepair.seal(weird, "网络错误");
+
+        assertTrue(HistoryRepair.isIntact(sealed));
+        assertTrue(sealed.size() < weird.size() + 2, "这种情况不该靠往后补来硬凑");
+        assertEquals(ChatMessage.ROLE_ASSISTANT, sealed.get(sealed.size() - 1).role());
+    }
+
+    @Test
+    @DisplayName("空的、null 的都不抛")
+    void sealHandlesNothing() {
+        assertTrue(HistoryRepair.seal(null, "网络错误").isEmpty());
+        assertTrue(HistoryRepair.seal(List.of(), "网络错误").isEmpty());
+        assertDoesNotThrow(() -> HistoryRepair.seal(completeTurn("c1"), null));
+    }
+
+    @Test
+    @DisplayName("不改传进来的那个 list——调用方手里可能是不可变的")
+    void sealDoesNotMutateTheInput() {
+        List<ChatMessage> immutable = List.of(ChatMessage.user("干活"), callsTools("c1"));
+
+        assertDoesNotThrow(() -> HistoryRepair.seal(immutable, "网络错误"));
+        assertEquals(2, immutable.size());
+    }
 }

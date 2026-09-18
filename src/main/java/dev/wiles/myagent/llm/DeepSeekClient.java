@@ -161,7 +161,7 @@ public final class DeepSeekClient implements LlmClient {
                 .build();
 
         // 流式不做重试：内容可能已经打到用户屏幕上了，重来一次会把前半段重复输出一遍。
-        // 失败就抛出去，由 Agent 统一回滚本轮对话。
+        // 失败就抛出去，由 Agent 统一把这一轮封口（现场留在历史里，用户说「继续」就能接上）。
         Call call = http.newCall(request);
         currentCall = call;
         try (Response response = call.execute()) {

@@ -8,6 +8,7 @@ import dev.wiles.myagent.llm.LlmException;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.HistoryRepair;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
@@ -219,8 +220,8 @@ class AgentTest {
     }
 
     @Test
-    @DisplayName("模型调用失败：历史回滚干净，不留下残缺消息毁掉整个会话")
-    void rollsBackOnLlmFailure() {
+    @DisplayName("断网：不回滚，把现场封口留在历史里——一句「继续」就能接着干")
+    void sealsTheSceneOnLlmFailure() {
         FakeLlm llm = new FakeLlm()
                 .calls(null, ToolCall.of("call_1", "t", "{}"))
                 .fails("限流了")
@@ -230,11 +231,91 @@ class AgentTest {
 
         String first = agent.run("干活");
         assertTrue(first.contains("限流了"));
-        assertEquals(1, agent.history().size(),
-                "失败后历史里只该剩 system —— 留下孤儿 tool_calls 会让之后每次请求都 400");
 
-        // 会话没被毁掉，还能接着用
-        assertEquals("这次好了", agent.run("再试一次"));
+        // 现场留着：用户原话、点过的工具、已经拿到的结果，一样都没少。
+        // 回滚也能保证自洽，但那样「继续」就无从接起——模型什么都看不见
+        List<ChatMessage> h = agent.history();
+        assertEquals("干活", h.get(1).content());
+        assertTrue(h.get(2).hasToolCalls());
+        assertEquals("ok", h.get(3).content(), "工具真的跑完了，结果不该被抹掉");
+        assertTrue(HistoryRepair.isIntact(agent.conversation()),
+                "留现场的前提是历史仍然自洽，否则下一句话根本发不出去");
+        assertEquals(ChatMessage.ROLE_ASSISTANT, h.get(h.size() - 1).role(),
+                "末尾要收成 assistant，用户下一句才不会变成连续两条 user");
+
+        Interruption broke = agent.unfinished().orElseThrow();
+        assertEquals("干活", broke.userInput());
+        assertEquals(2, broke.steps());
+        assertTrue(broke.reason().contains("限流了"));
+
+        // 一句「继续」就接着干，而且这次请求里带着上一轮的工具结果
+        assertEquals("这次好了", agent.run("继续"));
+        assertTrue(llm.received.get(2).stream().anyMatch(m -> "ok".equals(m.content())),
+                "续做那次请求必须带着上一轮的现场，不然模型只能从头再猜一遍");
+        assertTrue(agent.unfinished().isEmpty(), "这轮跑完了，断点不该还挂着");
+    }
+
+    @Test
+    @DisplayName("错误体是一整页 HTML 也不整页塞进历史——那东西会跟着每一次请求重发")
+    void clipsHugeErrorBodies() {
+        String wholePage = "<html><body>" + "x".repeat(5000) + "</body></html>";
+        FakeLlm llm = new FakeLlm().fails(wholePage).says("好了");
+        Agent agent = agent(llm, new ToolRegistry());
+
+        agent.run("干活");
+
+        ChatMessage note = agent.history().get(agent.history().size() - 1);
+        assertTrue(note.content().length() < 200,
+                "封口消息长到 " + note.content().length() + " 字，等于每轮白烧一遍 token");
+        assertEquals("好了", agent.run("继续"));
+    }
+
+    @Test
+    @DisplayName("请求都没发出去就断：末尾也要收成 assistant，不留连续两条 user")
+    void sealsEvenWhenNothingHappenedYet() {
+        FakeLlm llm = new FakeLlm().fails("连不上").says("这次好了");
+        Agent agent = agent(llm, new ToolRegistry());
+
+        agent.run("干活");
+
+        List<ChatMessage> h = agent.history();
+        assertEquals(3, h.size());
+        assertEquals(ChatMessage.ROLE_USER, h.get(1).role());
+        assertEquals(ChatMessage.ROLE_ASSISTANT, h.get(2).role());
+
+        assertEquals("这次好了", agent.run("继续"));
+        List<ChatMessage> resumed = llm.received.get(1);
+        assertEquals("干活", resumed.get(1).content(), "原本要干的活还在上下文里");
+        assertEquals(ChatMessage.ROLE_ASSISTANT, resumed.get(2).role());
+        assertEquals(ChatMessage.ROLE_USER, resumed.get(3).role(),
+                "user / assistant 的交替没被破坏——reasoner 一类模型对这个有硬要求");
+    }
+
+    @Test
+    @DisplayName("超限收尾那句「不要再调用工具」不留在历史里，否则续做时模型迟迟不动手")
+    void dropsTheForceConclusionScaffold() {
+        FakeLlm llm = new FakeLlm();
+        for (int i = 0; i < 2; i++) {
+            llm.calls(null, ToolCall.of("c" + i, "t", "{}"));
+        }
+        llm.says("我卡住了");          // 收尾请求的回答
+        llm.says("接着干完了");        // 用户说「继续」之后
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> ToolResult.ok("ok")));
+
+        Agent agent = new Agent(llm, tools, "sys", 2);
+        agent.run("干个没完的活");
+
+        assertTrue(agent.history().stream().noneMatch(
+                        m -> m.content() != null && m.content().contains("请不要再调用工具")),
+                "那是一次性脚手架。留着的话，续做时模型仍然看着这条禁令，"
+                        + "只描述要做什么而不动手——现象长得像「模型变笨了」");
+        assertTrue(HistoryRepair.isIntact(agent.conversation()));
+        assertEquals("达到最大步数 2", agent.unfinished().orElseThrow().reason());
+
+        agent.run("继续");
+        assertTrue(llm.received.get(3).stream().noneMatch(
+                        m -> m.content() != null && m.content().contains("请不要再调用工具")),
+                "续做那次请求里也不该有它");
     }
 
     @Test
@@ -339,8 +420,12 @@ class AgentTest {
         String answer = agent.run("干个长活");
 
         assertEquals("已取消。", answer);
-        assertEquals(1, agent.history().size(),
-                "取消常发生在「要求调工具但结果还没回填」的当口，残缺序列留下会让之后每次请求都 400");
+        assertTrue(HistoryRepair.isIntact(agent.conversation()),
+                "取消常发生在「要求调工具但结果还没回填」的当口，"
+                        + "残缺序列留下会让之后每次请求都 400");
+        assertTrue(agent.history().stream().anyMatch(m -> "做完了".equals(m.content())),
+                "第一个工具确实执行完了，按 Ctrl-C 多半是嫌它跑偏，不是要作废已经做完的部分");
+        assertEquals("已取消", agent.unfinished().orElseThrow().reason());
     }
 
     @Test

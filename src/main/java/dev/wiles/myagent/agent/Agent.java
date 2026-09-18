@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -66,6 +67,14 @@ public final class Agent {
     /** 用户按了 Ctrl-C。volatile 是因为置位的是另一个线程。 */
     private volatile boolean cancelled;
 
+    /**
+     * 上一轮断在半路的记录，没断就是 null。
+     *
+     * <p>断点本身留在历史里（见 {@link Interruption}），这个字段只是让界面
+     * 知道该不该提醒一句。下一轮正常跑完就清掉——那时候「上一轮没做完」已经不成立了。
+     */
+    private Interruption unfinished;
+
     /** 把模型的流式增量转成 agent 事件发出去。 */
     private final StreamListener stream = new StreamListener() {
         @Override
@@ -112,6 +121,17 @@ public final class Agent {
     public void reset() {
         history.clear();
         history.add(ChatMessage.system(systemPrompt));
+        unfinished = null;
+    }
+
+    /**
+     * 上一轮有没有断在半路。
+     *
+     * <p>界面靠它决定要不要提醒「说声继续就接着做」。不提醒的话，用户看到一句
+     * 「调用模型失败」会以为这一轮白干了，而现场其实还在历史里。
+     */
+    public Optional<Interruption> unfinished() {
+        return Optional.ofNullable(unfinished);
     }
 
     /**
@@ -132,7 +152,7 @@ public final class Agent {
      * @return 真正恢复了多少条（可能少于传入的，残缺部分被截掉了）
      */
     public int restore(List<ChatMessage> conversation) {
-        reset();
+        reset();        // 顺带清掉 unfinished：立起来的是另一段历史，上一段的断点不作数
         List<ChatMessage> safe = HistoryRepair.repair(conversation);
         history.addAll(safe);
         if (conversation != null && safe.size() < conversation.size()) {
@@ -158,15 +178,15 @@ public final class Agent {
      * @return 模型的最终文本答复
      */
     public String run(String userInput) {
-        // 记下起点：中途任何环节失败，都回滚到这里，保证历史永远是完整的一问一答
-        final int snapshot = history.size();
         cancelled = false;
         history.add(ChatMessage.user(userInput));
+        // 断的时候要知道跑到第几步了，所以 step 活在 try 外面
+        int step = 0;
 
         try {
-            for (int step = 1; step <= maxSteps; step++) {
+            for (step = 1; step <= maxSteps; step++) {
                 if (cancelled) {
-                    return abort(snapshot);
+                    return abort(userInput, step);
                 }
                 listener.accept(new AgentEvent.Thinking(step));
 
@@ -184,6 +204,7 @@ public final class Agent {
 
                 if (!assistant.hasToolCalls()) {
                     String text = response.text();
+                    unfinished = null;   // 这一轮走完了，「上一轮没做完」不再成立
                     listener.accept(new AgentEvent.Done(text, step));
                     return text;
                 }
@@ -197,7 +218,7 @@ public final class Agent {
                 // 漏掉任何一个，那个 tool_call_id 就永远等不到结果，下轮请求必然报错。
                 for (ToolCall call : assistant.toolCallsOrEmpty()) {
                     if (cancelled) {
-                        return abort(snapshot);
+                        return abort(userInput, step);
                     }
                     listener.accept(new AgentEvent.ToolStarted(call.name(), call.argumentsJson()));
 
@@ -212,16 +233,18 @@ public final class Agent {
             // 跑满了还没收敛。再给最后一次机会，但**不带工具**——
             // 模型没得选，只能用文字交代目前进展，循环就此收口。
             log.warn("达到最大步数 {}，强制收敛", maxSteps);
-            return forceConclusion();
+            return forceConclusion(userInput);
 
         } catch (LlmException e) {
             if (cancelled) {
-                return abort(snapshot);      // 取消导致的请求失败，不算错误
+                return abort(userInput, step);   // 取消导致的请求失败，不算错误
             }
-            // 回滚到本轮之前。宁可丢掉这次提问，也不能让残缺的消息序列留在历史里——
-            // 那会让之后**每一次**请求都失败，整个会话报废。
-            rollbackTo(snapshot);
-            log.error("模型调用失败，已回滚本轮对话", e);
+            // 不回滚，封口。残缺的消息序列绝不能留（之后每一次请求都会 400），
+            // 但「截掉」和「补齐」都能做到自洽，而补齐还留得住现场：
+            // 断网前读过哪些文件、改了哪两处、卡在哪一步，用户说一句「继续」就能接上。
+            // 回滚的代价是用户以为这一轮白干了，实际上白干的只是最后那个请求。
+            seal("网络或模型调用失败（" + brief(e.getMessage()) + "）", userInput, step);
+            log.error("模型调用失败，已把现场封口留在历史里", e);
             listener.accept(new AgentEvent.Failed(e.getMessage()));
             return "调用模型失败: " + e.getMessage();
         }
@@ -251,35 +274,79 @@ public final class Agent {
     /**
      * 被取消时的收尾。
      *
-     * 必须回滚：取消很可能发生在「assistant 已经要求调工具、但结果还没回填」的当口，
-     * 这种残缺序列留在历史里会让之后每一次请求都 400。
+     * <p>取消很可能发生在「assistant 已经要求调工具、但结果还没回填」的当口，
+     * 那种残缺留在历史里会让之后每一次请求都 400，所以必须处理。
+     * 处理方式是封口而不是回滚——用户按 Ctrl-C 多半是嫌它跑偏了或者太慢，
+     * 而不是要把已经做完的部分一起作废。留着现场，他改一句话就能接着来。
      */
-    private String abort(int snapshot) {
-        rollbackTo(snapshot);
+    private String abort(String userInput, int step) {
+        seal("已取消", userInput, step);
         listener.accept(new AgentEvent.Failed("已取消"));
         return "已取消。";
     }
 
-    /** 不给工具再问一次，逼模型输出结论。 */
-    private String forceConclusion() {
+    /**
+     * 把断在半路的这一轮封口，并记下断点。
+     *
+     * <p>封口后历史一定是自洽的，也就是说<b>下一句话照样发得出去</b>——
+     * 这是「无感续做」的全部机制。做不到自洽的话，用户说「继续」只会换来一个 400。
+     */
+    /**
+     * 把错误信息截短再放进历史。
+     *
+     * <p>错误体不一定是一句人话：网关挂了会回一整页 HTML，限流会回一大坨 JSON。
+     * 那东西一旦进了封口消息，就会<b>每一次请求都跟着发一遍</b>，
+     * 白烧 token，还把模型的注意力从「刚才做到哪」上面拽走。
+     */
+    private static String brief(String message) {
+        if (message == null || message.isBlank()) {
+            return "原因不明";
+        }
+        String oneLine = message.strip().replaceAll("\\s+", " ");
+        return oneLine.length() <= 60 ? oneLine : oneLine.substring(0, 60) + "…";
+    }
+
+    private void seal(String reason, String userInput, int step) {
+        List<ChatMessage> sealed = HistoryRepair.seal(conversation(), reason);
+        history.subList(1, history.size()).clear();   // 留下 system
+        history.addAll(sealed);
+        unfinished = new Interruption(reason, userInput, step, System.currentTimeMillis());
+    }
+
+    /**
+     * 不给工具再问一次，逼模型输出结论。
+     *
+     * <h3>那句逼收尾的话不留在历史里</h3>
+     * 「请不要再调用工具」是一次性的<b>脚手架</b>，只为这一个请求服务。
+     * 留在历史里的话，用户接着说「继续」时，模型仍然看着那条禁令，
+     * 于是它会继续用文字描述要做什么而<b>迟迟不动手</b>——
+     * 而这个现象长得很像「模型变笨了」，没人会想到是三十条消息之前的一句话在起作用。
+     * 所以拿到回答就把它摘掉，只留模型那条结论。
+     */
+    private String forceConclusion(String userInput) {
         history.add(ChatMessage.user(
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {
             ChatResponse response = client.chat(history, null, stream);   // tools 传 null = 没得调
-            history.add(response.message());
+            history.remove(history.size() - 1);      // 摘掉脚手架，理由见上
+            ChatMessage conclusion = response.message();
+            if (conclusion.hasToolCalls()) {
+                // 没给工具却仍然点了工具（极少数模型会）。原样入历史就是一串等不到结果的
+                // tool_call，下一次请求必 400。只取它的文字
+                conclusion = ChatMessage.assistant(conclusion.content());
+            }
+            history.add(conclusion);
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
+            unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
+                    System.currentTimeMillis());
             listener.accept(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾"));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {
+            history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
+            seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
             listener.accept(new AgentEvent.Failed(e.getMessage()));
             return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
-        }
-    }
-
-    private void rollbackTo(int size) {
-        while (history.size() > size) {
-            history.remove(history.size() - 1);
         }
     }
 }
