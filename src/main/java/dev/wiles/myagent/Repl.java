@@ -6,7 +6,9 @@ import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.SessionId;
+import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
+import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
 import dev.wiles.myagent.memory.MemoryScope;
 import dev.wiles.myagent.memory.MemorySource;
@@ -21,6 +23,8 @@ import dev.wiles.myagent.cli.InputFrame;
 import dev.wiles.myagent.cli.InterruptWatcher;
 import dev.wiles.myagent.cli.LineReader;
 import dev.wiles.myagent.cli.MarkdownRenderer;
+import dev.wiles.myagent.cli.Moment;
+import dev.wiles.myagent.cli.SessionList;
 import dev.wiles.myagent.cli.OutputDetail;
 import dev.wiles.myagent.cli.ToolSummary;
 import dev.wiles.myagent.cli.StatusLine;
@@ -68,7 +72,8 @@ public final class Repl {
     private static final int VERBOSE_OUTPUT_LINES = 20;
 
     private static final List<String> SLASH_COMMANDS =
-            List.of("/help", "/plan", "/resume", "/continue", "/clear", "/tools", "/history", "/expand",
+            List.of("/help", "/plan", "/resume", "/resume-plan", "/continue", "/clear",
+                    "/tools", "/history", "/expand",
                     "/quiet", "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
@@ -354,12 +359,76 @@ public final class Repl {
             emit(Ansi.dim("当前已经有对话了。要接上次的，先 /clear 再 /continue。"));
             return;
         }
-        int restored = agent.restore(snapshot.get().restorable());
-        // 从这一刻起，每轮都续写在被接回来的那一份上
-        sessionId = snapshot.get().id();
-        sessionStartedAt = snapshot.get().startedAt();
-        emit(Ansi.dim("接上了上次的对话（" + restored + " 条消息，"
-                + snapshot.get().turns() + " 轮）。首句是：" + snapshot.get().firstUserMessage()));
+        adopt(snapshot.get());
+    }
+
+    /**
+     * 从会话历史里挑一段接着聊。
+     *
+     * <p>和 {@code /continue} 的分工：{@code /continue} 是「接最近那段」，不用挑；
+     * 这里是「翻一下都聊过什么」。两个都留着，因为绝大多数时候用户要的就是最近那段，
+     * 为那种情况还要看一遍列表、再敲一个编号，是白加的两步。
+     *
+     * @param argument {@code /resume 2} 里的那个 2。空的话就把列表画出来问一句
+     */
+    private void resumeSession(String argument) {
+        if (agent == null) {
+            emit(noKeyMessage());
+            return;
+        }
+        List<SessionSummary> history = sessions.list(workspace.root());
+        if (history.isEmpty()) {
+            emit(Ansi.dim("这个工作区还没有会话历史。"));
+            return;
+        }
+        if (agent.history().size() > 1) {
+            // 接一段进来会把眼前这段冲掉，这个决定得用户自己做。和 /continue 同一道闸
+            emit(Ansi.dim("当前已经有对话了。要挑一段接着聊，先 /clear。"));
+            return;
+        }
+        int pickable = Math.min(history.size(), SessionList.MAX_ROWS);
+
+        String answer = argument;
+        if (answer == null || answer.isEmpty()) {
+            SessionList.render(history, sessionId, width, System.currentTimeMillis())
+                    .forEach(this::emit);
+            answer = reader.readLine(Ansi.cyan("挑一段 › "));
+            if (SessionList.isCancel(answer)) {
+                emit(Ansi.dim("那就不接了。"));
+                return;
+            }
+        }
+        var index = SessionList.pick(answer, pickable);
+        if (index.isEmpty()) {
+            emit(Ansi.dim("认不出这个编号，1 到 " + pickable + " 之间。什么都没动。"));
+            return;
+        }
+
+        String id = history.get(index.getAsInt()).id();
+        var snapshot = sessions.load(workspace.root(), id);
+        if (snapshot.isEmpty()) {
+            // 列出来的时候还在，这会儿读不出来了——另一个终端刚把它清掉是最可能的
+            emit(Ansi.dim("这段会话已经没了，可能是别处清掉的。"));
+            return;
+        }
+        adopt(snapshot.get());
+    }
+
+    /**
+     * 把一段存档立成当前会话。
+     *
+     * <p>{@code /continue} 和 {@code /resume} 最后都落到这儿，就一个理由：
+     * 「换 sessionId 和 sessionStartedAt」这一步漏了不会报错，
+     * 只会让接着聊的内容另起一份新档，而原来那段永远停在被接回来的那一刻。
+     * 这种错只在两条路里的一条上犯，查起来是「有时候会丢对话」。
+     */
+    private void adopt(SessionSnapshot snapshot) {
+        int restored = agent.restore(snapshot.restorable());
+        sessionId = snapshot.id();
+        sessionStartedAt = snapshot.startedAt();
+        emit(Ansi.dim("接上了（" + restored + " 条消息，" + snapshot.turns() + " 轮，"
+                + Moment.describe(snapshot.savedAt(), System.currentTimeMillis())
+                + "）。首句是：" + snapshot.firstUserMessage()));
     }
 
     /**
@@ -458,8 +527,13 @@ public final class Repl {
                 emit("");
                 continue;
             }
-            if (line.equals("/resume")) {
+            if (line.equals("/resume-plan")) {
                 resumePlan();
+                emit("");
+                continue;
+            }
+            if (line.equals("/resume") || line.startsWith("/resume ")) {
+                resumeSession(line.substring("/resume".length()).trim());
                 emit("");
                 continue;
             }
@@ -861,12 +935,13 @@ public final class Repl {
                 if (agent != null) {
                     agent.reset();
                 }
-                // 存档也得删。留着的话下次启动会提示恢复一段用户刚刚明确表示不要的对话
-                sessions.delete(workspace.root(), sessionId);
-                // 清空等于「这段不要了，从头开始」，那就是另一次会话，换个 id 重新记
+                // 存档留着，不删：清空的意思是「眼前这段我不要了」，
+                // 不是「这段从来没发生过」。真想找回来还能 /resume 挑出来。
+                // 换个 id 从头记，于是刚才那段就定在盘上不再被续写了
                 sessionId = SessionId.create(System.currentTimeMillis());
                 sessionStartedAt = System.currentTimeMillis();
-                emit(Ansi.dim("对话历史已清空。"));
+                emit(Ansi.dim("对话历史已清空，开了一段新会话。"
+                        + "（刚才那段还在 /resume 里）"));
                 return true;
             }
             case "/tools" -> {
@@ -920,9 +995,11 @@ public final class Repl {
                           /plan 目标  先规划后执行：拆成任务依赖图，确认后逐个跑
                                     （直接说话时，看着像好几步的活会自动走这条路，
                                       拿不准会先问你一句；查询和小改动照常直接做）
-                          /resume   接着跑上次没跑完的计划（做成的步骤不重来）
-                          /continue 接着聊上次没聊完的对话
-                          /clear    清空对话历史
+                          /resume   从这个工作区的会话历史里挑一段接着聊
+                                    （/resume 2 直接挑第 2 段，不看列表）
+                          /continue 接最近那段会话，不用挑
+                          /resume-plan  接着跑上次没跑完的计划（做成的步骤不重来）
+                          /clear    清空对话、开一段新会话（旧的还能 /resume 找回来）
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
                           /expand   把最近一轮的工具调用详情重新打出来（等同 Ctrl-O）
@@ -1047,23 +1124,36 @@ public final class Repl {
         }
     }
 
-    /** 启动时提一句上次没跑完的计划。不提的话，那份存档等于不存在。 */
+    /**
+     * 启动时提一句「这儿有东西可以接着干」。不提的话，那些存档等于不存在。
+     *
+     * <p>会话这句话在改成多会话之后重写过。原来说的是「上次在这儿聊过 N 轮」，
+     * 那句话有个前提：上次就只有一段。现在一个工作区下躺着好几段，而且
+     * {@code /clear} 之后旧的那段还留着——照原样说，用户会被反复提醒一段
+     * 他刚刚明确表示不要的对话，而且完全看不出还有别的可选。
+     * 所以现在报的是<b>总数 + 最近一段长什么样</b>，两条路都摆出来。
+     */
     private void announceResumable() {
         if (planAgent != null) {
             planAgent.savedPlan().ifPresent(checkpoint -> {
                 emit(Ansi.dim("上次有一份计划没跑完：" + checkpoint.goal()
-                        + "（还剩 " + checkpoint.remaining() + " 步）  输入 /resume 接着跑"));
+                        + "（还剩 " + checkpoint.remaining() + " 步）  输入 /resume-plan 接着跑"));
                 emit("");
             });
         }
         // 会话存档同理：不提一句，它就等于不存在
         if (agent != null) {
-            sessions.latest(workspace.root()).ifPresent(snapshot -> {
-                emit(Ansi.dim("上次在这儿聊过 " + snapshot.turns() + " 轮：「"
-                        + oneLine(snapshot.firstUserMessage(), Math.max(20, width - 40))
-                        + "」  输入 /continue 接着聊"));
+            List<SessionSummary> history = sessions.list(workspace.root());
+            if (!history.isEmpty()) {
+                SessionSummary newest = history.get(0);
+                emit(Ansi.dim("这个工作区有 " + history.size() + " 段会话。最近一段："
+                        + "「" + oneLine(newest.title(), Math.max(20, width - 52)) + "」"
+                        + newest.turns() + " 轮 · "
+                        + Moment.describe(newest.savedAt(), System.currentTimeMillis())));
+                emit(Ansi.dim("  /continue 直接接最近一段"
+                        + (history.size() > 1 ? "  ·  /resume 挑一段" : "")));
                 emit("");
-            });
+            }
         }
     }
 
@@ -1146,7 +1236,7 @@ public final class Repl {
             flushQuietBuffer();
             PlanView.summary(plan, result).forEach(Repl.this::emit);
             if (result.cancelled()) {
-                emit(Ansi.dim("已中断，进度留着了。输入 /resume 接着跑。"));
+                emit(Ansi.dim("已中断，进度留着了。输入 /resume-plan 接着跑。"));
             }
         }
     }
