@@ -92,10 +92,21 @@ export type ReadyInfo = {
   workspaceWarning?: string
   /** 审计日志的位置。退出时的收尾信息要用它。 */
   auditLog?: string
+  /** 工作区真正的 git 分支（不在仓库里就是 null）。状态栏显示它，不再拿目录名冒充。 */
+  branch?: string | null
   /** 上次没跑完的计划。没有就是 undefined。 */
   resumable?: { goal: string; remaining: number; total: number; savedAt: number }
-  /** 上次没聊完的对话。和 resumable 是两件事：那个是计划，这个是对话。 */
-  continuable?: { turns: number; messages: number; firstMessage: string; savedAt: number }
+  /** 上次没聊完的对话（最近那一段）。和 resumable 是两件事：那个是计划，这个是对话。 */
+  continuable?: {
+    id: string
+    branch?: string | null
+    turns: number
+    messages: number
+    firstMessage: string
+    savedAt: number
+    /** 这个工作区一共几段会话。界面靠它决定要不要放出「挑一段」的入口。 */
+    count: number
+  }
 }
 
 export type SessionState = {
@@ -303,6 +314,7 @@ export class SessionStore {
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
+            branch: event.branch,
             resumable: event.resumable,
             continuable: event.continuable,
           },

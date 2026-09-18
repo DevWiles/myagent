@@ -8,7 +8,9 @@ import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.SessionId;
+import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
+import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
 import dev.wiles.myagent.memory.MemoryScope;
 import dev.wiles.myagent.memory.MemorySource;
@@ -19,6 +21,7 @@ import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.tool.BuiltinTools;
+import dev.wiles.myagent.tool.GitBranch;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.plan.ExecutionMode;
@@ -359,8 +362,12 @@ public final class AgentServer extends WebSocketServer {
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
             case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
-            case "resume" -> handleResume(conn);
+            // resume 是老名字（那会儿只有计划能续）。终端那边已经改叫 /resume-plan，
+            // 协议这边两个都认：改名不该让还没更新的界面连不上
+            case "resume", "resume_plan" -> handleResume(conn);
             case "continue" -> handleContinue(conn);
+            case "sessions" -> handleSessions(conn);
+            case "session_resume" -> handleSessionResume(conn, Protocol.str(cmd, "id", ""));
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
             case "reset" -> handleReset(conn);
@@ -491,15 +498,85 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
 
-        int restored = agent.restore(snapshot.get().restorable());
-        // 从这一刻起，每轮都续写在被接回来的那一份上
-        sessionId = snapshot.get().id();
-        sessionStartedAt = snapshot.get().startedAt();
+        adopt(snapshot.get());
+    }
+
+    /**
+     * 把这个工作区的会话历史发给界面，让它自己画选择器。
+     *
+     * <p>为什么不塞进 {@code ready} 帧：一个工作区能攒下几十段会话，
+     * 而首帧是每次连上来都要发的。要列表的界面自己问一句，代价是一轮往返，
+     * 换来的是首帧不会随着历史变长而慢慢膨胀。
+     *
+     * <p>只回给问的那个连接。别的界面没在挑会话，不该收到一坨列表。
+     */
+    private void handleSessions(WebSocket conn) {
+        ObjectNode list = Protocol.event("session_list");
+        list.put("currentId", sessionId);
+        ArrayNode rows = list.putArray("sessions");
+        for (SessionSummary summary : sessions.list(workspace.root())) {
+            ObjectNode row = rows.addObject();
+            row.put("id", summary.id());
+            row.put("title", summary.title());
+            row.put("turns", summary.turns());
+            row.put("model", summary.model());
+            row.put("branch", summary.branch());       // 可能是 null：不在 git 仓库里，或是老存档
+            row.put("startedAt", summary.startedAt());
+            row.put("savedAt", summary.savedAt());
+            row.put("bytes", summary.bytes());
+        }
+        send(conn, list);
+    }
+
+    /**
+     * 按 id 接一段历史会话。
+     *
+     * <p>和 {@code continue} 的分工和终端那边一样：{@code continue} 是「接最近那段」，
+     * 不用挑；这个是界面从列表里挑了一段之后发过来的。三道闸完全一致，
+     * 只多一道「这个 id 还在不在」——列出来到挑中之间隔着用户的思考时间，
+     * 那段会话可能已经被另一个界面清掉了。
+     */
+    private void handleSessionResume(WebSocket conn, String id) {
+        if (agent == null) {
+            send(conn, error("没有配置 API key，无法对话"));
+            return;
+        }
+        if (busy.get()) {
+            send(conn, error("正在处理中，不能恢复会话"));
+            return;
+        }
+        if (agent.history().size() > 1) {
+            send(conn, error("当前已经有对话了。要接另一段，先 reset 再 session_resume"));
+            return;
+        }
+        var snapshot = sessions.load(workspace.root(), id);
+        if (snapshot.isEmpty()) {
+            send(conn, error("这段会话找不到了，可能是别处清掉的"));
+            return;
+        }
+        adopt(snapshot.get());
+    }
+
+    /**
+     * 把一段存档立成当前会话，并广播回执。
+     *
+     * <p>{@code continue} 和 {@code session_resume} 都落到这儿。抽出来的理由和终端
+     * 那边的 {@code Repl.adopt} 一样：「换 sessionId 和 sessionStartedAt」漏了不会报错，
+     * 只会让接着聊的内容另起一份新档，而原来那段永远停在被接回来的那一刻。
+     *
+     * <p>这条是<b>广播</b>而不是定向回执：连着的每个界面都得知道当前会话被换掉了，
+     * 否则它们还在画上一段的上下文。
+     */
+    private void adopt(SessionSnapshot snapshot) {
+        int restored = agent.restore(snapshot.restorable());
+        sessionId = snapshot.id();
+        sessionStartedAt = snapshot.startedAt();
         ObjectNode done = Protocol.event("session_restored");
+        done.put("id", snapshot.id());
         done.put("messages", restored);
-        done.put("turns", snapshot.get().turns());
-        done.put("firstMessage", snapshot.get().firstUserMessage());
-        done.put("savedAt", snapshot.get().savedAt());
+        done.put("turns", snapshot.turns());
+        done.put("firstMessage", snapshot.firstUserMessage());
+        done.put("savedAt", snapshot.savedAt());
         done.put("tokens", agent.estimatedTokens());
         done.put("contextLimit", agent.contextLimit());
         publish(done);
@@ -567,9 +644,9 @@ public final class AgentServer extends WebSocketServer {
         if (agent != null) {
             agent.reset();
         }
-        // 存档也得删——留着的话下次连上来还会提示恢复一段用户刚表示不要的对话
-        sessions.delete(workspace.root(), sessionId);
-        // 清空等于「这段不要了，从头开始」，那就是另一次会话，换个 id 重新记
+        // 存档留着，不删：清空的意思是「眼前这段我不要了」，不是「这段从来没发生过」。
+        // 想找回来还能从 sessions 列表里挑出来。和终端的 /clear 是同一条语义——
+        // 两边不一致的话，同一个存档在两个界面里表现不同，那种 bug 没人查得动
         sessionId = SessionId.create(System.currentTimeMillis());
         sessionStartedAt = System.currentTimeMillis();
         approval.reset();
@@ -609,6 +686,9 @@ public final class AgentServer extends WebSocketServer {
         n.put("version", Cli.VERSION);
         n.put("workspace", workspace.root().toString());
         n.put("model", config.model());
+        // 真正的 git 分支。界面原来在状态栏上显示工作区的目录名冒充分支
+        // （myagent 仓库在 dev 上，状态栏却写 git:(myagent)），那不是简写，是错的
+        n.put("branch", GitBranch.of(workspace.root()));
         n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
         n.put("hasApiKey", config.hasApiKey());
         // 界面退出时会把这个路径显示给用户，好让人知道去哪儿查这趟做了什么。
@@ -633,13 +713,23 @@ public final class AgentServer extends WebSocketServer {
         });
         // 上次没聊完的对话，同理放进首帧
         if (agent != null) {
-            sessions.latest(workspace.root()).ifPresent(snapshot -> {
+            List<SessionSummary> history = sessions.list(workspace.root());
+            if (!history.isEmpty()) {
+                SessionSummary newest = history.get(0);
                 ObjectNode continuable = n.putObject("continuable");
-                continuable.put("turns", snapshot.turns());
-                continuable.put("messages", snapshot.restorable().size());
-                continuable.put("firstMessage", snapshot.firstUserMessage());
-                continuable.put("savedAt", snapshot.savedAt());
-            });
+                continuable.put("id", newest.id());
+                continuable.put("branch", newest.branch());
+                continuable.put("turns", newest.turns());
+                continuable.put("firstMessage", newest.title());
+                continuable.put("savedAt", newest.savedAt());
+                // messages 是文档里写明的字段，摘要里算不出来（那是修剪之后的条数），
+                // 为它多读一次存档。首帧一个连接只发一次，这点代价换契约不变是值得的
+                sessions.latest(workspace.root()).ifPresent(
+                        snapshot -> continuable.put("messages", snapshot.restorable().size()));
+                // 一共几段。界面靠它决定要不要放出「挑一段」那个入口——
+                // 只有一段时摆个选择器是纯噪音，直接 continue 就行
+                continuable.put("count", history.size());
+            }
         }
         String rejection = WorkspaceGuard.rejectionReason(workspace.root());
         if (rejection != null) {

@@ -47,7 +47,7 @@ token 随进程生灭，每次启动都不一样。
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume", "auto_mode", "session"]
+"features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -69,7 +69,8 @@ token 随进程生灭，每次启动都不一样。
 | `busy` | `busy`(bool)、结束时另有 `durationMs` `tokens` `contextLimit` | 忙/闲切换。`busy:true` 时界面应禁用输入 |
 | `error` | `message` | 命令被拒（未知命令、正忙、没 API key 等）。只发给发命令的那个连接 |
 | `pong` | — | 对 `ping` 的回应 |
-| `reset_done` | — | `/clear` 成功 |
+| `reset_done` | — | `/clear` 成功。**不删存档**，见 3.9 |
+| `session_list` | `sessions[]` `currentId` | 会话历史，只回给问的那个连接，见 3.9 |
 
 `ready` 的完整字段：
 
@@ -79,13 +80,14 @@ token 随进程生灭，每次启动都不一样。
   "protocol": 1,
   "version": "0.2.0",
   "workspace": "/Users/x/proj",
+  "branch": "dev",
   "model": "deepseek-chat",
   "planMode": false,
   "hasApiKey": true,
   "busy": false,
   "tokens": 1234,
   "contextLimit": 65536,
-  "features": ["plan", "replan", "resume", "auto_mode", "session"],
+  "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions"],
   "tools": [{"name": "read_file", "description": "…"}],
   "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
@@ -95,6 +97,11 @@ token 随进程生灭，每次启动都不一样。
   }
 }
 ```
+
+`branch` 是工作区**真正的 git 分支**（不在仓库里就是 `null`）。服务端直接读
+`.git/HEAD`，不起 git 子进程：状态栏每次重绘都要这个值，几十毫秒的子进程开销
+划不来，而要的东西就写在一个小文本文件里。detached HEAD 给短 sha，worktree 会
+跟着 `gitdir:` 指过去。
 
 **`resumable` 只在「这个工作区确实有没跑完的计划」时才出现**，见 3.7。
 界面据此决定第一屏要不要摆出「接着跑」那个入口——放在首帧而不是让界面再问一次，
@@ -278,20 +285,61 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 > 它认的是明显的两头，中间那片本来就该由人来定，所以 `plan_confirm_request`
 > 那一步任何时候都不能省。
 
-### 3.9 接着聊上次没聊完的（feature: `session`）
+### 3.9 会话：接着聊，或者挑一段接着聊（feature: `session` / `sessions`）
 
-对话**每说完一轮存一次盘**（`~/.myagent/sessions/`，一个工作区一份）。
-下次连上来，`ready.continuable` 会带上摘要：
+对话**每说完一轮存一次盘**：`~/.myagent/sessions/<工作区>/<会话 id>.json`，
+**一次会话一份**。会话 id 形如 `20260918-143210-3f9a`（本地时间 + 四位随机），
+按名字排序就是按时间排序。
+
+> 原来是「一个工作区一份」，覆盖式写入。那个设计只在没有选择器的前提下成立：
+> 一旦要让用户回头翻三天前那段对话，覆盖式写入意味着那段对话从来就没被留下来过。
+> 格式 1 的老存档会在第一次列表时被收成历史里的一条会话，不会丢。
+
+**两条路，别混**：
+
+| 界面发 | 干什么 | 什么时候用 |
+|---|---|---|
+| `{"t":"continue"}` | 接**最近**那段，不用挑 | 绝大多数时候用户要的就是这个 |
+| `{"t":"sessions"}` → `{"t":"session_resume","id":"…"}` | 列出历史，挑一段接 | 用户要翻更早的 |
+
+连上来时 `ready.continuable` 带最近那段的摘要：
 
 ```json
-"continuable": {"turns": 4, "messages": 11,
-                "firstMessage": "这个项目怎么跑测试", "savedAt": 1758100000000}
+"continuable": {"id": "20260918-143210-3f9a", "branch": "dev",
+                "turns": 4, "messages": 11,
+                "firstMessage": "这个项目怎么跑测试", "savedAt": 1758100000000,
+                "count": 3}
 ```
 
-界面发 `{"t":"continue"}`，服务端把历史立回内存，回一条 `session_restored`：
+`count` 是这个工作区一共几段。**界面靠它决定要不要放出「挑一段」那个入口**——
+只有一段时摆个选择器是纯噪音，直接 `continue` 就行。
+
+会话列表<b>不放进 `ready`</b>：一个工作区能攒下几十段，而首帧每次连上来都要发。
+要列表的界面自己问一句 `{"t":"sessions"}`，服务端回：
 
 ```json
-{"t":"session_restored","messages":11,"turns":4,
+{"t":"session_list","currentId":"20260918-150000-1a2b","sessions":[
+  {"id":"20260918-143210-3f9a","title":"这个项目怎么跑测试","turns":4,
+   "model":"deepseek-chat","branch":"dev","bytes":34211,
+   "startedAt":1758099000000,"savedAt":1758100000000}]}
+```
+
+一行够画成「标题 + 时间 · 分支 · 大小」。三样各有各的用处：**时间**答「还新鲜吗」，
+**分支**答「那段是在哪条线上聊的」（往往一眼就能排除掉一半），
+**大小**是「这段聊得有多沉」的便宜代理——几十 KB 是随手问两句，几百 KB 是啃了半天。
+
+`branch` 可能是 `null`：不在 git 仓库里，或者那是格式 1 的老存档
+（老结构没记过分支，用今天的分支去填等于编一个出来）。
+
+最近存过的在最前面。`currentId` 是此刻正待着的那一段——**标出来**，
+否则用户会挑中自己现在就在的那段，然后发现「什么都没变」。
+这条只回给问的那个连接：别的界面没在挑会话，不该收到一坨列表。
+
+`continue` 和 `session_resume` 都回一条 `session_restored`（**广播**，
+连着的每个界面都得知道当前会话被换掉了）：
+
+```json
+{"t":"session_restored","id":"20260918-143210-3f9a","messages":11,"turns":4,
  "firstMessage":"这个项目怎么跑测试","savedAt":1758100000000,
  "tokens":8240,"contextLimit":64000}
 ```
@@ -302,8 +350,10 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 | 规矩 | 说明 |
 |---|---|
 | **不自动恢复** | 和计划续跑同理：隔了不知道多久，代码可能变了，用户也未必还记得当时在聊什么 |
-| **当前已经有对话时拒绝** | 恢复会把眼前这段冲掉，这个决定该由用户做。先 `reset` 再 `continue` |
-| **`reset` 会顺带删档** | 用户刚明确表示不要这段对话，留着它下次还会提示恢复 |
+| **当前已经有对话时拒绝** | 恢复会把眼前这段冲掉，这个决定该由用户做。先 `reset` 再 `continue` / `session_resume` |
+| **`reset` 不删存档** | 清空的意思是「眼前这段我不要了」，不是「这段从来没发生过」。旧的留在历史里还能挑回来，`reset` 只是换一个新会话 id 从头记 |
+| **`session_resume` 的 id 可能已经失效** | 列出来到挑中之间隔着用户的思考时间，那段会话可能被另一个界面清掉了。回 `error`，不要静默失败 |
+| **id 认形状** | 服务端只认 `20260918-143210-3f9a` 这个形状。这个 id 要拿去拼文件名，`../../../.ssh/id_rsa` 一类的东西一律当没有 |
 | **存档不含 system 消息** | 见下 |
 
 **存档里为什么没有 system 消息**，这是最容易埋雷的地方：
@@ -331,9 +381,12 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always` | 回应 `approval_request` |
 | `cancel` | — | 中断当前这一轮 |
-| `resume` | — | 接着跑上次没跑完的计划，见 3.7。没有存档时回 `error` |
-| `continue` | — | 接着聊上次没聊完的对话，见 3.9。没有存档、或当前已有对话时回 `error` |
-| `reset` | — | 清空对话历史。忙的时候会被拒 |
+| `resume_plan` | — | 接着跑上次没跑完的计划，见 3.7。没有存档时回 `error` |
+| `resume` | — | `resume_plan` 的老名字，仍然接受。那会儿只有计划能续，现在 `/resume` 在终端里指的是挑会话，所以协议这边改叫 `resume_plan`；改名不该让还没更新的界面连不上 |
+| `continue` | — | 接**最近**那段会话，见 3.9。没有存档、或当前已有对话时回 `error` |
+| `sessions` | — | 要会话历史列表，回 `session_list`。见 3.9 |
+| `session_resume` | `id` | 按 id 接一段历史会话，见 3.9。id 认不出、找不到、或当前已有对话时回 `error` |
+| `reset` | — | 清空对话历史、换一段新会话。**不删旧存档**。忙的时候会被拒 |
 | `ping` | — | 保活 |
 
 字段缺失或类型不对一律退回默认值，不会让服务端崩。未知 `t` 回一条 `error`。
@@ -391,7 +444,8 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | 某步失败、但模型判断补不了 | 不发 `plan_revised`，照原样收场 | 照常显示失败 |
 | 重规划本身挂了（调用失败、给的图不合法） | 静默忽略，照原样收场 | 界面无感，和没配重规划一样 |
 | `prompt` 被判定为该规划 | 发 `mode_switched`，转走计划流程 | 显示 `reason`，别让用户莫名其妙 |
-| `resume` 但没有存档 | 回 `error` | `ready.resumable` 不存在时就别放出这个入口 |
+| `resume_plan` 但没有存档 | 回 `error` | `ready.resumable` 不存在时就别放出这个入口 |
+| `session_resume` 的 id 已经没了 | 回 `error` | 列表和挑中之间隔着用户的思考时间，别假设它还在 |
 | 存档读不出来 / 格式过期 | 当作没有存档 | 同上 |
 | 存不下（磁盘满、只读） | 计划照跑，只是断了续不上 | 界面无感 |
 | 没配 API key | `plan`/`prompt` 回 `error` | `ready.hasApiKey` 为 false 时就该禁用输入 |

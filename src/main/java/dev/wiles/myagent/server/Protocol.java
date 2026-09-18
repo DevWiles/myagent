@@ -63,7 +63,8 @@ public final class Protocol {
      * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
      */
     public static final List<String> FEATURES =
-            List.of("plan", "replan", "resume", "auto_mode", "session");
+            List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
+                    "session", "sessions");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

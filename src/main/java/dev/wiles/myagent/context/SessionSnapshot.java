@@ -39,6 +39,9 @@ import java.util.List;
  * @param id       会话 id，同时是文件名，见 {@link SessionId}
  * @param workspace 存档属于哪个工作区，绝对路径
  * @param model    上次用的模型
+ * @param branch   聊这段时工作区在哪个 git 分支上；不在仓库里就是 null。
+ *                 <b>记的是当时那个分支</b>，不是列表时的——「这段是在 main 上聊的」
+ *                 才是用户挑会话时真正想知道的事
  * @param startedAt 这段对话最早那一句的时刻，epoch 毫秒
  * @param savedAt  最后一次存盘的时刻，epoch 毫秒
  * @param messages 对话内容，<b>不含 system</b>
@@ -49,6 +52,7 @@ public record SessionSnapshot(
         String id,
         String workspace,
         String model,
+        String branch,
         long startedAt,
         long savedAt,
         List<ChatMessage> messages) {
@@ -72,13 +76,13 @@ public record SessionSnapshot(
      * @param history 完整历史，<b>包含</b> index 0 的 system；这里会把它摘掉
      */
     public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
-                                     String model, long startedAt, long now) {
+                                     String model, String branch, long startedAt, long now) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
         return new SessionSnapshot(FORMAT, id,
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
-                model, startedAt, now, conversation);
+                model, branch, startedAt, now, conversation);
     }
 
     /**
@@ -119,10 +123,16 @@ public record SessionSnapshot(
                 .count();
     }
 
-    /** 砍成列表里的一行。正文留在这儿，别跟着摘要一起走，理由见 {@link SessionSummary}。 */
+    /**
+     * 砍成列表里的一行。正文留在这儿，别跟着摘要一起走，理由见 {@link SessionSummary}。
+     *
+     * @param bytes 存档文件多大。只有拿着文件的人（{@link SessionStore}）知道，
+     *              所以从外面传进来——快照自己是不认路的
+     */
     @JsonIgnore
-    public SessionSummary summary() {
-        return new SessionSummary(id, model, startedAt, savedAt, turns(), firstUserMessage());
+    public SessionSummary summary(long bytes) {
+        return new SessionSummary(id, model, branch, startedAt, savedAt, turns(),
+                firstUserMessage(), bytes);
     }
 
     /** 上次用户说的第一句话，用来在提示语里告诉他「上次在聊什么」。 */

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.wiles.myagent.llm.ChatMessage;
+import dev.wiles.myagent.tool.GitBranch;
 import dev.wiles.myagent.tool.WorkspaceKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -100,8 +101,10 @@ public final class SessionStore {
             delete(workspace, id);
             return;
         }
-        SessionSnapshot snapshot = SessionSnapshot.of(
-                id, history, workspace, model, startedAt, System.currentTimeMillis());
+        // 分支在这儿现算，不让调用方传：它是存档的属性（「这段是在哪个分支上聊的」），
+        // 而且 GitBranch 只读一个小文件，比在两个界面里各记一遍靠得住
+        SessionSnapshot snapshot = SessionSnapshot.of(id, history, workspace, model,
+                GitBranch.of(workspace), startedAt, System.currentTimeMillis());
         if (write(snapshot, pathFor(workspace, id))) {
             log.debug("会话已存档: {}（{} 条）", id, snapshot.messages().size());
         }
@@ -159,7 +162,18 @@ public final class SessionStore {
 
     /** 这个工作区的会话历史，最近存过的在最前面。给选择器用。 */
     public List<SessionSummary> list(Path workspace) {
-        return loadAll(workspace).stream().map(SessionSnapshot::summary).toList();
+        return loadAll(workspace).stream()
+                .map(snapshot -> snapshot.summary(sizeOf(workspace, snapshot.id())))
+                .toList();
+    }
+
+    /** 存档多大。量不出来就说 0——为了列表里一个附加信息让整个列表翻车不值得。 */
+    private long sizeOf(Path workspace, String id) {
+        try {
+            return Files.size(pathFor(workspace, id));
+        } catch (IOException | RuntimeException e) {
+            return 0;
+        }
     }
 
     /** 删掉某一份。 */
@@ -235,9 +249,11 @@ public final class SessionStore {
             long savedAt = node.path("savedAt").asLong();
             String id = SessionId.forLegacy(savedAt);
             // 老档没记开始时间，拿 savedAt 顶：宁可显示得晚一点，不能显示成 1970 年
+            // branch 传 null 而不是现在的分支：老档没记过这件事，
+            // 拿今天的分支去填等于编一个「那段是在 dev 上聊的」出来
             SessionSnapshot adopted = new SessionSnapshot(SessionSnapshot.FORMAT, id,
                     node.path("workspace").asText(null), node.path("model").asText(null),
-                    savedAt, savedAt, messages);
+                    null, savedAt, savedAt, messages);
             if (!adopted.belongsTo(workspace)) {
                 log.warn("老存档 {} 记的工作区是 {}，不收", legacy, adopted.workspace());
                 return;

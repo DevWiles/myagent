@@ -342,6 +342,39 @@ class SessionStoreTest {
         assertEquals(1, store.list(ws()).size());
     }
 
+    @Test
+    @DisplayName("存档记下当时在哪个分支上——挑会话时这是个强信号")
+    void recordsTheBranchItWasOn() throws IOException {
+        Files.createDirectories(ws().resolve(".git"));
+        Files.writeString(ws().resolve(".git/HEAD"), "ref: refs/heads/feature/picker\n");
+        SessionStore store = store();
+
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED);
+
+        assertEquals("feature/picker", store.latest(ws()).orElseThrow().branch());
+        assertEquals("feature/picker", store.list(ws()).get(0).branch());
+    }
+
+    @Test
+    @DisplayName("不在 git 仓库里照样存，分支是 null")
+    void worksOutsideAGitRepo() {
+        SessionStore store = store();
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED);
+
+        assertNull(store.latest(ws()).orElseThrow().branch());
+        assertNull(store.list(ws()).get(0).branch());
+    }
+
+    @Test
+    @DisplayName("摘要带存档大小——它是「这段聊得有多沉」的便宜代理")
+    void summaryCarriesFileSize() {
+        SessionStore store = store();
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED);
+
+        long bytes = store.list(ws()).get(0).bytes();
+        assertTrue(bytes > 100, "至少得是这份存档真实的字节数，拿到的是 " + bytes);
+    }
+
     // ---------- 老存档（格式 1，一个工作区平铺一份） ----------
 
     private Path legacyFile() {

@@ -43,6 +43,13 @@ export type ServerEvent =
       /** 审计日志的位置。界面退出时显示给用户，好让人知道去哪儿查这趟做了什么。 */
       auditLog?: string
       /**
+       * 工作区真正的 git 分支（不在仓库里就是 null）。
+       *
+       * 状态栏原来显示的是工作区**目录名**冒充分支——myagent 仓库在 dev 上，
+       * 状态栏却写 git:(myagent)。那不是简写，是错的。
+       */
+      branch?: string | null
+      /**
        * 这个工作区上次没跑完的计划。没有就没这个字段。
        *
        * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
@@ -53,7 +60,17 @@ export type ServerEvent =
        *
        * 和 resumable 是两件事：那个续的是**计划**，这个续的是**对话**。
        */
-      continuable?: { turns: number; messages: number; firstMessage: string; savedAt: number }
+      continuable?: {
+        id: string
+        /** 那段对话是在哪个 git 分支上聊的。不在仓库里、或是老存档时没有。 */
+        branch?: string | null
+        turns: number
+        messages: number
+        firstMessage: string
+        savedAt: number
+        /** 这个工作区一共有几段会话。只有一段时摆个选择器是纯噪音。 */
+        count: number
+      }
       tools: ToolInfo[]
     }
   /** 第 step 轮开始，正在等模型响应。 */

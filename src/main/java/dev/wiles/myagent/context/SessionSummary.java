@@ -11,16 +11,22 @@ package dev.wiles.myagent.context;
  *
  * @param id       会话 id，挑中之后拿它去 {@code load}
  * @param model    这段对话用的模型
+ * @param branch   聊这段时在哪个 git 分支上，可能是 null。
+ *                 挑会话时这是个强信号——「那段是在 main 上聊的」往往就足够排除它了
  * @param startedAt 第一句话的时刻，epoch 毫秒
  * @param savedAt  最后一次存盘的时刻，epoch 毫秒；列表按它倒序
  * @param turns    用户说了多少轮
  * @param title    首句，列表里显示「上次在聊什么」
+ * @param bytes    存档文件多大。它其实是「这段聊得有多沉」的一个便宜代理：
+ *                 几十 KB 是随手问两句，几百 KB 是啃了半天的大活
  */
 public record SessionSummary(
         String id,
         String model,
+        String branch,
         long startedAt,
         long savedAt,
         int turns,
-        String title) {
+        String title,
+        long bytes) {
 }

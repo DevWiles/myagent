@@ -26,7 +26,8 @@ class SessionListTest {
     }
 
     private static SessionSummary session(String id, String title, int turns, long savedAt) {
-        return new SessionSummary(id, "deepseek-chat", savedAt - 60_000, savedAt, turns, title);
+        return new SessionSummary(id, "deepseek-chat", "dev", savedAt - 60_000, savedAt,
+                turns, title, 34_000);
     }
 
     private static List<SessionSummary> three() {

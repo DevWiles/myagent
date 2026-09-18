@@ -27,7 +27,6 @@ import { Welcome } from "./Welcome.tsx"
 
 export type AppProps = {
   options: BackendOptions
-  branch?: string
   /** 后端没了就调它，由入口决定怎么退出（要还原终端）。 */
   onClosed: (reason: string) => void
   /**
@@ -277,7 +276,7 @@ export function App(props: AppProps) {
         <StatusLine
           model={state().ready?.model ?? "未连接"}
           workspace={workspace()}
-          branch={props.branch}
+          branch={state().ready?.branch ?? undefined}
           columns={dimensions().width}
           busy={state().busy}
           tokens={state().tokens}

@@ -13,7 +13,7 @@
 import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { writeSync } from "node:fs"
-import { basename, resolve } from "node:path"
+import { resolve } from "node:path"
 import type { Accessor } from "solid-js"
 import { App } from "./components/App.tsx"
 import { buildEpilogue } from "./epilogue.ts"
@@ -139,7 +139,9 @@ await render(
         planMode: argv.includes("--readonly"),
         unsafe: argv.includes("--unsafe"),
       }}
-      branch={basename(workspace)}
+      // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
+      // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的
+
       // 后端没了就退出，并把原因留在终端上——altscreen 一还原，
       // 界面里印的任何错误都会跟着消失，只有这里打的才看得见
       onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
