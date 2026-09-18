@@ -156,6 +156,17 @@ function firstWord(text: string): string {
   return text.trim().split(/\s+/, 1)[0] ?? ""
 }
 
+/**
+ * 首词之后剩下的部分，也就是参数。
+ *
+ * <p>菜单开着时按回车要执行**高亮那条**，但参数得从用户实际敲的字里取——
+ * 他可能打的是 `/pl 把 README 补全`，高亮的是 `/plan`，参数是后面那句。
+ */
+export function argsOf(text: string): string {
+  const trimmed = text.trim()
+  return trimmed.slice(firstWord(trimmed).length).trim()
+}
+
 /** 这行输入看起来是在敲命令吗——决定要不要弹菜单。 */
 export function looksLikeCommand(text: string): boolean {
   return COMMAND_SHAPE.test(firstWord(text))
@@ -164,20 +175,17 @@ export function looksLikeCommand(text: string): boolean {
 /**
  * 边打边筛：给当前这行输入该显示哪些候选。
  *
- * <p>已经打到参数了（首词后面有空格）就只留精确匹配那一条——
- * 用户正在写 `/plan 把 README 补全`，这会儿把五条候选摆在他眼前是纯噪音。
+ * <p>一律按<b>前缀</b>筛，打到参数了也一样。第一版在「已经打到参数」时只留精确
+ * 匹配，理由是「用户正在写 `/plan 把 README 补全`，摆五条候选是噪音」——
+ * 但那样 `/pl 把 README 补全` 的菜单会<b>整个消失</b>，而回车执行的是「高亮那条」，
+ * 菜单一没，这条路就断了。名字打全了自然只剩一条，不用特殊照顾。
  */
 export function filterCommands(text: string, ctx: CommandContext): CommandEntry[] {
   if (!looksLikeCommand(text)) {
     return []
   }
   const head = firstWord(text).toLowerCase()
-  const typingArgs = text.trim().length > firstWord(text).length
-  const all = listCommands(ctx)
-  if (typingArgs) {
-    return all.filter((entry) => entry.name === head)
-  }
-  return all.filter((entry) => entry.name.startsWith(head))
+  return listCommands(ctx).filter((entry) => entry.name.startsWith(head))
 }
 
 /**
@@ -246,4 +254,47 @@ export function helpLines(ctx: CommandContext): string[] {
     const tail = entry.available ? entry.description : `${entry.description}（现在不行：${entry.reason ?? "用不了"}）`
     return `${head}  ${tail}`
   })
+}
+
+/** 菜单开着时按回车的四种结局。 */
+export type Acceptance =
+  /** 执行这条，参数是用户实际敲的那部分。 */
+  | { kind: "run"; entry: CommandEntry; args: string }
+  /** 这条要参数而用户还没打：把名字补进输入框，让他接着打。 */
+  | { kind: "complete"; text: string }
+  /** 这条此刻用不了。 */
+  | { kind: "refuse"; entry: CommandEntry }
+  /** 没有高亮项（列表空的）。 */
+  | { kind: "none" }
+
+/**
+ * 菜单开着时按回车该干什么。
+ *
+ * <h3>为什么回车是「选中高亮那条」，而不是解析敲了一半的文字</h3>
+ * 原来沿用的是「唯一前缀才认」那条规矩，于是 `/c` 回车得到「没有 /c 这个命令」——
+ * 因为它同时匹配 `/continue` 和 `/clear`。但用户既然敲了斜杠、而且菜单就在眼前
+ * 高亮着一条，他要的显然是那一条：<b>没人会故意去敲一个不存在的命令</b>。
+ * 让他为了执行一条看得见的命令而先去按 Tab 补全，是白加的一步。
+ *
+ * <p>参数从<b>用户实际敲的字</b>里取，不是从高亮那条里取——他可能打的是
+ * `/pl 把 README 补全`，高亮的是 `/plan`，参数得是后面那句。
+ */
+export function acceptSelected(
+  entries: readonly CommandEntry[],
+  selected: number,
+  text: string,
+): Acceptance {
+  const entry = entries[selected]
+  if (!entry) {
+    return { kind: "none" }
+  }
+  if (!entry.available) {
+    return { kind: "refuse", entry }
+  }
+  const args = argsOf(text)
+  if (entry.args && !args) {
+    // 补完留个空格，光标正好停在该打参数的地方
+    return { kind: "complete", text: entry.name + " " }
+  }
+  return { kind: "run", entry, args }
 }

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
+  acceptSelected,
+  argsOf,
   filterCommands,
   helpLines,
   listCommands,
@@ -166,5 +168,58 @@ describe("列表和帮助", () => {
     expect(lines).toHaveLength(6)
     expect(lines.some((l) => l.includes("/plan <目标>"))).toBe(true)
     expect(lines.some((l) => l.includes("现在不行"))).toBe(true)
+  })
+})
+
+describe("参数部分", () => {
+  test("首词之后的都是参数", () => {
+    expect(argsOf("/plan 把 README 补全")).toBe("把 README 补全")
+    expect(argsOf("  /plan   把 README 补全  ")).toBe("把 README 补全")
+  })
+
+  test("没有参数就是空串", () => {
+    expect(argsOf("/plan")).toBe("")
+    expect(argsOf("")).toBe("")
+  })
+
+  test("打了一半的命令也能取出参数——高亮的是 /plan，参数是后面那句", () => {
+    expect(argsOf("/pl 把 README 补全")).toBe("把 README 补全")
+  })
+})
+
+describe("菜单开着时按回车", () => {
+  const menu = (query: string, ctx = full) => filterCommands(query, ctx)
+
+  test("执行高亮那条，而不是解析敲了一半的字——/c 同时匹配两条命令", () => {
+    const rows = menu("/c")          // /continue 和 /clear
+    expect(rows).toHaveLength(2)
+    const r = acceptSelected(rows, 1, "/c")
+    expect(r.kind).toBe("run")
+    if (r.kind === "run") expect(r.entry.id).toBe("clear")
+  })
+
+  test("参数从用户实际敲的字里取，不是从高亮那条里取", () => {
+    const r = acceptSelected(menu("/pl 把 README 补全"), 0, "/pl 把 README 补全")
+    expect(r.kind).toBe("run")
+    if (r.kind === "run") {
+      expect(r.entry.id).toBe("plan")
+      expect(r.args).toBe("把 README 补全")
+    }
+  })
+
+  test("要参数却还没打：补名字，别报错——他本来就在打", () => {
+    const r = acceptSelected(menu("/pl"), 0, "/pl")
+    expect(r).toEqual({ kind: "complete", text: "/plan " })
+  })
+
+  test("用不了的那条按回车只是说一句，不执行", () => {
+    const rows = menu("/continue", fresh)
+    const r = acceptSelected(rows, 0, "/continue")
+    expect(r.kind).toBe("refuse")
+  })
+
+  test("列表空的时候按回车什么都不做", () => {
+    expect(acceptSelected([], 0, "/zzz")).toEqual({ kind: "none" })
+    expect(acceptSelected(menu("/c"), 9, "/c")).toEqual({ kind: "none" })
   })
 })

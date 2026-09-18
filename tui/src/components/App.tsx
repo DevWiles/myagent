@@ -17,7 +17,15 @@ import type { SessionState } from "../store.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
-import { filterCommands, helpLines, matchCommand, resolve, type CommandContext } from "../commands.ts"
+import {
+  acceptSelected,
+  filterCommands,
+  helpLines,
+  matchCommand,
+  resolve,
+  type CommandContext,
+  type CommandEntry,
+} from "../commands.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { CommandMenu } from "./CommandMenu.tsx"
@@ -182,6 +190,32 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * 菜单开着时按回车：执行高亮那条。四个岔口的判断在 {@link acceptSelected} 里，
+   * 那是纯函数、有测试——这里只负责照办。
+   */
+  const acceptHighlighted = (): void => {
+    const decision = acceptSelected(candidates(), picked(), draft())
+    switch (decision.kind) {
+      case "none":
+        return
+      case "refuse":
+        session.notice(
+          "info",
+          `${decision.entry.name} 现在用不了：${decision.entry.reason ?? "条件不满足"}`,
+        )
+        inputControls?.setValue("")
+        return
+      case "complete":
+        inputControls?.setValue(decision.text)
+        return
+      case "run":
+        // 回车被我消费掉了，输入框不会自己清，这里得清
+        inputControls?.setValue("")
+        run(decision.entry.id, decision.args)
+    }
+  }
+
   /** 真正执行一条命令。 */
   const run = (id: string, args: string): void => {
     switch (id) {
@@ -331,11 +365,11 @@ export function App(props: AppProps) {
       return
     }
 
-    // 命令菜单开着时，↑↓ 选、Tab 补全。
+    // 命令菜单开着时：↑↓ 选、Tab 只补名字、Enter 执行高亮那条。
     //
-    // 刻意**不接 Enter**：回车照原样交给输入框，由 submit() 去解析那行文字。
-    // 接了 Enter 就得自己清空输入框、自己处理「选中项和输入框内容不一致」——
-    // 而唯一前缀本来就认（/cont 就是 /continue），Tab 只是个省字的便利，不是必经之路
+    // 代价是得自己清输入框（回车被消费了，输入框不会自己清），
+    // 换来的是「敲了斜杠、看着高亮、按回车」这条最自然的路真的通——
+    // 理由见 acceptHighlighted 上面那段
     const menu = candidates()
     if (menu.length > 0) {
       if (key.name === "up") {
@@ -353,6 +387,13 @@ export function App(props: AppProps) {
         const entry = menu[picked()]
         // 带参数的命令补完留个空格，光标正好停在该打参数的地方
         if (entry) inputControls?.setValue(entry.name + (entry.args ? " " : ""))
+        return
+      }
+      // 回车 = 就选高亮这条。必须消费掉：不消费的话输入框会把敲了一半的
+      // 「/c」当成一句话提交，而那句话对模型毫无意义
+      if (key.name === "return") {
+        consume()
+        acceptHighlighted()
         return
       }
     }

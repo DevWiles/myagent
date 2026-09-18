@@ -38,6 +38,14 @@ const GUTTER = 2
 export function CommandMenu(props: CommandMenuProps) {
   const theme = useTheme()
 
+  /**
+   * 真正能写字的宽度：外面给的宽度减掉自己左右各 1 的 padding。
+   *
+   * <p>不扣的话最后一行会溢出，终端把它折成两行，菜单凭空高一行——
+   * 而菜单钉在输入框上方，多一行就把输入框往下顶。键位提示那行就栽在这儿过一次。
+   */
+  const inner = () => Math.max(8, props.columns - 2)
+
   /** 名字列有多宽：最长的那条 + 空隙。用 width() 量，因为参数占位符可能带中文。 */
   const nameWidth = () =>
     Math.max(
@@ -69,7 +77,7 @@ export function CommandMenu(props: CommandMenuProps) {
                 entry().available
                   ? entry().description
                   : `⊘ ${entry().reason ?? "现在用不了"}`,
-                Math.max(8, props.columns - nameWidth() - 4),
+                Math.max(8, inner() - nameWidth() - 2),
               )
             return (
               // flexShrink={0}：不写的话窄屏上 flex 会去压缩这两段文字，
@@ -93,7 +101,7 @@ export function CommandMenu(props: CommandMenuProps) {
           }}
         </Index>
         <text fg={theme.inactive}>
-          {"  ↑↓ 选择 · Tab 补全 · Enter 执行"}
+          {truncateWidth("  ↑↓ 选择 · Enter 执行选中 · Tab 补名字", inner())}
         </text>
       </box>
     </Show>
