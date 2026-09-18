@@ -6,6 +6,7 @@ import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.Interruption;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
@@ -46,6 +47,7 @@ import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.cli.PlanView;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
+import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
@@ -74,7 +76,7 @@ public final class Repl {
 
     private static final List<String> SLASH_COMMANDS =
             List.of("/help", "/plan", "/resume", "/resume-plan", "/continue", "/clear",
-                    "/tools", "/history", "/expand",
+                    "/compact", "/tools", "/history", "/expand",
                     "/quiet", "/verbose", "/config", "/exit", "/quit");
 
     /** 退出词。带不带斜杠都认——没人愿意在想退出的时候还猜该敲哪个。 */
@@ -215,6 +217,11 @@ public final class Repl {
                 ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
+                        // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
+                        // 和主循环共用会互相踩 currentCall，表现为「按了 Esc 停不下来」
+                        .withPrecompute(new Precompute(
+                                contextManager(options.readOnly()), this::newClient))
+                        .withWritingTools(BuiltinTools.WRITING_TOOLS)
                         .onEvent(this::render)
                 : null;
         // 规划器另起一个客户端：它和 agent 可能同时在跑（子任务里的 PLANNING），
@@ -244,8 +251,7 @@ public final class Repl {
      * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
      */
     private ContextManager contextManager(boolean readOnly) {
-        ContextManager context =
-                new ContextManager(config.contextTokens(), ContextManager.DEFAULT_COMPACT_RATIO);
+        ContextManager context = new ContextManager(config.contextTokens());
         if (readOnly) {
             return context;
         }
@@ -365,7 +371,7 @@ public final class Repl {
     private void saveSession() {
         if (agent != null) {
             sessions.save(sessionId, agent.history(), workspace.root(),
-                    config.model(), sessionStartedAt);
+                    config.model(), sessionStartedAt, agent.segments());
         }
     }
 
@@ -455,7 +461,9 @@ public final class Repl {
      * 这种错只在两条路里的一条上犯，查起来是「有时候会丢对话」。
      */
     private void adopt(SessionSnapshot snapshot) {
-        int restored = agent.restore(snapshot.restorable());
+        // 段一起带回来：它们是从原文 map 出来的，而记录只追加，所以永远有效，
+        // 续聊时直接复用，不用重新花钱 map 一遍
+        int restored = agent.restore(snapshot.restorable(), snapshot.usableSegments());
         sessionId = snapshot.id();
         sessionStartedAt = snapshot.startedAt();
         emit(Ansi.dim("接上了（" + restored + " 条消息，" + snapshot.turns() + " 轮，"
@@ -964,6 +972,35 @@ public final class Repl {
         return kept + "…";
     }
 
+    /**
+     * 手动压一次。
+     *
+     * <h3>为什么要有手动这条路</h3>
+     * 自动压缩是按占用触发的，而用户比占用率更早知道「这一段聊完了」。
+     * 在话题切换的当口主动压一次，摘要的边界正好落在语义边界上，
+     * 比等到 93.5% 时机器随便挑一个切点要干净得多。
+     *
+     * <p>有后台算好的现货就直接用（零调用），没有就现算。
+     */
+    private void compactNow() {
+        if (agent == null) {
+            emit(Ansi.dim("(未配 API key，压缩无从谈起)"));
+            return;
+        }
+        var result = agent.compactNow();
+        if (result == null) {
+            emit(Ansi.dim("还没有可压的内容——最近几轮是原样保留的，"
+                    + "得聊够几轮才有东西可摘。"));
+            return;
+        }
+        // 不在这儿再打一遍 token 数：压缩本身会发 Compacted 事件，render 已经画了一行。
+        // 这里再打一行的话，两行的「压缩前」口径还不一样——
+        // 事件说的是压缩前那份**窗口**，这里的 tokensBefore 说的是**整份记录**，
+        // 于是用户会在相邻两行看到两个对不上的数字
+        emit(Ansi.dim("原文一个字没丢，还留在存档里。"));
+        saveSession();
+    }
+
     private boolean handleSlashCommand(String line) {
         switch (line) {
             case "/clear" -> {
@@ -977,6 +1014,10 @@ public final class Repl {
                 sessionStartedAt = System.currentTimeMillis();
                 emit(Ansi.dim("对话历史已清空，开了一段新会话。"
                         + "（刚才那段还在 /resume 里）"));
+                return true;
+            }
+            case "/compact" -> {
+                compactNow();
                 return true;
             }
             case "/tools" -> {

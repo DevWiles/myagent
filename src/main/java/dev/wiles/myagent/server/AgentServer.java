@@ -7,6 +7,7 @@ import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
@@ -165,6 +166,11 @@ public final class AgentServer extends WebSocketServer {
                 ? new Agent(new DeepSeekClient(config), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
+                        // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
+                        // 和主循环共用会互相踩 currentCall，取消就失灵
+                        .withPrecompute(new Precompute(contextManager(options.readOnly()),
+                                () -> new DeepSeekClient(config)))
+                        .withWritingTools(BuiltinTools.WRITING_TOOLS)
                         .onEvent(this::onAgentEvent)
                 : null;
         this.planner = config.hasApiKey()
@@ -190,8 +196,7 @@ public final class AgentServer extends WebSocketServer {
      * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
      */
     private ContextManager contextManager(boolean readOnly) {
-        ContextManager context =
-                new ContextManager(config.contextTokens(), ContextManager.DEFAULT_COMPACT_RATIO);
+        ContextManager context = new ContextManager(config.contextTokens());
         if (readOnly) {
             return context;
         }
@@ -370,6 +375,7 @@ public final class AgentServer extends WebSocketServer {
             case "session_resume" -> handleSessionResume(conn, Protocol.str(cmd, "id", ""));
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
+            case "compact" -> handleCompact(conn);
             case "reset" -> handleReset(conn);
             case "ping" -> send(conn, Protocol.event("pong"));
             default -> send(conn, error("未知命令: " + type));
@@ -411,7 +417,7 @@ public final class AgentServer extends WebSocketServer {
             } finally {
                 // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
                 sessions.save(sessionId, agent.history(), workspace.root(),
-                        config.model(), sessionStartedAt);
+                        config.model(), sessionStartedAt, agent.segments());
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
@@ -568,7 +574,8 @@ public final class AgentServer extends WebSocketServer {
      * 否则它们还在画上一段的上下文。
      */
     private void adopt(SessionSnapshot snapshot) {
-        int restored = agent.restore(snapshot.restorable());
+        // 段一起带回来，续聊时不用重新 map 一遍
+        int restored = agent.restore(snapshot.restorable(), snapshot.usableSegments());
         sessionId = snapshot.id();
         sessionStartedAt = snapshot.startedAt();
         ObjectNode done = Protocol.event("session_restored");
@@ -634,6 +641,32 @@ public final class AgentServer extends WebSocketServer {
         }
         planConfirm.cancelPending();            // 卡在计划确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行
+    }
+
+    /**
+     * 手动压一次。
+     *
+     * <p>用户比占用率更早知道「这一段聊完了」——在话题切换的当口压，
+     * 摘要边界正好落在语义边界上，比等到 93.5% 时机器随便挑一个切点干净得多。
+     * 有后台算好的现货就直接用，没有就现算。
+     */
+    private void handleCompact(WebSocket conn) {
+        if (busy.get()) {
+            send(conn, error("正在处理中，压缩要等这一轮跑完"));
+            return;
+        }
+        if (agent == null) {
+            send(conn, error("没配 API key，压缩无从谈起"));
+            return;
+        }
+        if (agent.compactNow() == null) {
+            send(conn, error("还没有可压的内容——最近几轮是原样保留的"));
+            return;
+        }
+        // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
+        // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
+        sessions.save(sessionId, agent.history(), workspace.root(),
+                config.model(), sessionStartedAt, agent.segments());
     }
 
     private void handleReset(WebSocket conn) {

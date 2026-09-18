@@ -361,7 +361,7 @@ class AgentTest {
         ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
 
         List<AgentEvent> events = new ArrayList<>();
-        Agent agent = new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6))
+        Agent agent = new Agent(llm, tools, "sys", 25, new ContextManager(3_000))
                 .onEvent(events::add);
 
         String answer = agent.run("读三个文件");
@@ -370,9 +370,12 @@ class AgentTest {
         assertTrue(events.stream().anyMatch(e -> e instanceof AgentEvent.Compacted),
                 "上下文撑大了就该触发压缩");
 
-        AgentEvent.Compacted c = (AgentEvent.Compacted) events.stream()
-                .filter(e -> e instanceof AgentEvent.Compacted).findFirst().orElseThrow();
-        assertTrue(c.tokensAfter() < c.tokensBefore(), "压完必须真的变小了");
+        // 每一条都得是「变小了」。两个数的口径必须是同一把尺子——
+        // 记录的大小不含 system、窗口含，混着用就会打出「1302 → 1598」这种越压越大的行
+        events.stream().filter(e -> e instanceof AgentEvent.Compacted)
+                .map(e -> (AgentEvent.Compacted) e)
+                .forEach(c -> assertTrue(c.tokensAfter() < c.tokensBefore(),
+                        "压完必须真的变小了，实际是 " + c.tokensBefore() + " -> " + c.tokensAfter()));
     }
 
     @Test
@@ -386,7 +389,7 @@ class AgentTest {
                 .says("好了");
         ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
 
-        new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6)).run("读文件");
+        new Agent(llm, tools, "sys", 25, new ContextManager(3_000)).run("读文件");
 
         for (List<ChatMessage> sent : llm.received) {
             java.util.Set<String> pending = new java.util.HashSet<>();

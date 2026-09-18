@@ -101,8 +101,8 @@ class SessionStoreTest {
     }
 
     @Test
-    @DisplayName("存档停在「工具点了、结果没回来」，恢复后历史是自洽的")
-    void repairsTruncatedArchive() {
+    @DisplayName("存档停在「工具点了、结果没回来」，恢复时封口而不是截断——现场要留住")
+    void sealsTruncatedArchive() {
         SessionStore store = store();
         List<ChatMessage> dying = new ArrayList<>(history());
         dying.add(ChatMessage.user("再改个文件"));
@@ -112,12 +112,20 @@ class SessionStoreTest {
         store.save(ID, dying, ws(), "deepseek-chat", STARTED);
 
         Agent agent = new Agent(null, new ToolRegistry(), "系统提示词");
-        int restored = agent.restore(store.latest(ws()).orElseThrow().restorable());
+        agent.restore(store.latest(ws()).orElseThrow().restorable());
 
-        assertEquals(4, restored, "残缺的那两条该被截掉");
-        assertTrue(HistoryRepair.isIntact(agent.conversation()));
-        assertEquals("mvn test 就行",
-                agent.history().get(agent.history().size() - 1).content());
+        assertTrue(HistoryRepair.isIntact(agent.conversation()), "封完必须自洽，否则每次请求都 400");
+        // 记录只追加，截掉的东西再也回不来——所以「再改个文件」这个现场必须还在
+        assertTrue(agent.conversation().stream()
+                        .anyMatch(m -> "再改个文件".equals(m.content())),
+                "断在半路的那一轮是最值钱的现场，不能为了自洽把它切掉");
+        assertTrue(agent.conversation().stream()
+                        .anyMatch(m -> ChatMessage.ROLE_TOOL.equals(m.role())
+                                && m.content().contains("没有执行")),
+                "没回来的工具要补一条说明，模型才知道这步没做");
+        assertEquals(ChatMessage.ROLE_ASSISTANT,
+                agent.conversation().get(agent.conversation().size() - 1).role(),
+                "末尾要收成一条 assistant，下一句用户输入才接得上");
     }
 
     @Test
@@ -169,14 +177,72 @@ class SessionStoreTest {
     }
 
     @Test
-    @DisplayName("修补之后一条不剩的存档也当作没有")
-    void unrepairableArchiveIsIgnored() {
+    @DisplayName("只问了一句就断电的存档照样接得回来——用户的问题不该被悄悄丢掉")
+    void questionOnlyArchiveIsStillRestorable() {
         SessionStore store = store();
         store.save(ID, List.of(
                 ChatMessage.system("系统"),
                 ChatMessage.user("问了但没答")), ws(), "deepseek-chat", STARTED);
 
-        assertTrue(store.latest(ws()).isEmpty());
+        var snapshot = store.latest(ws()).orElseThrow();
+        assertEquals("问了但没答", snapshot.firstUserMessage());
+
+        Agent agent = new Agent(null, new ToolRegistry(), "系统提示词");
+        agent.restore(snapshot.restorable());
+
+        assertTrue(HistoryRepair.isIntact(agent.conversation()));
+        assertTrue(agent.conversation().stream()
+                .anyMatch(m -> "问了但没答".equals(m.content())));
+    }
+
+    @Test
+    @DisplayName("摘要段跟着存档一起存——续聊时不用重新 map 一遍")
+    void roundTripsSegments() {
+        SessionStore store = store();
+        List<SummarySegment> segments = List.of(
+                new SummarySegment(0, 2, "前两条聊了怎么跑测试"));
+
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED, segments);
+
+        var loaded = store.latest(ws()).orElseThrow();
+        assertEquals(segments, loaded.segments());
+        assertEquals(segments, loaded.usableSegments());
+    }
+
+    @Test
+    @DisplayName("下标越界的段要丢掉——那是指错了原文，比没有更危险")
+    void dropsOutOfBoundsSegments() {
+        SessionStore store = store();
+        // history() 去掉 system 之后是 4 条，这个段说自己覆盖到第 99 条
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED,
+                List.of(new SummarySegment(0, 99, "指向不存在的消息")));
+
+        var loaded = store.latest(ws()).orElseThrow();
+        assertEquals(1, loaded.segments().size(), "原样读回来");
+        assertTrue(loaded.usableSegments().isEmpty(), "但不许拿去用");
+    }
+
+    @Test
+    @DisplayName("压缩过的会话，列表里显示的仍然是用户真说的第一句")
+    void compactedSessionStillShowsRealFirstMessage() {
+        SessionStore store = store();
+        List<ChatMessage> withSummaryShaped = new ArrayList<>();
+        withSummaryShaped.add(ChatMessage.system("系统"));
+        withSummaryShaped.add(ChatMessage.user("帮我把 README 的测试数改过来"));
+        withSummaryShaped.add(ChatMessage.assistant("好"));
+        for (int i = 0; i < 6; i++) {
+            withSummaryShaped.add(ChatMessage.user("接着问 " + i));
+            withSummaryShaped.add(ChatMessage.assistant("答 " + i));
+        }
+
+        // 摘要覆盖了前 4 条，但它只活在 segments 里，记录一个字没动
+        store.save(ID, withSummaryShaped, ws(), "deepseek-chat", STARTED,
+                List.of(new SummarySegment(0, 4, "[以下是早先对话的摘要，原文已省略] 用户要改 README")));
+
+        var summary = store.list(ws()).get(0);
+
+        assertEquals("帮我把 README 的测试数改过来", summary.title(),
+                "旧实现会在这儿显示「[以下是早先对话的摘要，原文已省略]」");
     }
 
     @Test

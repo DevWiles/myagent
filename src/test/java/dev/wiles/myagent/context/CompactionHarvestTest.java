@@ -19,6 +19,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>这一组测试的重点全在一件事上：<b>捡记忆绝不能伤到压缩本身</b>。
  * 压缩是长对话能不能继续下去的关键路径，而捡记忆只是顺带——
  * 模型不给、格式写歪、下游存盘炸了，都必须只是「这次没捡到」。
+ *
+ * <p>捡记忆挂在 <b>map</b> 上而不是 reduce 上：单段时根本不跑 reduce
+ * （跑了就成了摘要的摘要），挂那儿就永远捡不到；而且 map 读的是原文，
+ * reduce 只看得到摘要，抽跨会话事实当然看原文更准。封顶是整次压缩 3 条，跨块共享。
  */
 class CompactionHarvestTest {
 
@@ -29,35 +33,40 @@ class CompactionHarvestTest {
                 return new ChatResponse("x", "f", List.of(new ChatResponse.Choice(
                         0, ChatMessage.assistant(text), "stop")), null);
             }
+
             public String modelName() { return "fake"; }
         };
     }
 
-    /** 大到必须走摘要那一刀的历史。 */
-    private static List<ChatMessage> bigConversation() {
-        List<ChatMessage> history = new ArrayList<>();
-        history.add(ChatMessage.system("你是 myagent"));
-        for (int i = 0; i < 20; i++) {
-            history.add(ChatMessage.user("第 " + i + " 个问题"));
-            history.add(ChatMessage.assistant(null,
+    /** 记录<b>不含</b> system。 */
+    private static List<ChatMessage> conversation(int turns, int toolOutputSize) {
+        List<ChatMessage> record = new ArrayList<>();
+        for (int i = 0; i < turns; i++) {
+            record.add(ChatMessage.user("第 " + i + " 个问题"));
+            record.add(ChatMessage.assistant(null,
                     List.of(ToolCall.of("c" + i, "read_file", "{}"))));
-            history.add(ChatMessage.toolResult("c" + i, "文件内容 ".repeat(60)));
-            history.add(ChatMessage.assistant("第 " + i + " 个回答"));
+            record.add(ChatMessage.toolResult("c" + i, "文件内容 ".repeat(toolOutputSize)));
+            record.add(ChatMessage.assistant("第 " + i + " 个回答"));
         }
-        return history;
+        return record;
     }
 
-    private static ContextManager small() {
-        return new ContextManager(3_000, 0.3);
+    /** 窗口开得大 = 块预算大 = 整段只切成一块，于是摘要调用次数是确定的 1 次。 */
+    private static List<ChatMessage> oneChunk() {
+        return conversation(6, 5);
+    }
+
+    private static ContextManager manager() {
+        return new ContextManager(64_000);
     }
 
     @Test
     @DisplayName("模型给了「值得记住的」，逐条递出来，而且不混进摘要里")
     void harvestsWhatModelMarked() {
         List<ContextManager.Harvested> caught = new ArrayList<>();
-        ContextManager context = small().onHarvest(caught::add);
+        ContextManager context = manager().onHarvest(caught::add);
 
-        ContextManager.Result result = context.compact(bigConversation(), List.of(), saying("""
+        var compaction = context.compute(oneChunk(), List.of(), saying("""
                 用户在重构规划器，已经改了 PlanPrompt.java。
 
                 ===值得记住===
@@ -71,31 +80,28 @@ class CompactionHarvestTest {
         assertTrue(caught.get(0).content().contains("central"));
 
         // 摘要里不能带着「值得记住的」那段——它会被当成对话内容重新发给模型
-        String summary = result.messages().get(1).content();
-        assertTrue(summary.contains("重构规划器"));
-        assertFalse(summary.contains("===值得记住==="));
-        assertFalse(summary.contains("mvn-offline"));
+        assertTrue(compaction.summary().contains("重构规划器"));
+        assertFalse(compaction.summary().contains("===值得记住==="));
+        assertFalse(compaction.summary().contains("mvn-offline"));
     }
 
     @Test
     @DisplayName("模型没给那段时，摘要照常，什么都不记")
     void noMarkerMeansNoHarvest() {
         List<ContextManager.Harvested> caught = new ArrayList<>();
-        ContextManager context = small().onHarvest(caught::add);
 
-        ContextManager.Result result =
-                context.compact(bigConversation(), List.of(), saying("就是一段普通摘要，没有标记"));
+        var compaction = manager().onHarvest(caught::add)
+                .compute(oneChunk(), List.of(), saying("就是一段普通摘要，没有标记"));
 
         assertTrue(caught.isEmpty());
-        assertTrue(result.summarized());
-        assertTrue(result.messages().get(1).content().contains("就是一段普通摘要"));
+        assertTrue(compaction.summary().contains("就是一段普通摘要"));
     }
 
     @Test
     @DisplayName("那段写歪了，歪的行跳过，好的行照收")
     void skipsMalformedLines() {
         List<ContextManager.Harvested> caught = new ArrayList<>();
-        small().onHarvest(caught::add).compact(bigConversation(), List.of(), saying("""
+        manager().onHarvest(caught::add).compute(oneChunk(), List.of(), saying("""
                 摘要正文
 
                 ===值得记住===
@@ -113,7 +119,7 @@ class CompactionHarvestTest {
     @DisplayName("模型带了 markdown 列表符号也认")
     void toleratesListMarkers() {
         List<ContextManager.Harvested> caught = new ArrayList<>();
-        small().onHarvest(caught::add).compact(bigConversation(), List.of(), saying("""
+        manager().onHarvest(caught::add).compute(oneChunk(), List.of(), saying("""
                 摘要正文
 
                 ===值得记住===
@@ -133,29 +139,48 @@ class CompactionHarvestTest {
             text.append("name-").append(i).append(" | 摘要 ").append(i).append(" | 正文\n");
         }
 
-        small().onHarvest(caught::add).compact(bigConversation(), List.of(), saying(text.toString()));
+        manager().onHarvest(caught::add).compute(oneChunk(), List.of(), saying(text.toString()));
 
         assertEquals(3, caught.size());
     }
 
     @Test
+    @DisplayName("封顶是整次压缩三条，不是每块三条——多块时预算跨块共享")
+    void harvestBudgetIsSharedAcrossChunks() {
+        List<ContextManager.Harvested> caught = new ArrayList<>();
+        ContextManager context = new ContextManager(4_000).onHarvest(caught::add);
+        List<ChatMessage> record = conversation(12, 40);
+        int upTo = ContextWindow.startOfLastTurns(record, ContextWindow.KEEP_RECENT_TURNS);
+        assertTrue(context.chunks(record, 0, upTo).size() >= 2, "前提：这份记录会切成多块");
+
+        context.compute(record, List.of(), saying("""
+                摘要正文
+
+                ===值得记住===
+                a | 一 | 正文
+                b | 二 | 正文
+                """));
+
+        assertEquals(3, caught.size(), "两块各给两条，总共也只收三条");
+    }
+
+    @Test
     @DisplayName("下游存盘炸了，压缩结果照样是好的")
     void sinkFailureDoesNotBreakCompaction() {
-        ContextManager context = small().onHarvest(h -> {
+        ContextManager context = manager().onHarvest(h -> {
             throw new IllegalStateException("盘满了");
         });
 
-        ContextManager.Result result = assertDoesNotThrow(() ->
-                context.compact(bigConversation(), List.of(), saying("""
+        var compaction = assertDoesNotThrow(() ->
+                context.compute(oneChunk(), List.of(), saying("""
                         摘要正文
 
                         ===值得记住===
                         x | 摘要 | 正文
                         """)));
 
-        assertTrue(result.summarized());
-        assertTrue(result.messages().get(1).content().contains("摘要正文"));
-        assertEquals(ChatMessage.ROLE_SYSTEM, result.messages().get(0).role());
+        assertFalse(compaction.isEmpty());
+        assertTrue(compaction.summary().contains("摘要正文"));
     }
 
     @Test
@@ -168,27 +193,25 @@ class CompactionHarvestTest {
                 x | 摘要 | 正文
                 """;
 
-        ContextManager.Result withSink =
-                small().onHarvest(h -> { }).compact(bigConversation(), List.of(), saying(answer));
-        ContextManager.Result without =
-                small().compact(bigConversation(), List.of(), saying(answer));
+        var withSink = manager().onHarvest(h -> { })
+                .compute(oneChunk(), List.of(), saying(answer));
+        var without = manager().compute(oneChunk(), List.of(), saying(answer));
 
-        assertEquals(withSink.messages().size(), without.messages().size());
-        assertEquals(withSink.messages().get(1).content(), without.messages().get(1).content());
+        assertEquals(withSink.summary(), without.summary());
+        assertEquals(withSink.segments().size(), without.segments().size());
     }
 
     @Test
-    @DisplayName("只有「值得记住的」没有摘要正文时，退化成兜底说明，不返回空摘要")
+    @DisplayName("只有「值得记住的」没有摘要正文时，这一块降级成占位符，不返回空摘要")
     void emptySummaryFallsBack() {
         List<ContextManager.Harvested> caught = new ArrayList<>();
-        ContextManager.Result result = small().onHarvest(caught::add)
-                .compact(bigConversation(), List.of(), saying("""
+        var compaction = manager().onHarvest(caught::add)
+                .compute(oneChunk(), List.of(), saying("""
                         ===值得记住===
                         x | 摘要 | 正文
                         """));
 
-        String summary = result.messages().get(1).content();
-        assertFalse(summary.isBlank(), "空摘要会让那一段历史彻底没有交代");
-        assertTrue(summary.contains("已被省略"));
+        assertFalse(compaction.summary().isBlank(), "空摘要会让那一段历史彻底没有交代");
+        assertTrue(compaction.summary().contains("摘要没能生成"));
     }
 }
