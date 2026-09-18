@@ -36,6 +36,8 @@ export type Session = {
   approve: (id: number, decision: "yes" | "no" | "always") => void
   /** 回应计划确认。 */
   confirmPlan: (id: number, approved: boolean) => void
+  /** 现在就压一次上下文。原文留在存档里，压的只是发给模型的那份窗口。 */
+  compact: () => void
   /** 清空对话、开一段新会话（旧存档留着，见 protocol 3.9）。 */
   reset: () => void
   /** 中断当前这一轮。 */
@@ -204,6 +206,11 @@ export function createSession(options: BackendOptions): Session {
     confirmPlan(id, approved) {
       store.clearPlanConfirm()
       backend?.send({ t: "plan_confirm_reply", id, approved })
+    },
+    compact() {
+      // 记一条：压缩要发模型调用，有肉眼可见的停顿，屏幕上不留痕像是按键丢了
+      store.submitPrompt("/compact")
+      backend?.send({ t: "compact" })
     },
     reset() {
       store.submitPrompt("/clear")

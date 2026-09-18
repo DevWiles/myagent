@@ -121,7 +121,7 @@ docs/protocol.md   前后端契约
 ## 开发
 
 ```bash
-mvn test                       # 后端（743 个测试）
+mvn test                       # 后端（796 个测试）
 cd tui && bun test             # 界面（190 个测试）
 cd tui && bun run typecheck
 cd tui && bun run cover        # 重新生成上面那张封面图

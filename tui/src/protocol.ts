@@ -190,6 +190,14 @@ export type ClientCommand =
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }
   | { t: 'reset' }
+  /**
+   * 现在就压一次上下文（feature: `compact`）。
+   *
+   * 后端有后台算好的现货就直接用（零调用），没有就现算。正忙时回 error。
+   * 压完回一条 `compacted`。**记录不受影响**——原文一直留在存档里，
+   * 压的只是发给模型的那份窗口。
+   */
+  | { t: 'compact' }
   /** 要会话历史列表，后端回 session_list。 */
   | { t: 'sessions' }
   /** 按 id 接一段历史会话。id 认不出、找不到、或当前已有对话时后端回 error。 */

@@ -47,12 +47,19 @@ describe("边打边筛", () => {
       "/continue",
       "/resume",
       "/resume-plan",
+      "/compact",
       "/clear",
     ])
   })
 
   test("按前缀收窄", () => {
-    expect(filterCommands("/c", full).map((c) => c.name)).toEqual(["/continue", "/clear"])
+    expect(filterCommands("/c", full).map((c) => c.name)).toEqual([
+      "/continue",
+      "/compact",
+      "/clear",
+    ])
+    expect(filterCommands("/co", full).map((c) => c.name)).toEqual(["/continue", "/compact"])
+    expect(filterCommands("/com", full).map((c) => c.name)).toEqual(["/compact"])
     expect(filterCommands("/cl", full).map((c) => c.name)).toEqual(["/clear"])
     expect(filterCommands("/re", full).map((c) => c.name)).toEqual(["/resume", "/resume-plan"])
   })
@@ -157,7 +164,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(6)
+    expect(entries).toHaveLength(7)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -165,7 +172,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(6)
+    expect(lines).toHaveLength(7)
     expect(lines.some((l) => l.includes("/plan <目标>"))).toBe(true)
     expect(lines.some((l) => l.includes("现在不行"))).toBe(true)
   })
@@ -190,10 +197,10 @@ describe("参数部分", () => {
 describe("菜单开着时按回车", () => {
   const menu = (query: string, ctx = full) => filterCommands(query, ctx)
 
-  test("执行高亮那条，而不是解析敲了一半的字——/c 同时匹配两条命令", () => {
-    const rows = menu("/c")          // /continue 和 /clear
-    expect(rows).toHaveLength(2)
-    const r = acceptSelected(rows, 1, "/c")
+  test("执行高亮那条，而不是解析敲了一半的字——/c 同时匹配三条命令", () => {
+    const rows = menu("/c")          // /continue、/compact、/clear
+    expect(rows).toHaveLength(3)
+    const r = acceptSelected(rows, 2, "/c")
     expect(r.kind).toBe("run")
     if (r.kind === "run") expect(r.entry.id).toBe("clear")
   })

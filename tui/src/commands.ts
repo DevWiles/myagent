@@ -23,7 +23,14 @@ export type CommandContext = {
   hasResumablePlan: boolean
 }
 
-export type CommandId = "help" | "plan" | "continue" | "resume" | "resume-plan" | "clear"
+export type CommandId =
+  | "help"
+  | "plan"
+  | "continue"
+  | "resume"
+  | "resume-plan"
+  | "compact"
+  | "clear"
 
 type CommandSpec = {
   id: CommandId
@@ -91,6 +98,12 @@ const SPECS: CommandSpec[] = [
     anyFeature: ["resume_plan", "resume"],
     ready: (ctx) => ctx.hasResumablePlan,
     notReady: "上次没有留下没跑完的计划",
+  },
+  {
+    id: "compact",
+    name: "/compact",
+    description: "现在就把早先的对话压成摘要（原文留在存档里，不会丢）",
+    anyFeature: ["compact"],
   },
   {
     id: "clear",

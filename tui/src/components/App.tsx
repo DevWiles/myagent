@@ -235,6 +235,9 @@ export function App(props: AppProps) {
       case "resume-plan":
         session.resumePlan()
         return
+      case "compact":
+        session.compact()
+        return
       case "clear":
         session.reset()
         return
