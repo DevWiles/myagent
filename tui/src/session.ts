@@ -22,16 +22,25 @@ export type Session = {
   prompt: (text: string) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string) => void
-  /** 接着跑上次没跑完的计划。后端没宣告 resume 能力、或没有存档时不要调。 */
-  resume: () => void
+  /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
+  resumePlan: () => void
   /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
   continueSession: () => void
   /** 回应审批请求。 */
   approve: (id: number, decision: "yes" | "no" | "always") => void
   /** 回应计划确认。 */
   confirmPlan: (id: number, approved: boolean) => void
+  /** 清空对话、开一段新会话（旧存档留着，见 protocol 3.9）。 */
+  reset: () => void
   /** 中断当前这一轮。 */
   cancel: () => void
+  /**
+   * 往对话流里插一条本地提示，<b>不发给后端</b>。
+   *
+   * 命令层要用它：敲了不存在的命令、或者命令此刻用不了，都得当场说一句。
+   * 在它之前这种情况是把那行字当提示词发给模型——花钱，而且 agent 会真的动手。
+   */
+  notice: (level: "info" | "warn" | "error", text: string) => void
   /**
    * 显式关掉后端。
    *
@@ -157,11 +166,12 @@ export function createSession(options: BackendOptions): Session {
       store.submitPrompt(`/plan ${goal}`)
       backend?.send({ t: "plan", goal })
     },
-    resume() {
+    resumePlan() {
       // 和 prompt 一样先记一条：从按回车到后端把计划捞回来有肉眼可见的停顿，
       // 屏幕上什么都不留的话像是按键丢了
-      store.submitPrompt("/resume")
-      backend?.send({ t: "resume" })
+      store.submitPrompt("/resume-plan")
+      // 发新名字。后端两个都认（老名字 resume 还留着），但界面该说新的那个
+      backend?.send({ t: "resume_plan" })
     },
     continueSession() {
       store.submitPrompt("/continue")
@@ -177,8 +187,15 @@ export function createSession(options: BackendOptions): Session {
       store.clearPlanConfirm()
       backend?.send({ t: "plan_confirm_reply", id, approved })
     },
+    reset() {
+      store.submitPrompt("/clear")
+      backend?.send({ t: "reset" })
+    },
     cancel() {
       backend?.send({ t: "cancel" })
+    },
+    notice(level, text) {
+      store.notice(level, text)
     },
     dispose,
   }

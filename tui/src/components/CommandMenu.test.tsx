@@ -1,0 +1,70 @@
+/**
+ * 命令菜单的渲染测试——这是这个项目第一个真渲染的组件测试。
+ *
+ * <p>为什么值得为它破例（别的组件都靠肉眼）：这块东西的价值全在**细节**上——
+ * 选中的是哪一行、用不了的那条有没有写明原因、说明挤不挤得下。
+ * 这几样错了界面照样画得出来，只是变得没用，而肉眼扫一眼恰恰看不出「少了个理由」。
+ */
+
+import { describe, expect, test } from "bun:test"
+import { testRender } from "@opentui/solid"
+import { CommandMenu } from "./CommandMenu.tsx"
+import { listCommands, type CommandContext } from "../commands.ts"
+
+/** 后端什么都支持，但只有没跑完的计划、没有存下来的会话。 */
+const ctx: CommandContext = {
+  features: ["plan", "resume_plan", "session", "sessions"],
+  hasContinuable: false,
+  hasResumablePlan: true,
+}
+
+async function frameOf(selected: number, columns = 80): Promise<string> {
+  const entries = listCommands(ctx)
+  const { renderOnce, captureCharFrame } = await testRender(
+    () => <CommandMenu entries={entries} selected={selected} columns={columns} />,
+    { width: columns, height: 14 },
+  )
+  await renderOnce()
+  return captureCharFrame()
+}
+
+describe("命令菜单", () => {
+  test("每条命令都画出来，带说明", async () => {
+    const frame = await frameOf(0)
+    for (const name of ["/help", "/plan", "/continue", "/resume", "/resume-plan", "/clear"]) {
+      expect(frame).toContain(name)
+    }
+    expect(frame).toContain("先规划后执行")
+  })
+
+  test("选中的那一行有指针，别的行没有", async () => {
+    const frame = await frameOf(1)
+    const lines = frame.split("\n").filter((l) => l.includes("/"))
+    const marked = lines.filter((l) => l.includes("❯"))
+    expect(marked).toHaveLength(1)
+    expect(marked[0]).toContain("/plan")
+  })
+
+  test("用不了的命令写明原因，不是悄悄消失", async () => {
+    const frame = await frameOf(0)
+    expect(frame).toContain("/continue")
+    expect(frame).toContain("还没有存下来的会话")
+  })
+
+  test("窄屏下说明被截断，但一行都不许折行——折行会顶得输入框位置乱跳", async () => {
+    const frame = await frameOf(0, 46)
+    for (const line of frame.split("\n")) {
+      expect([...line].length).toBeLessThanOrEqual(46)
+    }
+    expect(frame).toContain("…")
+  })
+
+  test("没有候选时一个字都不画", async () => {
+    const { renderOnce, captureCharFrame } = await testRender(
+      () => <CommandMenu entries={[]} selected={0} columns={80} />,
+      { width: 80, height: 6 },
+    )
+    await renderOnce()
+    expect(captureCharFrame().trim()).toBe("")
+  })
+})

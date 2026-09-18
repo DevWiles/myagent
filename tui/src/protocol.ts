@@ -154,7 +154,14 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 export type ClientCommand =
   | { t: 'prompt'; text: string }
   | { t: 'plan'; goal: string }
-  /** 接着跑上次没跑完的计划。没有存档时后端回 error。 */
+  /**
+   * 接着跑上次没跑完的计划。没有存档时后端回 error。
+   *
+   * 老名字是 `resume`（那会儿只有计划能续）。后端两个都认，界面发新的这个——
+   * `/resume` 在终端里指的是「挑一段会话」，协议再叫 resume 就是两头对不上。
+   */
+  | { t: 'resume_plan' }
+  /** `resume_plan` 的老名字。留着只是为了描述协议全貌，界面不再发它。 */
   | { t: 'resume' }
   /** 接着聊上次没聊完的对话。没有存档、或当前已经有对话时后端回 error。 */
   | { t: 'continue' }

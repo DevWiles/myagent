@@ -11,13 +11,15 @@
 
 import type { KeyEvent } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createEffect, Index, Show, type Accessor } from "solid-js"
+import { createEffect, createSignal, Index, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
+import { filterCommands, helpLines, matchCommand, resolve, type CommandContext } from "../commands.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
+import { CommandMenu } from "./CommandMenu.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
@@ -87,7 +89,12 @@ export function App(props: AppProps) {
    * <p>两个条件都要查：老后端没有 resume 能力，这时候放出入口只会让用户敲了没反应。
    */
   const canResume = () =>
-    Boolean(state().ready?.resumable) && Boolean(state().ready?.features.includes("resume"))
+    Boolean(state().ready?.resumable) &&
+    // resume_plan 是新名字，resume 是老的。连的可能是个旧后端，两个都认
+    Boolean(
+      state().ready?.features.includes("resume_plan") ||
+        state().ready?.features.includes("resume"),
+    )
 
   /**
    * 后端说这个工作区有没聊完的对话，而且它确实支持恢复。
@@ -100,6 +107,97 @@ export function App(props: AppProps) {
 
   /** 有确认框挂着时为 true：此刻后端的 agent 线程正阻塞在等回答上。 */
   const pending = () => state().approval !== null || state().planConfirm !== null
+
+  // ---------------------------------------------------------------- 斜杠命令
+
+  /** 输入框里此刻的内容。菜单靠它边打边收窄，和高亮共用。 */
+  const [draft, setDraft] = createSignal("")
+  /** 菜单里选中第几条（↑↓ 移动，Tab 补全）。 */
+  const [picked, setPicked] = createSignal(0)
+  /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
+  let inputControls: { setValue: (value: string) => void } | undefined
+
+  /**
+   * 一条命令能不能用，取决于后端宣告了什么、有没有存档。
+   *
+   * 这三样都从 ready 帧来，所以这里只是把它们打个包——判断逻辑在 commands.ts，
+   * 那是纯函数，各种组合用断言测比在界面上手动敲一遍可靠。
+   */
+  const commandContext = (): CommandContext => ({
+    features: state().ready?.features ?? [],
+    hasContinuable: Boolean(state().ready?.continuable),
+    hasResumablePlan: Boolean(state().ready?.resumable),
+  })
+
+  /**
+   * 该显示哪些候选。
+   *
+   * 忙着跑、或者有确认框挂着时一条都不显示：那会儿输入框根本不该被用，
+   * 摆一列命令只会让人以为可以敲。
+   */
+  const candidates = () =>
+    state().busy || pending() ? [] : filterCommands(draft(), commandContext())
+
+  /** 当前输入对上了一条真实存在的命令吗——输入框整行换色靠它。 */
+  const matched = () => matchCommand(draft(), commandContext()) !== null
+
+  // 候选变少之后选中项可能落在列表外面，回到第一条。
+  // 不做这件事的话，Tab 会补出一条屏幕上根本没有的命令
+  createEffect(() => {
+    if (picked() >= candidates().length) setPicked(0)
+  })
+
+  /**
+   * 按回车时怎么处置这行输入。
+   *
+   * <p>五种结局里最要紧的是 unknown：**必须就地拦住**。
+   * 在这之前，认不出来的命令会被当提示词发给模型——打错一个字的代价是
+   * 一次真实的模型调用，加上一个可能开始改文件的 agent。
+   */
+  const submit = (value: string): void => {
+    if (state().busy) return
+    const decision = resolve(value, commandContext())
+    switch (decision.kind) {
+      case "prompt":
+        session.prompt(decision.text)
+        return
+      case "unknown":
+        session.notice("warn", `没有 ${decision.typed} 这个命令。敲一个 / 看有哪些，或者 /help。`)
+        return
+      case "unavailable":
+        session.notice("info", `${decision.entry.name} 现在用不了：${decision.entry.reason ?? "条件不满足"}`)
+        return
+      case "needs-args":
+        session.notice(
+          "warn",
+          `${decision.entry.name} 后面要跟${decision.entry.args ?? "参数"}，比如「${decision.entry.name} 把 README 补全」`,
+        )
+        return
+      case "command":
+        run(decision.entry.id, decision.args)
+    }
+  }
+
+  /** 真正执行一条命令。 */
+  const run = (id: string, args: string): void => {
+    switch (id) {
+      case "help":
+        session.notice("info", ["可以用的命令：", ...helpLines(commandContext())].join("\n"))
+        return
+      case "plan":
+        session.plan(args)
+        return
+      case "continue":
+        session.continueSession()
+        return
+      case "resume-plan":
+        session.resumePlan()
+        return
+      case "clear":
+        session.reset()
+        return
+    }
+  }
 
   // 确认框的按键在**这里**接，而不是在对话框组件里。
   // 因为矮终端下那个框可能整个不渲染，而后端正卡着等回答——
@@ -134,6 +232,32 @@ export function App(props: AppProps) {
       if (key.name === "n" || key.name === "escape")
         return consume(), session.confirmPlan(confirm.id, false)
       return consume()
+    }
+
+    // 命令菜单开着时，↑↓ 选、Tab 补全。
+    //
+    // 刻意**不接 Enter**：回车照原样交给输入框，由 submit() 去解析那行文字。
+    // 接了 Enter 就得自己清空输入框、自己处理「选中项和输入框内容不一致」——
+    // 而唯一前缀本来就认（/cont 就是 /continue），Tab 只是个省字的便利，不是必经之路
+    const menu = candidates()
+    if (menu.length > 0) {
+      if (key.name === "up") {
+        consume()
+        setPicked((i) => (i - 1 + menu.length) % menu.length)
+        return
+      }
+      if (key.name === "down") {
+        consume()
+        setPicked((i) => (i + 1) % menu.length)
+        return
+      }
+      if (key.name === "tab") {
+        consume()
+        const entry = menu[picked()]
+        // 带参数的命令补完留个空格，光标正好停在该打参数的地方
+        if (entry) inputControls?.setValue(entry.name + (entry.args ? " " : ""))
+        return
+      }
     }
 
     // 没有确认框时，Esc 中断当前这一轮
@@ -195,7 +319,7 @@ export function App(props: AppProps) {
             <text fg={dark.text}>{state().ready!.resumable!.goal}</text>
             <text fg={dark.subtle}>
               （还剩 {state().ready!.resumable!.remaining} /{" "}
-              {state().ready!.resumable!.total} 步，输入 /resume 接着跑）
+              {state().ready!.resumable!.total} 步，输入 /resume-plan 接着跑）
             </text>
           </box>
         </Show>
@@ -204,10 +328,17 @@ export function App(props: AppProps) {
             一个续计划、一个续对话，各说各的，不该互相顶掉 */}
         <Show when={canContinue() && !state().busy}>
           <box flexShrink={0} paddingLeft={1} flexDirection="row">
-            <text fg={dark.warning}>⏸ 上次在这儿聊过 </text>
-            <text fg={dark.text}>{state().ready!.continuable!.turns} 轮</text>
+            {/* 报总数而不是只说「上次聊过」：存档已经是一次会话一份，
+                「上次」这个说法的前提（只有一段）不成立了 */}
+            <text fg={dark.warning}>⏸ 这个工作区有 </text>
+            <text fg={dark.text}>{state().ready!.continuable!.count ?? 1} 段会话</text>
             <text fg={dark.subtle}>
-              （首句「{state().ready!.continuable!.firstMessage}」，输入 /continue 接着聊）
+              ，最近一段「{state().ready!.continuable!.firstMessage}」
+              {state().ready!.continuable!.turns} 轮
+              {state().ready!.continuable!.branch
+                ? ` · ${state().ready!.continuable!.branch}`
+                : ""}
+              （/continue 接最近那段）
             </text>
           </box>
         </Show>
@@ -238,6 +369,10 @@ export function App(props: AppProps) {
           </box>
         </Show>
 
+        {/* 命令菜单钉在输入框**上方**：往下长会把输入框挤下去，
+            而输入框的位置是打字时眼睛的锚点，不能动 */}
+        <CommandMenu entries={candidates()} selected={picked()} columns={dimensions().width - 2} />
+
         <PromptInput
           placeholder={
             pending()
@@ -248,15 +383,10 @@ export function App(props: AppProps) {
           }
           busy={state().busy}
           suspended={pending()}
-          onSubmit={(value) => {
-            if (state().busy) return
-            // /plan 开头走规划模式，但后端没宣告 plan 能力时退回普通对话
-            const planGoal = value.startsWith("/plan ") ? value.slice(6).trim() : null
-            if (planGoal && state().ready?.features.includes("plan")) session.plan(planGoal)
-            else if (value.trim() === "/resume" && canResume()) session.resume()
-            else if (value.trim() === "/continue" && canContinue()) session.continueSession()
-            else session.prompt(value)
-          }}
+          onValueChange={setDraft}
+          matched={matched()}
+          controls={(api) => (inputControls = api)}
+          onSubmit={submit}
         />
 
         {/* 计划面板钉在输入框下边：出现时把输入框往上顶，
