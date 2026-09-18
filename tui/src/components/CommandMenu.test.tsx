@@ -51,6 +51,24 @@ describe("命令菜单", () => {
     expect(frame).toContain("还没有存下来的会话")
   })
 
+  test("用不了的行只说原因，不把说明和原因套成两层括号", async () => {
+    const frame = await frameOf(0, 120)
+    // 这个 fixture 里没有存档，所以 /continue 是灰的；/resume-plan 反倒是可用的
+    const row = frame.split("\n").find((l) => l.includes("/continue"))!
+    expect(row).toContain("⊘")
+    expect(row).toContain("还没有存下来的会话")
+    expect(row).not.toContain("不用挑")
+  })
+
+  test("名字和说明之间一定有空格——最长那条曾经正好顶满列宽，挤成一团", async () => {
+    const frame = await frameOf(0, 120)
+    for (const name of ["/resume-plan", "/plan <目标>", "/help", "/clear"]) {
+      const row = frame.split("\n").find((l) => l.includes(name))!
+      const after = row.slice(row.indexOf(name) + name.length)
+      expect(after.startsWith("  ")).toBe(true)
+    }
+  })
+
   test("窄屏下说明被截断，但一行都不许折行——折行会顶得输入框位置乱跳", async () => {
     const frame = await frameOf(0, 46)
     for (const line of frame.split("\n")) {

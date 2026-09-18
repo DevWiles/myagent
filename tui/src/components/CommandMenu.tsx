@@ -25,11 +25,25 @@ export type CommandMenuProps = {
   columns: number
 }
 
-/** 最长的命令是 /resume-plan，按它对齐，说明文字才不会一行一个起点。 */
-const NAME_WIDTH = 12
+/**
+ * 名字那一列至少留出的空隙。
+ *
+ * <p>列宽<b>按实际内容算</b>，不写死一个数。写死过一次，值正好等于最长的那条
+ * （`/resume-plan` 是 12 个字符，NAME_WIDTH 也是 12），于是 `padEnd(12)` 一个空格
+ * 都补不出来，屏幕上是「/resume-plan接着跑上次…」。加一条命令就可能再犯一次，
+ * 所以改成现算，并且强制留 GUTTER 个空格。
+ */
+const GUTTER = 2
 
 export function CommandMenu(props: CommandMenuProps) {
   const theme = useTheme()
+
+  /** 名字列有多宽：最长的那条 + 空隙。 */
+  const nameWidth = () =>
+    Math.max(
+      ...props.entries.map((entry) => (entry.name + (entry.args ? " " + entry.args : "")).length),
+      0,
+    ) + GUTTER
 
   return (
     <Show when={props.entries.length > 0}>
@@ -39,16 +53,20 @@ export function CommandMenu(props: CommandMenuProps) {
             const active = () => index === props.selected
             const head = () => {
               const name = entry().name + (entry().args ? " " + entry().args : "")
-              return name.padEnd(NAME_WIDTH, " ")
+              return name.padEnd(nameWidth(), " ")
             }
             // 说明挤不下就截断：宽度不够时宁可少看几个字，也不能让这一条换行——
             // 菜单一换行，下面的输入框位置就跟着跳，打字时眼睛得重新找
+            // 用不了的时候只说**原因**，不再把说明和原因套成两层括号
+            // （原来是「接着跑上次没跑完的计划（做成的步骤不重来）（上次没有留下没跑完的计划）」，
+            // 而说明本身常常也带括号，叠起来根本读不出哪句是哪句）。
+            // 此刻用户要的答案是「为什么它是灰的」，不是「它本来能干什么」
             const tail = () =>
               truncate(
                 entry().available
                   ? entry().description
-                  : `${entry().description}（${entry().reason ?? "现在用不了"}）`,
-                Math.max(10, props.columns - NAME_WIDTH - 6),
+                  : `⊘ ${entry().reason ?? "现在用不了"}`,
+                Math.max(10, props.columns - nameWidth() - 4),
               )
             return (
               <box flexDirection="row">
