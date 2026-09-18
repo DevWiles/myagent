@@ -18,12 +18,14 @@ import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
 import { filterCommands, helpLines, matchCommand, resolve, type CommandContext } from "../commands.ts"
+import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { CommandMenu } from "./CommandMenu.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
 import { PromptInput } from "./PromptInput.tsx"
+import { SessionPicker } from "./SessionPicker.tsx"
 import { StatusLine } from "./StatusLine.tsx"
 import { Welcome } from "./Welcome.tsx"
 
@@ -136,7 +138,9 @@ export function App(props: AppProps) {
    * 摆一列命令只会让人以为可以敲。
    */
   const candidates = () =>
-    state().busy || pending() ? [] : filterCommands(draft(), commandContext())
+    state().busy || pending() || picker() !== null
+      ? []
+      : filterCommands(draft(), commandContext())
 
   /** 当前输入对上了一条真实存在的命令吗——输入框整行换色靠它。 */
   const matched = () => matchCommand(draft(), commandContext()) !== null
@@ -190,6 +194,10 @@ export function App(props: AppProps) {
       case "continue":
         session.continueSession()
         return
+      case "resume":
+        // 每次都重新问一次后端，不缓存：另一个界面可能刚聊了一轮、刚清过一段
+        session.requestSessions()
+        return
       case "resume-plan":
         session.resumePlan()
         return
@@ -197,6 +205,64 @@ export function App(props: AppProps) {
         session.reset()
         return
     }
+  }
+
+  // ------------------------------------------------------------ 会话选择器
+
+  /** 面板的数据由后端给（session_list），null = 没开。 */
+  const picker = () => state().sessionPicker
+  /** 只看当前分支（Ctrl-B 切）。 */
+  const [branchOnly, setBranchOnly] = createSignal(false)
+  /** 选中第几段。 */
+  const [pickIndex, setPickIndex] = createSignal(0)
+  /**
+   * 面板打开那一刻的「现在」，用来算「4 分钟前」。
+   *
+   * <p>钉死在打开的时刻，不跟着时钟走：让它每秒刷新，整个列表就会每秒重绘一次，
+   * 而「4 分钟前」变成「5 分钟前」对挑选毫无帮助。
+   */
+  const [pickerNow, setPickerNow] = createSignal(Date.now())
+
+  /**
+   * 搜索词就是**主输入框里的字**。
+   *
+   * <p>面板不自带搜索框：再放一个 input 就要处理焦点在两个控件之间交接，
+   * 而那正是这套界面上最容易出「按键打到别处去」的地方（见下面 consume 那段）。
+   */
+  const pickerFilter = (): PickerFilter => ({
+    query: draft(),
+    branchOnly: branchOnly(),
+    currentBranch: state().ready?.branch ?? null,
+  })
+
+  const pickerRows = () => filterSessions(picker()?.sessions ?? [], pickerFilter())
+
+  /** 分给面板的行数。一段占两行，所以先算行数再折半。 */
+  const pickerMaxRows = () =>
+    Math.max(2, Math.min(8, Math.floor((dimensions().height * 0.4) / 2)))
+
+  // 每次打开都从第一条开始、从全部分支开始、重新取一次「现在」。
+  // 不重置的话，上一次翻到第 9 条的位置会留到下一次打开，而列表早就不一样了
+  createEffect(() => {
+    if (picker()) {
+      setPickIndex(0)
+      setBranchOnly(false)
+      setPickerNow(Date.now())
+    }
+  })
+
+  // 搜索会让列表随时变短，选中项很容易落在外面。不夹的话按 Enter 会接一段
+  // **屏幕上根本没有的会话**——那正是「挑错会话」最糟的形式
+  createEffect(() => {
+    const count = pickerRows().length
+    if (pickIndex() >= count) setPickIndex(clampSelection(pickIndex(), count))
+  })
+
+  /** 挑中了，或者放弃了。两种都要把搜索词清掉，否则它会变成下一句提示词。 */
+  const leavePicker = (id?: string): void => {
+    inputControls?.setValue("")
+    if (id) session.resumeSession(id)
+    else session.closeSessionPicker()
   }
 
   // 确认框的按键在**这里**接，而不是在对话框组件里。
@@ -232,6 +298,37 @@ export function App(props: AppProps) {
       if (key.name === "n" || key.name === "escape")
         return consume(), session.confirmPlan(confirm.id, false)
       return consume()
+    }
+
+    // 会话选择器开着时，它先接键。输入框照常收字符——那就是搜索框
+    if (picker()) {
+      const rows = pickerRows()
+      if (key.name === "escape") return consume(), leavePicker()
+      if (key.name === "up") {
+        consume()
+        setPickIndex((i) => clampSelection(i - 1, rows.length))
+        return
+      }
+      if (key.name === "down") {
+        consume()
+        setPickIndex((i) => clampSelection(i + 1, rows.length))
+        return
+      }
+      // Ctrl-B 只看当前分支。不在 git 仓库里时这个开关没有意义（见 filterSessions）
+      if (key.name === "b" && key.ctrl) {
+        consume()
+        setBranchOnly((v) => !v)
+        return
+      }
+      if (key.name === "return") {
+        // 这里**必须**消费掉：不消费的话输入框会把搜索词当成一句话提交给模型
+        consume()
+        const row = rows[pickIndex()]
+        if (row) leavePicker(row.id)
+        else session.notice("info", "没有可挑的会话。改几个字，或者 Esc 取消。")
+        return
+      }
+      return
     }
 
     // 命令菜单开着时，↑↓ 选、Tab 补全。
@@ -369,6 +466,20 @@ export function App(props: AppProps) {
           </box>
         </Show>
 
+        {/* 会话选择器。和命令菜单一样钉在输入框上方，两个不会同时出现 */}
+        <Show when={picker()}>
+          <SessionPicker
+            rows={pickerRows()}
+            total={picker()!.sessions.length}
+            selected={pickIndex()}
+            currentId={picker()!.currentId}
+            filter={pickerFilter()}
+            columns={dimensions().width}
+            maxRows={pickerMaxRows()}
+            now={pickerNow()}
+          />
+        </Show>
+
         {/* 命令菜单钉在输入框**上方**：往下长会把输入框挤下去，
             而输入框的位置是打字时眼睛的锚点，不能动 */}
         <CommandMenu entries={candidates()} selected={picked()} columns={dimensions().width - 2} />
@@ -377,9 +488,11 @@ export function App(props: AppProps) {
           placeholder={
             pending()
               ? "上面等你回答…"
-              : state().busy
-                ? "正在跑…（Esc 中断）"
-                : "交代一件事，比如「把 README 里的启动命令补全」"
+              : picker()
+                ? "输入即搜索（标题或分支）· ↑↓ 选 · Enter 接着聊 · Esc 取消"
+                : state().busy
+                  ? "正在跑…（Esc 中断）"
+                  : "交代一件事，比如「把 README 里的启动命令补全」"
           }
           busy={state().busy}
           suspended={pending()}

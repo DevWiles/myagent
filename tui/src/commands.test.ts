@@ -111,12 +111,16 @@ describe("按回车怎么处置", () => {
     expect(resolve("/繼續", full).kind).toBe("prompt")
   })
 
-  test("/resume 这个名字被占住，不会悄悄变成「续跑计划」", () => {
+  test("/resume 精确匹配自己，不会被前缀规则变成「续跑计划」", () => {
     const r = resolve("/resume", full)
-    expect(r.kind).toBe("unavailable")
-    if (r.kind === "unavailable") {
-      expect(r.entry.reason).toContain("/resume-plan")
+    expect(r.kind).toBe("command")
+    if (r.kind === "command") {
+      expect(r.entry.id).toBe("resume")
     }
+  })
+
+  test("没有存档时 /resume 照样能开——面板自己会说这个工作区还没有会话", () => {
+    expect(resolve("/resume", fresh).kind).toBe("command")
   })
 
   test("/res 前缀不唯一，不替用户在挑会话和续计划之间猜", () => {

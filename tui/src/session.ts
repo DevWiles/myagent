@@ -26,6 +26,12 @@ export type Session = {
   resumePlan: () => void
   /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
   continueSession: () => void
+  /** 要会话历史列表（打开选择器）。后端回 session_list。 */
+  requestSessions: () => void
+  /** 挑中了某一段，接进来。 */
+  resumeSession: (id: string) => void
+  /** 收起选择器面板。 */
+  closeSessionPicker: () => void
   /** 回应审批请求。 */
   approve: (id: number, decision: "yes" | "no" | "always") => void
   /** 回应计划确认。 */
@@ -176,6 +182,18 @@ export function createSession(options: BackendOptions): Session {
     continueSession() {
       store.submitPrompt("/continue")
       backend?.send({ t: "continue" })
+    },
+    requestSessions() {
+      // 刻意**不往 transcript 里记一条**：打开一个面板不是「说了一句话」。
+      // 记了的话，翻历史时会看到一串莫名其妙的 /resume
+      backend?.send({ t: "sessions" })
+    },
+    resumeSession(id) {
+      store.closeSessionPicker()      // 先收面板：后端要几十毫秒，面板挂着会像没反应
+      backend?.send({ t: "session_resume", id })
+    },
+    closeSessionPicker() {
+      store.closeSessionPicker()
     },
     approve(id, decision) {
       // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，

@@ -29,6 +29,7 @@ function stateOf(partial: { entries?: Entry[]; tokens?: number; auditLog?: strin
     lastDurationMs: null,
     startedAt: null,
     closed: null,
+    sessionPicker: null,
   }
 }
 

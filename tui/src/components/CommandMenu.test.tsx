@@ -71,9 +71,15 @@ describe("命令菜单", () => {
 
   test("窄屏下说明被截断，但一行都不许折行——折行会顶得输入框位置乱跳", async () => {
     const frame = await frameOf(0, 46)
-    for (const line of frame.split("\n")) {
-      expect([...line].length).toBeLessThanOrEqual(46)
+    const rows = frame.split("\n").filter((l) => l.trim())
+
+    // 每条命令都得在**同一行**上完整出现。折行的表现是 /resume-plan 被劈成
+    // 「/resume-」和「plan」两行，而按列数断言是抓不到的——折行之后每行反而更短了
+    for (const name of ["/help", "/plan", "/continue", "/resume", "/resume-plan", "/clear"]) {
+      expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
+    // 六条命令 + 一行键位提示 = 七行，多出来的行就是折行折出来的
+    expect(rows).toHaveLength(7)
     expect(frame).toContain("…")
   })
 

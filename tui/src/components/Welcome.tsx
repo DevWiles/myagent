@@ -113,12 +113,13 @@ function Section(props: { title: string; lines: readonly string[] }) {
 
 const TIPS = [
   "输入任务后按 Enter，agent 会自己决定调哪些工具",
-  "/plan 先规划后执行，/help 看全部命令",
+  "敲一个 / 看有哪些命令，边打边筛",
+  "/resume 挑一段历史会话接着聊，/continue 直接接最近那段",
   "Ctrl-O 展开工具调用详情，Ctrl-C 退出",
 ] as const
 
 const WHATS_NEW = [
-  "界面渲染层迁到 OpenTUI + SolidJS（原生绘制、支持鼠标）",
-  "先规划后执行：计划面板 + 执行前确认",
-  "审计轨迹落盘，一行一条 JSON",
+  "多会话：一次会话一份存档，/resume 挑一段接着聊",
+  "断网/超限断在半路，说一句「继续」就接着干",
+  "界面自己认斜杠命令，认不出的不再发给模型",
 ] as const

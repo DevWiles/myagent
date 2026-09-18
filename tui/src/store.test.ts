@@ -626,3 +626,83 @@ describe('会话恢复', () => {
     expect(store.getSnapshot().ready?.model).toBe('deepseek-chat')
   })
 })
+
+describe('会话选择器', () => {
+  const list = (currentId = 'now') =>
+    ({
+      t: 'session_list',
+      currentId,
+      sessions: [
+        {
+          id: '20260918-090000-aaaa',
+          title: '加上多会话功能',
+          turns: 12,
+          model: 'deepseek-chat',
+          branch: 'dev',
+          startedAt: 1,
+          savedAt: 2,
+          bytes: 34_211,
+        },
+        {
+          id: '20260917-090000-bbbb',
+          title: '调试 tmux',
+          turns: 6,
+          model: 'deepseek-chat',
+          branch: null,
+          startedAt: 1,
+          savedAt: 1,
+          bytes: 5_800,
+        },
+      ],
+    }) as ServerEvent
+
+  test('收到列表就把面板的数据准备好，currentId 一起带上', () => {
+    const store = new SessionStore()
+    feed(store, list('20260918-090000-aaaa'))
+
+    const picker = store.getSnapshot().sessionPicker!
+    expect(picker.sessions).toHaveLength(2)
+    expect(picker.currentId).toBe('20260918-090000-aaaa')
+    expect(picker.sessions[0]!.branch).toBe('dev')
+    expect(picker.sessions[1]!.branch).toBeNull()
+  })
+
+  test('再问一次是整份覆盖，不做缓存——别的界面可能刚聊了一轮', () => {
+    const store = new SessionStore()
+    feed(store, list())
+    feed(store, { t: 'session_list', currentId: 'x', sessions: [] } as ServerEvent)
+
+    expect(store.getSnapshot().sessionPicker?.sessions).toEqual([])
+  })
+
+  test('挑完接上了，面板就收起——挂着的话下一次 ↑↓ 会落在一个已经接过的列表上', () => {
+    const store = new SessionStore()
+    feed(store, list())
+    feed(store, {
+      t: 'session_restored',
+      messages: 11,
+      turns: 4,
+      firstMessage: '这个项目怎么跑测试',
+      savedAt: 1,
+    } as ServerEvent)
+
+    expect(store.getSnapshot().sessionPicker).toBeNull()
+  })
+
+  test('放弃挑选也收起来', () => {
+    const store = new SessionStore()
+    feed(store, list())
+    store.closeSessionPicker()
+
+    expect(store.getSnapshot().sessionPicker).toBeNull()
+  })
+
+  test('本来就没开的时候收一下也不报错、不多推一次状态', () => {
+    const store = new SessionStore()
+    let pushes = 0
+    store.subscribe(() => pushes++)
+    store.closeSessionPicker()
+
+    expect(pushes).toBe(0)
+  })
+})

@@ -105,6 +105,27 @@ export type ServerEvent =
   /** 一轮对话的开始/结束。结束时带上耗时和上下文占用。 */
   | { t: 'busy'; busy: boolean; durationMs?: number; tokens?: number; contextLimit?: number }
   | { t: 'reset_done' }
+  /**
+   * 这个工作区的会话历史，只回给问的那个连接。
+   *
+   * 不在 ready 帧里：一个工作区能攒几十段，而首帧每次连上来都要发。
+   * 要列表的界面自己问一句（见 protocol.md 3.9）。
+   */
+  | {
+      t: 'session_list'
+      currentId: string
+      sessions: {
+        id: string
+        title: string
+        turns: number
+        model: string
+        /** 那段是在哪个分支上聊的。不在仓库里、或是老存档时是 null。 */
+        branch?: string | null
+        startedAt: number
+        savedAt: number
+        bytes: number
+      }[]
+    }
   | { t: 'error'; message: string }
   | { t: 'pong' }
   // ---- 先规划后执行（feature: 'plan'），时序见 docs/protocol.md 第 5 节 ----
@@ -169,6 +190,10 @@ export type ClientCommand =
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }
   | { t: 'reset' }
+  /** 要会话历史列表，后端回 session_list。 */
+  | { t: 'sessions' }
+  /** 按 id 接一段历史会话。id 认不出、找不到、或当前已有对话时后端回 error。 */
+  | { t: 'session_resume'; id: string }
   | { t: 'ping' }
 
 /** 后端启动时打在 stdout 的握手行，界面靠它知道该连哪儿。 */

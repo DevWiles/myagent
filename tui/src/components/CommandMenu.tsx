@@ -1,7 +1,7 @@
 import { Index, Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import { useTheme } from "../theme.ts"
-import { truncate } from "../format.ts"
+import { truncateWidth, width } from "../path.ts"
 import type { CommandEntry } from "../commands.ts"
 
 /**
@@ -38,10 +38,10 @@ const GUTTER = 2
 export function CommandMenu(props: CommandMenuProps) {
   const theme = useTheme()
 
-  /** 名字列有多宽：最长的那条 + 空隙。 */
+  /** 名字列有多宽：最长的那条 + 空隙。用 width() 量，因为参数占位符可能带中文。 */
   const nameWidth = () =>
     Math.max(
-      ...props.entries.map((entry) => (entry.name + (entry.args ? " " + entry.args : "")).length),
+      ...props.entries.map((entry) => width(entry.name + (entry.args ? " " + entry.args : ""))),
       0,
     ) + GUTTER
 
@@ -53,7 +53,8 @@ export function CommandMenu(props: CommandMenuProps) {
             const active = () => index === props.selected
             const head = () => {
               const name = entry().name + (entry().args ? " " + entry().args : "")
-              return name.padEnd(nameWidth(), " ")
+              // 按列宽补齐，不是按字符数：参数占位符里的中文占两列
+              return name + " ".repeat(Math.max(0, nameWidth() - width(name)))
             }
             // 说明挤不下就截断：宽度不够时宁可少看几个字，也不能让这一条换行——
             // 菜单一换行，下面的输入框位置就跟着跳，打字时眼睛得重新找
@@ -61,23 +62,32 @@ export function CommandMenu(props: CommandMenuProps) {
             // （原来是「接着跑上次没跑完的计划（做成的步骤不重来）（上次没有留下没跑完的计划）」，
             // 而说明本身常常也带括号，叠起来根本读不出哪句是哪句）。
             // 此刻用户要的答案是「为什么它是灰的」，不是「它本来能干什么」
+            // 按列宽截，不是按字符数——说明里全是中文，实际占的列数是字数的两倍。
+            // 算错了终端就自己折行，把一条命令劈成两行，下面的输入框位置跟着往下跳
             const tail = () =>
-              truncate(
+              truncateWidth(
                 entry().available
                   ? entry().description
                   : `⊘ ${entry().reason ?? "现在用不了"}`,
-                Math.max(10, props.columns - nameWidth() - 4),
+                Math.max(8, props.columns - nameWidth() - 4),
               )
             return (
-              <box flexDirection="row">
-                <text fg={active() ? theme.brand : theme.inactive}>{active() ? "❯ " : "  "}</text>
+              // flexShrink={0}：不写的话窄屏上 flex 会去压缩这两段文字，
+              // 而「压缩」在终端里的表现就是折行——命令名被劈成两半
+              <box flexDirection="row" flexWrap="no-wrap">
+                <text flexShrink={0} fg={active() ? theme.brand : theme.inactive}>
+                  {active() ? "❯ " : "  "}
+                </text>
                 <text
+                  flexShrink={0}
                   fg={entry().available ? (active() ? theme.brand : theme.user) : theme.inactive}
                   attributes={active() ? TextAttributes.BOLD : undefined}
                 >
                   {head()}
                 </text>
-                <text fg={entry().available ? theme.subtle : theme.inactive}>{tail()}</text>
+                <text flexShrink={0} fg={entry().available ? theme.subtle : theme.inactive}>
+                  {tail()}
+                </text>
               </box>
             )
           }}

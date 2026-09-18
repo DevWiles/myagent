@@ -80,7 +80,8 @@ const SPECS: CommandSpec[] = [
     name: "/resume",
     description: "从会话历史里挑一段接着聊",
     anyFeature: ["sessions"],
-    pending: "选择器面板还没做完；现在想接最近那段用 /continue，想续计划用 /resume-plan",
+    // 不要求「有存档」：没有存档时面板会自己说这个工作区还没有会话，
+    // 那比让命令灰着更容易懂——用户想知道的是「我有没有历史」，而这正是答案
   },
   {
     id: "resume-plan",
