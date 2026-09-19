@@ -730,3 +730,30 @@ describe("用量：占用和累计是两个数", () => {
     expect(store.getSnapshot().sentTokens).toBe(5_000)
   })
 })
+
+describe("压缩：摘要和裁剪是两回事", () => {
+  test("摘要落地和只裁工具输出都要进转录，而且分得开", () => {
+    const store = new SessionStore()
+
+    feed(store,
+      { t: "compacted", tokensBefore: 48_210, tokensAfter: 19_044, summarized: true },
+      { t: "compacted", tokensBefore: 9_100, tokensAfter: 7_300, summarized: false })
+
+    const compacted = store.getSnapshot().entries.filter(e => e.kind === "compacted")
+    expect(compacted.length).toBe(2)
+    expect(compacted[0]).toMatchObject({ before: 48_210, after: 19_044, summarized: true })
+    // summarized:false 是「工具输出被裁了」。这一条不显示的话，用户看到的是
+    // 「它刚读过的文件怎么下一句就忘了」，而界面一声不吭（protocol.md §3.11）
+    expect(compacted[1]).toMatchObject({ before: 9_100, after: 7_300, summarized: false })
+  })
+
+  test("压缩不改 token 数——那是 busy 的活，两条路各管各的", () => {
+    const store = new SessionStore()
+    feed(store, { t: "busy", busy: false, tokens: 48_210, sentTokens: 100_000 })
+
+    feed(store, { t: "compacted", tokensBefore: 48_210, tokensAfter: 19_044, summarized: true })
+
+    expect(store.getSnapshot().tokens).toBe(48_210)
+    expect(store.getSnapshot().sentTokens).toBe(100_000)
+  })
+})

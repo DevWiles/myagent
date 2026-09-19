@@ -52,7 +52,7 @@ export function EntryView(props: EntryViewProps) {
         {(entry) => <NoticeEntry level={entry().level} text={entry().text} />}
       </Match>
       <Match when={props.entry.kind === "compacted" ? props.entry : null}>
-        {(entry) => <CompactedEntry before={entry().before} after={entry().after} />}
+        {(entry) => <CompactedEntry before={entry().before} after={entry().after} summarized={entry().summarized} />}
       </Match>
       <Match when={props.entry.kind === "plan" ? props.entry : null}>
         {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
@@ -326,12 +326,23 @@ function NoticeEntry(props: { level: "info" | "warn" | "error"; text: string }) 
   )
 }
 
-function CompactedEntry(props: { before: number; after: number }) {
+/**
+ * 两种压缩看着像，实际差得很远，必须分开说（protocol.md §3.11）。
+ *
+ * - `summarized` 为 true：早先的对话被摘要顶替了，原文还在存档里。
+ * - `summarized` 为 false：**只是把过长的工具输出裁了**。只有一两轮对话时压不出摘要
+ *   （最近几轮是硬约束），但读进来的大文件照样会被削成一行。
+ *
+ * 后一种尤其不能一声不吭：用户看到的现象是「它刚读过的文件，怎么下一句就不记得了」，
+ * 而界面上什么都没有，没人会想到是上下文在背后被削了。
+ */
+function CompactedEntry(props: { before: number; after: number; summarized: boolean }) {
   const theme = useTheme()
+  const what = () => (props.summarized ? "早先的对话已摘要" : "较早的工具输出已裁剪")
   return (
     <box paddingTop={1}>
       <text fg={theme.subtle}>
-        — 上下文已压缩 {props.before} → {props.after} tokens —
+        — {what()} {props.before} → {props.after} tokens（原文都在存档里） —
       </text>
     </box>
   )
