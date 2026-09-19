@@ -16,7 +16,7 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
-import type { PlanTaskWire, ServerEvent, ToolInfo } from './protocol.ts'
+import type { MemoryRow, PlanTaskWire, ServerEvent, ToolInfo } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
@@ -77,6 +77,7 @@ export type Entry =
   | { kind: 'tools'; key: string; calls: ToolCall[] }
   | { kind: 'notice'; key: string; level: 'info' | 'warn' | 'error'; text: string }
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
+  | { kind: 'memory'; key: string; rows: MemoryRow[] }
   | { kind: 'plan'; key: string; plan: PlanData }
 
 export type Approval = { id: number; action: string; detail: string; reason: string }
@@ -418,6 +419,24 @@ export class SessionStore {
           after: event.tokensAfter,
           summarized: event.summarized,
         })
+        return
+
+      case 'memory_list':
+        this.append({ kind: 'memory', key: this.nextKey('memory'), rows: event.entries ?? [] })
+        return
+
+      case 'memory_changed':
+        // 结果用 notice 而不是新造一种转录条目：它只有一句话，不值当
+        this.notice(
+          'info',
+          event.action === 'undo'
+            ? `已撤销自动记下的 ${event.name ?? '(未知)'}${
+                event.description ? ` — ${event.description}` : ''
+              }。被它取代过的旧事实（如果有）已经重新生效。`
+            : (event.removed ?? 0) === 0
+              ? '没有自动记录可清。'
+              : `已清掉 ${event.removed} 条自动记录，你自己让记的一条没动。`,
+        )
         return
 
       case 'done': {

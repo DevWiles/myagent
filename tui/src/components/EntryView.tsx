@@ -19,6 +19,7 @@ import {
 import { createMemo, For, Match, Show, Switch, untrack } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import { isListItem, splitBlocks } from "../markdown-blocks.ts"
+import type { MemoryRow } from "../protocol.ts"
 import type { Entry, ToolCall } from "../store.ts"
 import { syntaxStyleFor, useTheme } from "../theme.ts"
 
@@ -53,6 +54,9 @@ export function EntryView(props: EntryViewProps) {
       </Match>
       <Match when={props.entry.kind === "compacted" ? props.entry : null}>
         {(entry) => <CompactedEntry before={entry().before} after={entry().after} summarized={entry().summarized} />}
+      </Match>
+      <Match when={props.entry.kind === "memory" ? props.entry : null}>
+        {(entry) => <MemoryEntryView rows={entry().rows} />}
       </Match>
       <Match when={props.entry.kind === "plan" ? props.entry : null}>
         {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
@@ -310,6 +314,64 @@ function ToolsEntry(props: { calls: ToolCall[] }) {
       </text>
       <Show when={failed() > 0}>
         <text fg={theme.error}> · {failed()} 个失败</text>
+      </Show>
+    </box>
+  )
+}
+
+/**
+ * 长期记忆清单。
+ *
+ * <h3>被取代的条目要显示，但要弱化</h3>
+ * 它们已经不再注入提示词、也 recall 不到，但仍留在盘上。隐藏掉的话，
+ * 「它为什么突然改口了」就永远查不清——那正是这个清单存在的理由之一。
+ * 所以画出来，但画得暗，并且直说是被谁顶掉的。
+ */
+function MemoryEntryView(props: { rows: MemoryRow[] }) {
+  const theme = useTheme()
+  const superseded = () => props.rows.filter((r) => r.supersededBy).length
+
+  return (
+    <box flexDirection="column" paddingTop={1}>
+      <Show
+        when={props.rows.length > 0}
+        fallback={<text fg={theme.subtle}>还没有任何长期记忆。说一句「记住…」就会有。</text>}
+      >
+        <text fg={theme.heading} attributes={TextAttributes.BOLD}>
+          长期记忆 {props.rows.length} 条
+          {superseded() > 0 ? ` · ${superseded()} 条已被取代，不再注入` : ""}
+        </text>
+        <For each={props.rows}>
+          {(row) => {
+            const dim = () => row.supersededBy != null
+            const meta = () =>
+              [
+                row.topicKey ? `主题 ${row.topicKey}` : null,
+                row.scope === "global" ? "全局" : "本项目",
+                row.created,
+                row.turnId ? `来自 ${row.turnId}` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            return (
+              <box flexDirection="column" paddingTop={1}>
+                <box flexDirection="row">
+                  <text fg={dim() ? theme.inactive : theme.brand}>
+                    {dim() ? `[已被 ${row.supersededBy} 取代] ` : `[${row.sourceLabel}] `}
+                  </text>
+                  <text
+                    fg={dim() ? theme.inactive : theme.heading}
+                    attributes={dim() ? undefined : TextAttributes.BOLD}
+                  >
+                    {row.name}
+                  </text>
+                  <text fg={theme.subtle}> — {row.description}</text>
+                </box>
+                <text fg={theme.inactive}>{"      " + meta()}</text>
+              </box>
+            )
+          }}
+        </For>
       </Show>
     </box>
   )

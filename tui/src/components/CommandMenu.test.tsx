@@ -79,7 +79,7 @@ describe("命令菜单", () => {
       expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
     // 六条命令 + 一行键位提示 = 七行，多出来的行就是折行折出来的
-    expect(rows).toHaveLength(8)
+    expect(rows).toHaveLength(9)
     expect(frame).toContain("…")
   })
 

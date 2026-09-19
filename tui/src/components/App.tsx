@@ -238,6 +238,22 @@ export function App(props: AppProps) {
       case "compact":
         session.compact()
         return
+      case "memory": {
+        // 子命令在这儿解析而不是各注册一条命令，理由见 commands.ts 里那段注释。
+        // 认不出的参数当场说清楚，不发给后端——后端也会拒，但那要多一个往返，
+        // 而且错在用户手上，本地就能答
+        const sub = args.trim().toLowerCase()
+        if (sub === "" || sub === "list") {
+          session.memory("list")
+        } else if (sub === "undo") {
+          session.memory("undo")
+        } else if (sub === "clear-auto" || sub === "clear_auto") {
+          session.memory("clear_auto")
+        } else {
+          session.notice("warn", `/memory 不认识「${sub}」，能用的是 list / undo / clear-auto`)
+        }
+        return
+      }
       case "clear":
         session.reset()
         return

@@ -1075,6 +1075,64 @@ public final class Repl {
         saveSession();
     }
 
+    /**
+     * 列出长期记忆——<b>审计视角</b>，含已被取代的条目。
+     *
+     * <p>和注入提示词那一份刻意不同：那边只给生效的，因为过期事实会让模型
+     * 同时收到两条自相矛盾的上下文；而用户要能看见<b>系统曾经记过什么</b>，
+     * 否则「它为什么突然改口了」永远查不清。
+     */
+    private void memoryList() {
+        List<MemoryEntry> all = memory.scan(workspace.root());
+        if (all.isEmpty()) {
+            emit(Ansi.dim("还没有任何长期记忆。用 remember 工具或者直接说「记住…」。"));
+            return;
+        }
+        long superseded = all.stream().filter(MemoryEntry::isSuperseded).count();
+        emit(Ansi.bold("长期记忆 " + all.size() + " 条")
+                + (superseded > 0 ? Ansi.dim("（其中 " + superseded + " 条已被取代，不再注入）") : ""));
+        for (MemoryEntry e : all) {
+            String tag = e.isSuperseded()
+                    ? Ansi.dim("[已被 " + e.supersededBy() + " 取代]")
+                    : "[" + e.source().label() + "]";
+            emit("  " + tag + " " + Ansi.bold(e.name()) + Ansi.dim(" — " + e.description()));
+            List<String> meta = new ArrayList<>();
+            if (e.topicKey() != null) {
+                meta.add("主题 " + e.topicKey());
+            }
+            meta.add(e.scope() == MemoryScope.GLOBAL ? "全局" : "本项目");
+            meta.add(String.valueOf(e.created()));
+            String turn = e.metadata().get(MemoryMetadata.TURN_ID);
+            if (turn != null) {
+                meta.add("来自 " + turn);
+            }
+            emit(Ansi.dim("      " + String.join(" · ", meta)));
+        }
+        if (superseded > 0) {
+            emit(Ansi.dim("被取代的条目还在盘上，只是不再注入提示词、也 recall 不到。"));
+        }
+    }
+
+    /** 撤销最近一次自动记下的事实。用户自己 remember 的一条不碰。 */
+    private void memoryUndo() {
+        memory.undoLastAutoWrite(workspace.root()).ifPresentOrElse(
+                e -> {
+                    emit("已撤销自动记下的 " + Ansi.bold(e.name()) + Ansi.dim(" — " + e.description()));
+                    emit(Ansi.dim("被它取代过的旧事实（如果有）已经重新生效。"));
+                },
+                () -> emit(Ansi.dim("没有可撤销的自动记录。"
+                        + "（只认压缩时顺手捡的那些，你自己让记的不在此列）")));
+    }
+
+    /** 清掉全部自动记下的事实。 */
+    private void memoryClearAuto() {
+        int removed = memory.clearAutoMemories(workspace.root());
+        emit(removed == 0
+                ? Ansi.dim("没有自动记录可清。")
+                : "已清掉 " + Ansi.bold(String.valueOf(removed)) + " 条自动记录，"
+                        + Ansi.dim("你自己让记的一条没动。"));
+    }
+
     private boolean handleSlashCommand(String line) {
         switch (line) {
             case "/clear" -> {
@@ -1093,6 +1151,19 @@ public final class Repl {
             }
             case "/compact" -> {
                 compactNow();
+                return true;
+            }
+            // 不带子命令就当 list：这是三个里唯一只读的那个，猜错了也没有代价
+            case "/memory", "/memory list" -> {
+                memoryList();
+                return true;
+            }
+            case "/memory undo" -> {
+                memoryUndo();
+                return true;
+            }
+            case "/memory clear-auto" -> {
+                memoryClearAuto();
                 return true;
             }
             case "/tools" -> {
@@ -1151,6 +1222,10 @@ public final class Repl {
                           /continue 接最近那段会话，不用挑
                           /resume-plan  接着跑上次没跑完的计划（做成的步骤不重来）
                           /clear    清空对话、开一段新会话（旧的还能 /resume 找回来）
+                          /compact  现在就压一次上下文（原文留在存档里，压的只是发给模型那份）
+                          /memory   列出长期记忆（含已被取代的）
+                                    /memory undo        撤销最近一次自动记下的事实
+                                    /memory clear-auto  清掉全部自动记录，手动记的不动
                           /tools    查看已注册的工具（即发给模型的菜单）
                           /history  查看当前上下文攒了哪些消息
                           /expand   把最近一轮的工具调用详情重新打出来（等同 Ctrl-O）

@@ -24,6 +24,26 @@ export type PlanTaskWire = {
   dependsOn: string[]
 }
 
+/**
+ * 一条长期记忆在列表里的样子。
+ *
+ * <p>`supersededBy` 非空表示它已被同主题的新事实顶掉：**不再注入提示词、也 recall 不到**，
+ * 但仍留在盘上。界面该把它画得弱一些而不是隐藏——用户要能看见系统曾经记过什么，
+ * 否则「它为什么突然改口了」永远查不清。
+ */
+export type MemoryRow = {
+  name: string
+  description: string
+  scope: 'project' | 'global'
+  source: string
+  /** 给人看的来源标签，后端给，界面不要自己映射——两边措辞会漂。 */
+  sourceLabel: string
+  created: string
+  topicKey: string | null
+  supersededBy: string | null
+  turnId: string | null
+}
+
 export type ServerEvent =
   /** 首帧。画第一屏要的静态信息一次给全，省掉一轮往返。 */
   | {
@@ -102,6 +122,16 @@ export type ServerEvent =
     }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
+  | { t: 'memory_list'; entries: MemoryRow[] }
+  | {
+      t: 'memory_changed'
+      action: 'undo' | 'clear_auto'
+      /** undo 时给：被撤销的那条。 */
+      name?: string
+      description?: string
+      /** clear_auto 时给：清掉几条。 */
+      removed?: number
+    }
   | { t: 'done'; text: string; steps: number }
   | { t: 'failed'; reason: string }
   /** 需要用户确认某个危险动作。回 approval_reply 之前后端是卡住的。 */
@@ -210,6 +240,7 @@ export type ClientCommand =
    * 压的只是发给模型的那份窗口。
    */
   | { t: 'compact' }
+  | { t: 'memory'; action: 'list' | 'undo' | 'clear_auto' }
   /** 要会话历史列表，后端回 session_list。 */
   | { t: 'sessions' }
   /** 按 id 接一段历史会话。id 认不出、找不到、或当前已有对话时后端回 error。 */

@@ -64,7 +64,7 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact");
+                    "session", "sessions", "compact", "memory");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

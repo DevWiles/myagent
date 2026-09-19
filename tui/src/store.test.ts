@@ -757,3 +757,55 @@ describe("压缩：摘要和裁剪是两回事", () => {
     expect(store.getSnapshot().sentTokens).toBe(100_000)
   })
 })
+
+describe("长期记忆清单", () => {
+  const row = (name: string, supersededBy: string | null = null) => ({
+    name,
+    description: `摘要 ${name}`,
+    scope: "project" as const,
+    source: supersededBy ? "observation" : "user_correction",
+    sourceLabel: supersededBy ? "自动记录·可撤销" : "用户纠正过",
+    created: "2026-09-19",
+    topicKey: "包管理器",
+    supersededBy,
+    turnId: null,
+  })
+
+  test("被取代的条目也要进转录——隐藏掉就查不清它为什么改口", () => {
+    const store = new SessionStore()
+
+    feed(store, { t: "memory_list", entries: [row("uses-bun"), row("uses-npm", "uses-bun")] })
+
+    const entry = store.getSnapshot().entries.find(e => e.kind === "memory")
+    expect(entry).toBeDefined()
+    if (entry?.kind !== "memory") throw new Error("kind 不对")
+    expect(entry.rows).toHaveLength(2)
+    expect(entry.rows[1]!.supersededBy).toBe("uses-bun")
+  })
+
+  test("一条记忆都没有时也要出条目，而不是静默", () => {
+    const store = new SessionStore()
+    feed(store, { t: "memory_list", entries: [] })
+    expect(store.getSnapshot().entries.filter(e => e.kind === "memory")).toHaveLength(1)
+  })
+
+  test("undo 的结果说清楚旧事实复活了——不然用户以为两条都没了", () => {
+    const store = new SessionStore()
+
+    feed(store, { t: "memory_changed", action: "undo", name: "uses-bun", description: "用 bun" })
+
+    const notice = store.getSnapshot().entries.at(-1)
+    expect(notice?.kind).toBe("notice")
+    if (notice?.kind !== "notice") throw new Error("kind 不对")
+    expect(notice.text).toContain("uses-bun")
+    expect(notice.text).toContain("重新生效")
+  })
+
+  test("clear-auto 清了 0 条时不要说「已清掉 0 条」", () => {
+    const store = new SessionStore()
+    feed(store, { t: "memory_changed", action: "clear_auto", removed: 0 })
+    const notice = store.getSnapshot().entries.at(-1)
+    if (notice?.kind !== "notice") throw new Error("kind 不对")
+    expect(notice.text).toBe("没有自动记录可清。")
+  })
+})

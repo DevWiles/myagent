@@ -418,6 +418,7 @@ public final class AgentServer extends WebSocketServer {
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
             case "compact" -> handleCompact(conn);
+            case "memory" -> handleMemory(conn, Protocol.str(cmd, "action", "list"));
             case "reset" -> handleReset(conn);
             case "ping" -> send(conn, Protocol.event("pong"));
             default -> send(conn, error("未知命令: " + type));
@@ -716,6 +717,53 @@ public final class AgentServer extends WebSocketServer {
         // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
         sessions.save(sessionId, agent.history(), workspace.root(),
                 config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+    }
+
+    /**
+     * 长期记忆的查看与清理。
+     *
+     * <h3>为什么读的是审计视角，而注入提示词用的是另一份</h3>
+     * 这里给 {@code scan()}（含已被取代的条目），提示词那边给 {@code scanActive()}。
+     * 两份刻意不同：过期事实注入进去，模型会同时收到「用 npm」和「用 bun」
+     * 而无从判断哪条新；但用户要能看见<b>系统曾经记过什么</b>，
+     * 否则「它为什么突然改口了」永远查不清。
+     *
+     * <h3>不拦 busy</h3>
+     * 和 {@code /compact} 不一样——这三个动作都不碰会话记录，也不发模型调用，
+     * 跑着任务时查一眼记忆是完全安全的。
+     */
+    private void handleMemory(WebSocket conn, String action) {
+        switch (action) {
+            case "list" -> {
+                ObjectNode list = Protocol.event("memory_list");
+                ArrayNode rows = list.putArray("entries");
+                for (MemoryEntry e : memory.scan(workspace.root())) {
+                    ObjectNode row = rows.addObject();
+                    row.put("name", e.name());
+                    row.put("description", e.description());
+                    row.put("scope", e.scope().wire());
+                    row.put("source", e.source().wire());
+                    row.put("sourceLabel", e.source().label());
+                    row.put("created", e.created().toString());
+                    row.put("topicKey", e.topicKey());              // 可能是 null
+                    row.put("supersededBy", e.supersededBy());      // 非空即已失效
+                    row.put("turnId", e.metadata().get(MemoryMetadata.TURN_ID));
+                }
+                send(conn, list);
+            }
+            case "undo" -> memory.undoLastAutoWrite(workspace.root()).ifPresentOrElse(
+                    e -> send(conn, Protocol.event("memory_changed")
+                            .put("action", "undo")
+                            .put("name", e.name())
+                            .put("description", e.description())),
+                    () -> send(conn, error("没有可撤销的自动记录"
+                            + "（只认压缩时顺手捡的那些，你自己让记的不在此列）")));
+            case "clear_auto" -> send(conn, Protocol.event("memory_changed")
+                    .put("action", "clear_auto")
+                    .put("removed", memory.clearAutoMemories(workspace.root())));
+            default -> send(conn, error("认不出的 memory action: " + action
+                    + "（认 list / undo / clear_auto）"));
+        }
     }
 
     private void handleReset(WebSocket conn) {

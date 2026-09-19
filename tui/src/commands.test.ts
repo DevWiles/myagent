@@ -48,6 +48,7 @@ describe("边打边筛", () => {
       "/resume",
       "/resume-plan",
       "/compact",
+      "/memory",
       "/clear",
     ])
   })
@@ -164,7 +165,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(7)
+    expect(entries).toHaveLength(8)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -172,7 +173,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(7)
+    expect(lines).toHaveLength(8)
     expect(lines.some((l) => l.includes("/plan <目标>"))).toBe(true)
     expect(lines.some((l) => l.includes("现在不行"))).toBe(true)
   })

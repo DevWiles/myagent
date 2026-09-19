@@ -427,6 +427,46 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ---
 
+### 3.12 长期记忆（feature: `memory`）
+
+跨会话的事实存储，和上下文压缩是两回事：压缩管的是「这一次会话发出去多少」，
+这里管的是「下次打开这个项目还记得什么」。
+
+```
+界面 → {"t":"memory","action":"list"}
+后端 → {"t":"memory_list","entries":[
+          {"name":"mvn-offline","description":"这台机器 maven 要加 -o",
+           "scope":"project","source":"user_correction","sourceLabel":"用户纠正过",
+           "created":"2026-09-12","topicKey":"构建命令",
+           "supersededBy":null,"turnId":null},
+          {"name":"uses-npm","description":"这个项目用 npm",
+           "scope":"project","source":"observation","sourceLabel":"自动记录·可撤销",
+           "created":"2026-09-18","topicKey":"包管理器",
+           "supersededBy":"uses-bun","turnId":"seg[8,22)"}
+       ]}
+
+界面 → {"t":"memory","action":"undo"}
+后端 → {"t":"memory_changed","action":"undo","name":"uses-bun","description":"…"}
+       没有可撤销的自动记录时回 `error`
+
+界面 → {"t":"memory","action":"clear_auto"}
+后端 → {"t":"memory_changed","action":"clear_auto","removed":3}
+```
+
+几条容易误会的地方：
+
+1. **`list` 给的是审计视角，含 `supersededBy` 非空的条目**。那些已经<b>不再注入提示词、
+   也 recall 不到</b>，但仍留在盘上——用户要能看见系统曾经记过什么，
+   否则「它为什么突然改口了」永远查不清。界面该把它们画得弱一些，而不是隐藏。
+2. **`undo` / `clear_auto` 只认自动记录**（`source` 为 `observation`）。
+   用户自己让记的一条不碰——他记的时候是清醒的。
+3. **撤销会让被它取代过的旧事实重新生效**。少了这一步，撤销之后新旧都不生效，
+   用户看到的是「两条都没了」，比不给撤销更糟。
+4. **这三个动作都不拦 `busy`**。它们不碰会话记录，也不发模型调用，
+   跑着任务时查一眼记忆是安全的——这一点和 `compact` 不同。
+
+---
+
 ## 4. 界面 → 服务端
 
 | `t` | 字段 | 说明 |
@@ -441,7 +481,8 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `continue` | — | 接**最近**那段会话，见 3.9。没有存档、或当前已有对话时回 `error` |
 | `sessions` | — | 要会话历史列表，回 `session_list`。见 3.9 |
 | `session_resume` | `id` | 按 id 接一段历史会话，见 3.9。id 认不出、找不到、或当前已有对话时回 `error` |
-| `compact` | — | 现在就压一次上下文（feature: `compact`），见 3.10。忙的时候会被拒 |
+| `compact` | — | 现在就压一次上下文（feature: `compact`），见 3.11。忙的时候会被拒 |
+| `memory` | `action`: `list` \| `undo` \| `clear_auto` | 查看 / 清理长期记忆（feature: `memory`），见 3.12。**不拦 busy** |
 | `reset` | — | 清空对话历史、换一段新会话。**不删旧存档**。忙的时候会被拒 |
 | `ping` | — | 保活 |
 

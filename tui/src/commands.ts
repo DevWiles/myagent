@@ -30,6 +30,7 @@ export type CommandId =
   | "resume"
   | "resume-plan"
   | "compact"
+  | "memory"
   | "clear"
 
 type CommandSpec = {
@@ -104,6 +105,18 @@ const SPECS: CommandSpec[] = [
     name: "/compact",
     description: "现在就把早先的对话压成摘要（原文留在存档里，不会丢）",
     anyFeature: ["compact"],
+  },
+  {
+    id: "memory",
+    name: "/memory",
+    // 子命令走参数而不是各占一条：`matchCommand` 按 firstWord 认命令，
+    // 注册成 `/memory undo` 的话，firstWord 拿到的还是 `/memory`，
+    // 于是它会精确命中这一条、把 `undo` 当成参数——子命令<b>被静默吞掉</b>，
+    // 用户敲 `/memory undo` 得到的是一份列表。和 `/resume` 那个坑是同一个。
+    //
+    // 不设 `args`：设了的话空参数会被拦，而 `/memory` 不带参数本来就该列清单。
+    description: "长期记忆：不带参数列清单，undo 撤销最近一次自动记录，clear-auto 清掉全部自动记录",
+    anyFeature: ["memory"],
   },
   {
     id: "clear",
