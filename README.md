@@ -38,21 +38,28 @@ cd 你要让它干活的目录
 
 ```json
 { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com",
-  "model": "deepseek-chat", "contextTokens": 64000 }
+  "model": "deepseek-flash", "contextTokens": 1000000 }
 ```
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
 | `apiKey` | `DEEPSEEK_API_KEY` | 无 | 没有它只能裸跑界面 |
 | `baseUrl` | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
-| `model` | `DEEPSEEK_MODEL` | `deepseek-chat` | |
-| `contextTokens` | `MYAGENT_CONTEXT_TOKENS` | `64000` | 上下文窗口，用到 75% 就触发压缩 |
+| `model` | `DEEPSEEK_MODEL` | `deepseek-flash` | `deepseek-v4-pro` 是更强的那个 |
+| `contextTokens` | `MYAGENT_CONTEXT_TOKENS` | `1000000` | 上下文窗口。换模型时要改——API 不返回这个数 |
 
-`contextTokens` 除了换模型时要改，还有个用处是**把压缩逼出来**：默认值下得聊到
-48,000 token 才会压缩一次，手工试不出来。调到 4,000（下限）几轮对话就能触发：
+`contextTokens` 除了换模型时要改，还有个用处是**把压缩逼出来**：默认 1M 的窗口下
+正常聊天根本到不了触发线，压缩基本是休眠的。调小几轮对话就能触发：
 
 ```bash
-MYAGENT_CONTEXT_TOKENS=4000 ./myagent-tui
+MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
+```
+
+想看它到底怎么转的，再把日志打开——交互模式下日志在 `~/.myagent/logs/myagent.log`：
+
+```bash
+MYAGENT_JAVA_OPTS="-Dorg.slf4j.simpleLogger.defaultLogLevel=debug" \
+MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 ```
 
 配错不会让程序起不来——不是整数就退回默认值，小于下限会抬上去，两种都打一行警告。
@@ -76,7 +83,7 @@ MYAGENT_CONTEXT_TOKENS=4000 ./myagent-tui
 
 ```bash
 ./myagent-tui -d ~/proj          # 指定工作区
-./myagent-tui -m deepseek-chat   # 换模型
+./myagent-tui -m deepseek-v4-pro # 换模型
 ./myagent-tui --readonly         # 只读：写文件和执行命令的工具压根不注册
 ./myagent-tui --rebuild          # 强制重新 build 后端
 ```

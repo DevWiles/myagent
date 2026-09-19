@@ -32,11 +32,29 @@ public record MemoryIndex(List<MemoryEntry> entries) {
     /**
      * 索引在系统提示词里能占的 token 上限。
      *
-     * <p>64,000 的窗口（{@code ContextManager.DEFAULT_MAX_TOKENS}）分 16% 给它。
-     * 这是<b>每一轮都要付</b>的常驻税，再多就该改成按相关性检索，
-     * 而不是继续往提示词里堆。
+     * <p>这是<b>每一轮都要付</b>的常驻税，所以它是个<b>绝对上限</b>，不是窗口的百分比：
+     * 窗口从 64,000 涨到 1,000,000，并不意味着往提示词里堆十六倍的记忆摘要就变划算了。
+     * 再多就该改成按相关性检索，而不是继续堆。
+     *
+     * <p>但小窗口那头要反过来防：这个数和窗口无关，而 system 消息是<b>永远不压缩</b>的，
+     * 所以窗口调到 4,000 时，光索引就能把整个窗口撑爆，且没有任何机制救得回来。
+     * 见 {@link #budgetFor(int)}。
      */
     public static final int MAX_TOKENS = 10_000;
+
+    /** 小窗口下索引最多占窗口的这个比例。 */
+    private static final double WINDOW_SHARE = 0.16;
+
+    /**
+     * 给定上下文窗口，索引能占多少 token。
+     *
+     * <p>{@code min(绝对上限, 窗口 × 16%)}——大窗口由绝对上限封顶（堆更多记忆并不更划算），
+     * 小窗口由比例封顶（不能让常驻的 system 把窗口占满）。
+     * 1M 下是 10,000，64,000 下还是 10,000（和以前一字不差），4,000 下缩到 640。
+     */
+    public static int budgetFor(int windowTokens) {
+        return Math.min(MAX_TOKENS, Math.max(1, (int) (windowTokens * WINDOW_SHARE)));
+    }
 
     /** 表头和表尾是渲染和估算<b>共用</b>的，分开写迟早会算漏一边。 */
     private static final String HEADER = "\n## 你记住的事\n\n";

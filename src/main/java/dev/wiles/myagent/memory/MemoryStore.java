@@ -189,12 +189,20 @@ public final class MemoryStore {
      * 那条路是按名字取一条，跟提示词预算没关系，不该被它连累。
      */
     public MemoryIndex index(Path workspace) {
+        return index(workspace, MemoryIndex.MAX_TOKENS);
+    }
+
+    /**
+     * 按给定预算裁。调用方通常传 {@code MemoryIndex.budgetFor(上下文窗口)}——
+     * 索引住在 system 里，而 system 永远不压缩，窗口小的时候它得跟着缩。
+     */
+    public MemoryIndex index(Path workspace, int budgetTokens) {
         MemoryIndex full = MemoryIndex.of(scan(workspace));
-        MemoryIndex fitted = full.withinBudget(MemoryIndex.MAX_TOKENS);
+        MemoryIndex fitted = full.withinBudget(budgetTokens);
         if (fitted.size() < full.size()) {
             log.warn("记忆索引约 {} token，超过预算 {}，只放前 {} 条——"
                     + "剩下的 {} 条模型看不见了。该精简 description 或清理旧记忆",
-                    full.estimatedTokens(), MemoryIndex.MAX_TOKENS,
+                    full.estimatedTokens(), budgetTokens,
                     fitted.size(), full.size() - fitted.size());
         }
         return fitted;

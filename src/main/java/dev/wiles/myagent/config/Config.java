@@ -11,7 +11,7 @@ import java.nio.file.Path;
  * 运行配置。读取优先级：环境变量 > ~/.myagent/config.json > 内置默认值。
  *
  * config.json 形如：
- * { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat" }
+ * { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com", "model": "deepseek-flash" }
  *
  * <p>没有「便利构造器」是故意的：少一个字段就默默退回默认值，是这种配置最容易出的事故。
  * 加字段时让所有构造点都编译不过，比让它们悄悄丢掉一个旋钮好。
@@ -19,7 +19,15 @@ import java.nio.file.Path;
 public record Config(String apiKey, String baseUrl, String model, int contextTokens) {
 
     public static final String DEFAULT_BASE_URL = "https://api.deepseek.com";
-    public static final String DEFAULT_MODEL = "deepseek-chat";
+    /**
+     * 默认模型。
+     *
+     * <p>曾经是 {@code deepseek-chat}，那个名字已于 2026-07-24 退役。
+     * 它现在还「能用」只是因为服务端把请求<b>静默路由</b>到了新模型——
+     * 拿它发一次请求，响应里的 {@code model} 字段回的是 {@code deepseek-flash}。
+     * 靠路由续命的名字总有一天会撤，而那天的现象是「昨天还好好的，今天全报错」。
+     */
+    public static final String DEFAULT_MODEL = "deepseek-flash";
 
     private static final Path CONFIG_FILE =
             Path.of(System.getProperty("user.home"), ".myagent", "config.json");

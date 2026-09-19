@@ -13,6 +13,7 @@ import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
+import dev.wiles.myagent.memory.MemoryIndex;
 import dev.wiles.myagent.memory.MemoryScope;
 import dev.wiles.myagent.memory.MemorySource;
 import dev.wiles.myagent.memory.MemoryStore;
@@ -164,7 +165,8 @@ public final class AgentServer extends WebSocketServer {
         // 索引扫一次就定，理由同 Repl：它是 history 的第 0 条，不能中途换
         this.agent = config.hasApiKey()
                 ? new Agent(new DeepSeekClient(config), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
+                                MemoryIndex.budgetFor(config.contextTokens()))),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，取消就失灵
