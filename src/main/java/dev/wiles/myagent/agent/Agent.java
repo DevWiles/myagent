@@ -239,11 +239,18 @@ public final class Agent {
      * <p>这一条对新的记录模型尤其要紧：记录是只追加的，截掉的东西<b>再也回不来</b>，
      * 而存盘存的正是这份记录。截断等于把用户的历史永久删掉一段。
      *
+     * <h3>压缩状态要整份接回来</h3>
+     * 只接段、不接 {@code summary} 和 {@code coversUpTo} 是不够的（原先就是这样）：
+     * 那样恢复之后 {@link #hasCompacted()} 报 false、钉住块不生成、尾巴从 0 起，
+     * 整段历史原样进窗口，下一轮直接判到 {@code FORCE}，在主线程同步重跑一次 reduce。
+     * 段是从原文 map 出来的所以不用重算，但 reduce 那一次是<b>白花的</b>，
+     * 而且卡在用户刚接回会话、最想立刻干活的那一刻。
+     *
      * @param conversation 不含 system 的对话内容
-     * @param known        存档里带回来的摘要段；段的下标对得上这份 conversation
+     * @param known        存档里带回来的压缩状态；下标要对得上这份 conversation
      * @return 真正恢复了多少条
      */
-    public int restore(List<ChatMessage> conversation, List<SummarySegment> known) {
+    public int restore(List<ChatMessage> conversation, ContextManager.Compaction known) {
         reset();        // 顺带清掉 unfinished：立起来的是另一段历史，上一段的断点不作数
         if (conversation == null || conversation.isEmpty()) {
             return 0;
@@ -255,17 +262,27 @@ public final class Agent {
         if (safe.size() != conversation.size()) {
             log.info("会话恢复：{} 条封口成 {} 条", conversation.size(), safe.size());
         }
-        // 段只在下标对得上时才认。对不上说明存档被改过，那时候摘要指的是别的消息，
-        // 留着比丢掉危险——丢了大不了重算一次，认错了就是张冠李戴
+        // 只在下标对得上时才认。对不上说明存档被改过，那时候摘要指的是别的消息，
+        // 留着比丢掉危险——丢了大不了重算一次，认错了就是张冠李戴。
+        // 注意封口可能改变长度：补占位会变长（下标不受影响），退回截断会变短（可能越界）
         int size = history.size() - 1;
-        segments = known == null ? List.of()
-                : known.stream().filter(seg -> seg.fitsIn(size)).toList();
+        if (known == null) {
+            return safe.size();
+        }
+        segments = known.segments().stream().filter(seg -> seg.fitsIn(size)).toList();
+        if (known.summary() != null && known.coversUpTo() > 0 && known.coversUpTo() <= size) {
+            summary = known.summary();
+            coversUpTo = known.coversUpTo();
+        } else if (known.summary() != null) {
+            log.warn("存档里的摘要覆盖到 {}，而恢复出来只有 {} 条，整份丢弃（段保留，下次重算 reduce）",
+                    known.coversUpTo(), size);
+        }
         return safe.size();
     }
 
-    /** 不带存档段的恢复。 */
+    /** 不带压缩状态的恢复。 */
     public int restore(List<ChatMessage> conversation) {
-        return restore(conversation, List.of());
+        return restore(conversation, null);
     }
 
     /** 只读视图，供界面查看当前上下文。 */
@@ -375,9 +392,19 @@ public final class Agent {
         return measured;
     }
 
-    /** 已落地的摘要段，存盘要用。 */
+    /** 已落地的摘要段。 */
     public List<SummarySegment> segments() {
         return segments;
+    }
+
+    /**
+     * 已落地的压缩状态，存盘要用。
+     *
+     * <p>三个字段一起给，不让调用方只存一部分——只存段的话，
+     * 恢复之后要在主线程白跑一次 reduce，见 {@link #restore}。
+     */
+    public ContextManager.Compaction compaction() {
+        return new ContextManager.Compaction(segments, summary, coversUpTo);
     }
 
     /** 这段会话压过了吗——界面用它把「还没聊够」和「已经压到头了」说清楚。 */

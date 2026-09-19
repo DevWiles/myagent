@@ -89,12 +89,28 @@ public final class SessionStore {
      */
     public void save(String id, List<ChatMessage> history, Path workspace,
                      String model, long startedAt) {
-        save(id, history, workspace, model, startedAt, List.of(), TokenLedger.EMPTY);
+        // 必须写明类型：裸 null 在两个重载之间是有歧义的
+        save(id, history, workspace, model, startedAt,
+                (ContextManager.Compaction) null, TokenLedger.EMPTY);
     }
 
-    /** 带上摘要段和用量账本一起存：续聊时既不用重算摘要，也不会把账清零。 */
+    /**
+     * 只有段、没有 reduce 产物的存法。
+     *
+     * <p>留着是因为调用方手上只有段的场合确实存在（测试、以及不关心摘要的路径）。
+     * 走这条路存下来的档，恢复之后要重算一次 reduce——
+     * 真正在用的路径请传 {@link ContextManager.Compaction}。
+     */
     public void save(String id, List<ChatMessage> history, Path workspace,
                      String model, long startedAt, List<SummarySegment> segments,
+                     TokenLedger ledger) {
+        save(id, history, workspace, model, startedAt,
+                new ContextManager.Compaction(segments, null, 0), ledger);
+    }
+
+    /** 带上压缩状态和用量账本一起存：续聊时既不用重算摘要，也不会把账清零。 */
+    public void save(String id, List<ChatMessage> history, Path workspace,
+                     String model, long startedAt, ContextManager.Compaction compaction,
                      TokenLedger ledger) {
         if (workspace == null) {
             return;
@@ -112,7 +128,7 @@ public final class SessionStore {
         // 而且 GitBranch 只读一个小文件，比在两个界面里各记一遍靠得住
         SessionSnapshot snapshot = SessionSnapshot.of(id, history, workspace, model,
                 GitBranch.of(workspace), startedAt, System.currentTimeMillis(),
-                segments, ledger);
+                compaction, ledger);
         if (write(snapshot, pathFor(workspace, id))) {
             log.debug("会话已存档: {}（{} 条）", id, snapshot.messages().size());
         }
@@ -261,7 +277,7 @@ public final class SessionStore {
             // 拿今天的分支去填等于编一个「那段是在 dev 上聊的」出来
             SessionSnapshot adopted = new SessionSnapshot(SessionSnapshot.FORMAT, id,
                     node.path("workspace").asText(null), node.path("model").asText(null),
-                    null, savedAt, savedAt, messages, List.of(), TokenLedger.EMPTY);
+                    null, savedAt, savedAt, messages, List.of(), null, 0, TokenLedger.EMPTY);
             if (!adopted.belongsTo(workspace)) {
                 log.warn("老存档 {} 记的工作区是 {}，不收", legacy, adopted.workspace());
                 return;

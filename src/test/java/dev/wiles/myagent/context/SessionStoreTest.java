@@ -223,6 +223,76 @@ class SessionStoreTest {
     }
 
     @Test
+    @DisplayName("reduce 的产物和覆盖边界也要存——不然恢复后要在主线程白跑一次 reduce")
+    void roundTripsSummaryAndCoverage() {
+        SessionStore store = store();
+        var compaction = new ContextManager.Compaction(
+                List.of(new SummarySegment(0, 2, "前两条聊了怎么跑测试")),
+                "用户要改 README 的测试数字，已经改了 3 处", 2);
+
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED, compaction, TokenLedger.EMPTY);
+
+        var loaded = store.latest(ws()).orElseThrow();
+        assertEquals("用户要改 README 的测试数字，已经改了 3 处", loaded.summary());
+        assertEquals(2, loaded.coversUpTo());
+
+        var usable = loaded.usableCompaction();
+        assertEquals("用户要改 README 的测试数字，已经改了 3 处", usable.summary());
+        assertEquals(2, usable.coversUpTo());
+        assertEquals(1, usable.segments().size());
+    }
+
+    @Test
+    @DisplayName("覆盖边界越界时整份压缩状态作废，但段留着——丢了只是重算，认错了是张冠李戴")
+    void dropsCompactionWhenCoverageOutOfBounds() {
+        SessionStore store = store();
+        // history() 去掉 system 之后是 4 条，这里说摘要覆盖到第 99 条
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED,
+                new ContextManager.Compaction(
+                        List.of(new SummarySegment(0, 2, "还对得上的段")),
+                        "覆盖边界对不上的摘要", 99),
+                TokenLedger.EMPTY);
+
+        var loaded = store.latest(ws()).orElseThrow();
+        assertEquals(99, loaded.coversUpTo(), "原样读回来");
+
+        var usable = loaded.usableCompaction();
+        assertNull(usable.summary(), "摘要不许拿去用");
+        assertEquals(0, usable.coversUpTo());
+        assertEquals(1, usable.segments().size(), "段本身还对得上，留着下次省一次 map");
+    }
+
+    @Test
+    @DisplayName("只有摘要没有边界（或反过来）一律作废——半份状态比没有更危险")
+    void halfACompactionIsDiscarded() {
+        SessionStore store = store();
+
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED,
+                new ContextManager.Compaction(List.of(), "有摘要，但不知道覆盖到哪", 0),
+                TokenLedger.EMPTY);
+        var noCoverage = store.latest(ws()).orElseThrow();
+        assertNull(noCoverage.summary(), "不知道尾巴从哪接，这条摘要就用不了");
+
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED,
+                new ContextManager.Compaction(List.of(), null, 3),
+                TokenLedger.EMPTY);
+        var noSummary = store.latest(ws()).orElseThrow();
+        assertEquals(0, noSummary.coversUpTo(), "没有摘要却把尾巴切掉，那段历史就凭空没了");
+    }
+
+    @Test
+    @DisplayName("老存档没有这两个字段，读出来是空的压缩状态，不炸")
+    void oldArchiveWithoutSummaryStillLoads() {
+        SessionStore store = store();
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED);
+
+        var loaded = store.latest(ws()).orElseThrow();
+        assertNull(loaded.summary());
+        assertEquals(0, loaded.coversUpTo());
+        assertTrue(loaded.usableCompaction().isEmpty());
+    }
+
+    @Test
     @DisplayName("压缩过的会话，列表里显示的仍然是用户真说的第一句")
     void compactedSessionStillShowsRealFirstMessage() {
         SessionStore store = store();

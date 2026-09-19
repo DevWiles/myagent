@@ -46,12 +46,19 @@ import java.util.List;
  * @param savedAt  最后一次存盘的时刻，epoch 毫秒
  * @param messages 对话内容，<b>不含 system</b>
  * @param segments 已经算好的摘要段，见 {@link SummarySegment}。存它是为了<b>续聊时不用重算</b>：
- *                 段是从原文 map 出来的，而记录只追加，所以段永远有效，下次开机直接接着用。
- *                 reduce 的产物<b>不存</b>——那是一次性的，重算一次很便宜
+ *                 段是从原文 map 出来的，而记录只追加，所以段永远有效，下次开机直接接着用
+ * @param summary  reduce 的产物，也就是窗口里那一整块摘要。
+ *                 <p>原先<b>不存</b>它，理由是「一次性产物，重算一次很便宜」。真跑下来这句话是错的：
+ *                 恢复之后 {@code summary} 为 null，于是 {@code Agent.hasCompacted()} 报 false、
+ *                 钉住块不生成、尾巴从 0 起，整段历史原样进窗口——下一轮直接判到 {@code FORCE}，
+ *                 在<b>主线程</b>同步重跑一次 reduce。「便宜」说的是钱，可它花的是用户眼前的一次卡顿，
+ *                 而且正好卡在刚接回会话、最想立刻干活的那一刻
+ * @param coversUpTo 摘要覆盖到记录的哪一条（开区间）。必须和 {@code summary} 一起存：
+ *                 只有摘要而不知道它覆盖到哪，就不知道尾巴该从哪开始接
  * @param ledger   这段会话累计发出去多少，见 {@link TokenLedger}。续聊时要接着累加——
  *                 不存的话，{@code /resume} 之后「这次会话花了多少」会莫名其妙归零，
  *                 而对话明明是接着的。
- *                 <p><b>加这两个字段都没有升 FORMAT</b>：它们是可选的，老存档读出来是 null，
+ *                 <p><b>后加的这几个字段都没有升 FORMAT</b>：它们是可选的，老存档读出来是 null，
  *                 当空值处理即可。升版号只该用在「按旧结构解析会得到<b>错误</b>数据」那种场合——
  *                 比如格式 2 存的是压缩后的历史，收进来会让用户看见一段假对话。
  *                 为一个新增字段把用户已有的会话全作废，代价和收益不成比例
@@ -67,6 +74,8 @@ public record SessionSnapshot(
         long savedAt,
         List<ChatMessage> messages,
         List<SummarySegment> segments,
+        String summary,
+        int coversUpTo,
         TokenLedger ledger) {
 
     /**
@@ -87,22 +96,35 @@ public record SessionSnapshot(
         messages = List.copyOf(messages == null ? List.of() : messages);
         segments = List.copyOf(segments == null ? List.of() : segments);
         ledger = ledger == null ? TokenLedger.EMPTY : ledger;   // 老存档没这个字段
+        // summary 和 coversUpTo 互为前提：缺一个，另一个就没有意义。
+        // 只有摘要而不知道覆盖到哪，不知道尾巴从哪接；只有边界而没有摘要，
+        // 那段历史就凭空消失了。所以这里一起归零，不让半份状态活下去
+        if (summary == null || summary.isBlank() || coversUpTo <= 0) {
+            summary = null;
+            coversUpTo = 0;
+        }
     }
 
     /**
      * 从一段活着的历史造一份存档。
      *
-     * @param history 完整历史，<b>包含</b> index 0 的 system；这里会把它摘掉
+     * @param history     完整历史，<b>包含</b> index 0 的 system；这里会把它摘掉
+     * @param compaction  已经落地的压缩状态；没压过传 null。它的三个字段总是一起用、
+     *                    一起失效，所以整体传进来，不拆成三个参数
      */
     public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
                                      String model, String branch, long startedAt, long now,
-                                     List<SummarySegment> segments, TokenLedger ledger) {
+                                     ContextManager.Compaction compaction, TokenLedger ledger) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
         return new SessionSnapshot(FORMAT, id,
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
-                model, branch, startedAt, now, conversation, segments, ledger);
+                model, branch, startedAt, now, conversation,
+                compaction == null ? List.of() : compaction.segments(),
+                compaction == null ? null : compaction.summary(),
+                compaction == null ? 0 : compaction.coversUpTo(),
+                ledger);
     }
 
     /**
@@ -146,6 +168,22 @@ public record SessionSnapshot(
     @JsonIgnore
     public List<SummarySegment> usableSegments() {
         return segments.stream().filter(seg -> seg.fitsIn(messages.size())).toList();
+    }
+
+    /**
+     * 可以直接接回去的压缩状态。下标对不上就<b>整份作废</b>，而不是留半份。
+     *
+     * <p>作废的代价只是下次到线时重算一遍（段还在，map 免费，只多一次 reduce）；
+     * 认错的代价是拿一段讲着别的事的摘要冒充这批消息的历史，而且<b>没有任何迹象</b>。
+     * 两边不对称，所以宁可丢。
+     */
+    @JsonIgnore
+    public ContextManager.Compaction usableCompaction() {
+        // 覆盖边界越界就不认：coversUpTo 是尾巴的起点，越界意味着尾巴会切在
+        // 一个不存在的位置上，比没有摘要危险得多
+        boolean sound = coversUpTo > 0 && coversUpTo <= messages.size() && summary != null;
+        return new ContextManager.Compaction(usableSegments(),
+                sound ? summary : null, sound ? coversUpTo : 0);
     }
 
     /** 恢复之后能接着聊的对话轮数——给界面显示「上次聊了 N 轮」用。 */

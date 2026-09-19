@@ -35,13 +35,22 @@ class AgentTest {
         final List<List<ToolSpec>> receivedTools = new ArrayList<>();
 
         int summaryRequests = 0;
+        int reduceRequests = 0;
 
         @Override
         public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
-            // 压缩时发来的摘要请求走单独分支，不占用剧本
-            if (messages.get(0).content().contains("压缩对话历史")) {
+            // 压缩时发来的请求走单独分支，不占用剧本。
+            // 两种都要认：map 一块一次，reduce 把多块并成一段（只有一块时它压根不发请求）。
+            // 只认 map 的话，多段场景下 reduce 那次会漏进剧本，
+            // 表现成「剧本演完了，agent 却还在请求第 N 次」——和被测行为毫无关系
+            String system = messages.get(0).content();
+            if (system.contains("压缩对话历史")) {
                 summaryRequests++;
                 return response(ChatMessage.assistant("[摘要] 之前读过几个文件"), "stop");
+            }
+            if (system.contains("分段摘要合并")) {
+                reduceRequests++;
+                return response(ChatMessage.assistant("[合并摘要] 之前读写过几个文件"), "stop");
             }
             received.add(List.copyOf(messages));
             receivedTools.add(tools);
@@ -394,6 +403,66 @@ class AgentTest {
                 .map(e -> (AgentEvent.Compacted) e)
                 .forEach(c -> assertTrue(c.tokensAfter() < c.tokensBefore(),
                         "压完必须真的变小了，实际是 " + c.tokensBefore() + " -> " + c.tokensAfter()));
+    }
+
+    @Test
+    @DisplayName("接回压缩过的会话：摘要和钉住块都还在，不是从 0 条重新开始")
+    void restoredSessionKeepsItsCompaction() {
+        String huge = "很长的文件内容 ".repeat(400);
+        ToolRegistry tools = new ToolRegistry()
+                .register(tool("write_file", a -> ToolResult.ok(huge)));
+        FakeLlm first = new FakeLlm();
+        for (int i = 1; i <= 4; i++) {
+            first.calls(null, ToolCall.of("c" + i, "write_file", "{\"path\":\"f" + i + ".java\"}"))
+                    .says("第 " + i + " 个写完了");
+        }
+
+        Agent before = new Agent(first, tools, "sys", 25, new ContextManager(3_000))
+                .withWritingTools(java.util.Set.of("write_file"));
+        before.run("写第 1 个文件");
+        before.run("写第 2 个文件");
+        before.run("写第 3 个文件");
+        before.run("写第 4 个文件");
+
+        assertTrue(before.hasCompacted(), "前提没成立：这段会话根本没压过，后面的断言就不成立了");
+        ContextManager.Compaction saved = before.compaction();
+
+        // 存盘 → 退出 → 重进 → 接回来
+        FakeLlm second = new FakeLlm().says("接着聊");
+        Agent after = new Agent(second, tools, "sys", 25, new ContextManager(3_000))
+                .withWritingTools(java.util.Set.of("write_file"));
+        after.restore(before.conversation(), saved);
+
+        assertTrue(after.hasCompacted(), "压过这件事不该因为重启就忘了");
+
+        after.run("接着说");
+
+        List<ChatMessage> window = second.received.get(0);
+        assertTrue(window.stream().anyMatch(m -> m.content() != null
+                        && m.content().startsWith("[以下是早先对话的摘要")),
+                "摘要块必须跟着回来——旧实现这里是空的，整段历史原样进窗口，"
+                        + "下一轮直接判到 FORCE，在主线程白跑一次 reduce");
+        assertTrue(window.stream().anyMatch(m -> m.content() != null
+                        && m.content().startsWith("[本次会话的固定事实")),
+                "钉住块跟着 coversUpTo 走，边界没接回来它就不生成——"
+                        + "而 /resume 正是最需要「别忘了在干什么」的时刻");
+        assertTrue(window.stream().anyMatch(m -> m.content() != null
+                        && m.content().contains("f1.java")),
+                "最初那几个文件是从记录里算出来的，压缩丢不掉它们");
+    }
+
+    @Test
+    @DisplayName("接回来的压缩状态下标对不上就整份丢掉，段留着")
+    void restoreDropsCompactionThatDoesNotFitTheRecord() {
+        Agent agent = new Agent(new FakeLlm(), new ToolRegistry(), "sys");
+
+        agent.restore(List.of(ChatMessage.user("问"), ChatMessage.assistant("答")),
+                new ContextManager.Compaction(
+                        List.of(new dev.wiles.myagent.context.SummarySegment(0, 2, "对得上的段")),
+                        "说自己覆盖到第 99 条的摘要", 99));
+
+        assertFalse(agent.hasCompacted(), "边界越界，摘要不许认——尾巴会切在不存在的位置上");
+        assertEquals(1, agent.segments().size(), "段本身对得上，留着下次省一次 map");
     }
 
     @Test

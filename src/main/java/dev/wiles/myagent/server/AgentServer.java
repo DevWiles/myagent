@@ -436,7 +436,7 @@ public final class AgentServer extends WebSocketServer {
             } finally {
                 // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
                 sessions.save(sessionId, agent.history(), workspace.root(),
-                        config.model(), sessionStartedAt, agent.segments(), meter.snapshot());
+                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
@@ -595,7 +595,7 @@ public final class AgentServer extends WebSocketServer {
      */
     private void adopt(SessionSnapshot snapshot) {
         // 段一起带回来，续聊时不用重新 map 一遍
-        int restored = agent.restore(snapshot.restorable(), snapshot.usableSegments());
+        int restored = agent.restore(snapshot.restorable(), snapshot.usableCompaction());
         // 账本也接回来，理由同 Repl：对话是接着的，账就不该归零
         meter.reset();
         meter.seed(snapshot.ledger());
@@ -692,7 +692,7 @@ public final class AgentServer extends WebSocketServer {
         // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
         // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
         sessions.save(sessionId, agent.history(), workspace.root(),
-                config.model(), sessionStartedAt, agent.segments(), meter.snapshot());
+                config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
     }
 
     private void handleReset(WebSocket conn) {

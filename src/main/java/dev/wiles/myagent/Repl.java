@@ -386,7 +386,7 @@ public final class Repl {
     private void saveSession() {
         if (agent != null) {
             sessions.save(sessionId, agent.history(), workspace.root(),
-                    config.model(), sessionStartedAt, agent.segments(), meter.snapshot());
+                    config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
         }
     }
 
@@ -478,7 +478,7 @@ public final class Repl {
     private void adopt(SessionSnapshot snapshot) {
         // 段一起带回来：它们是从原文 map 出来的，而记录只追加，所以永远有效，
         // 续聊时直接复用，不用重新花钱 map 一遍
-        int restored = agent.restore(snapshot.restorable(), snapshot.usableSegments());
+        int restored = agent.restore(snapshot.restorable(), snapshot.usableCompaction());
         // 账本也接回来：对话是接着的，「这次会话花了多少」就不该归零
         meter.reset();
         meter.seed(snapshot.ledger());
