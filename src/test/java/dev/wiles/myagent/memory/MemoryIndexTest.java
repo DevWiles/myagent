@@ -196,4 +196,39 @@ class MemoryIndexTest {
         // 记忆是存在的，只是放不进预算
         assertFalse(fitted.render().contains("- a —"), "放不下就不该出现在索引里");
     }
+
+    @Test
+    @DisplayName("索引预算：大窗口由绝对上限封顶，小窗口由比例封顶")
+    void budgetTracksTheWindow() {
+        // 大窗口：窗口涨十六倍不等于往提示词里堆十六倍记忆就划算了
+        assertEquals(MemoryIndex.MAX_TOKENS, MemoryIndex.budgetFor(1_000_000));
+        assertEquals(MemoryIndex.MAX_TOKENS, MemoryIndex.budgetFor(64_000),
+                "64,000 下要和以前一字不差");
+
+        // 小窗口：索引住在 system 里，而 system 永远不压缩。
+        // 不跟着缩的话，光索引就能把整个窗口撑爆，且没有任何机制救得回来
+        assertEquals(640, MemoryIndex.budgetFor(4_000));
+        assertTrue(MemoryIndex.budgetFor(4_000) < 4_000);
+        assertTrue(MemoryIndex.budgetFor(1) >= 1, "再小也不能算出 0 来");
+    }
+
+    @Test
+    @DisplayName("窗口小到一定程度，索引真的会被裁短")
+    void smallWindowActuallyTrimsTheIndex() {
+        List<MemoryEntry> many = new java.util.ArrayList<>();
+        for (int i = 0; i < 60; i++) {
+            many.add(new MemoryEntry("name-" + i,
+                    "这是第 " + i + " 条记忆的摘要，写得比较长，好让预算真的顶得上",
+                    "正文", MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now()));
+        }
+        MemoryIndex full = MemoryIndex.of(many);
+
+        MemoryIndex big = full.withinBudget(MemoryIndex.budgetFor(1_000_000));
+        MemoryIndex small = full.withinBudget(MemoryIndex.budgetFor(4_000));
+
+        assertEquals(60, big.size(), "1M 下放得下");
+        assertTrue(small.size() < big.size(), "4,000 下必须缩");
+        assertTrue(TokenEstimator.estimate(small.render()) <= MemoryIndex.budgetFor(4_000) + 50,
+                "缩完要真的落进预算里");
+    }
 }

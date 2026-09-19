@@ -45,20 +45,40 @@ public final class ContextManager {
     private static final Logger log = LoggerFactory.getLogger(ContextManager.class);
 
     /**
-     * 上下文窗口的默认值，按 DeepSeek 对话模型来。
+     * 上下文窗口的默认值。
      *
-     * <p>可以用 {@code MYAGENT_CONTEXT_TOKENS} 或 config.json 的 {@code contextTokens} 改。
-     * 做成可配不只是为了换模型——压缩这条路本来<b>没法手工验证</b>：
-     * 64,000 的 80% 是 51,200 token，聊不到那个量。调到下限几轮就能把三条线都逼出来。
+     * <h3>为什么是 1,000,000</h3>
+     * DeepSeek 现在（2026-09 实测）只提供 {@code deepseek-flash} 和 {@code deepseek-v4-pro}，
+     * 两个都是 1M 窗口。老的 {@code deepseek-chat} 已于 2026-07-24 退役，
+     * 现在只是被路由过去——用它发请求，响应里的 {@code model} 字段回的是 {@code deepseek-flash}。
+     *
+     * <p>这个数曾经是 64,000，那是 V3 时代的事，之后没人回来改。
+     * 差了 16 倍的后果不是「浪费」而是<b>主动毁内容</b>：按 64,000 算，
+     * 聊到 51,200 token 就开始摘要，而模型还能再吃 95%。
+     * 压缩的本意是避免撞窗口，那样就成了在离窗口还有 95% 的地方提前丢东西。
+     *
+     * <p>换别的模型请改 {@code MYAGENT_CONTEXT_TOKENS} 或 config.json 的
+     * {@code contextTokens}——API 不返回上下文长度，代码没法自己发现这件事。
+     *
+     * <h3>1M 之下压缩基本是休眠的</h3>
+     * 正常会话到不了 800,000。这不代表白做：它仍是安全网，{@code /compact} 在成本上
+     * 也有意义（每轮重发几十万 token 是真金白银）。但要<b>验证</b>压缩，
+     * 必须把窗口调小——{@code MYAGENT_CONTEXT_TOKENS=12000} 几轮就能把三条线都逼出来。
      */
-    public static final int DEFAULT_MAX_TOKENS = 64_000;
+    public static final int DEFAULT_MAX_TOKENS = 1_000_000;
 
     /**
      * 配得再小也不能低于这个数，否则压缩会压了等于没压。
      *
-     * <p>这个下限是算出来的：压缩的软目标是 {@code maxTokens × 0.4 − 工具菜单}，
-     * 而工具菜单实测约 700 token（5 个内置工具；带上 remember/recall 约 1,200）。
-     * 代进去 4,000 × 0.4 − 1,200 = 400 token 才是留给历史的空间，已经是勉强能用的下限。
+     * <p>这个下限是算出来的，绑的是 <b>map 的块预算</b>（{@code maxTokens × 0.25}）：
+     * 4,000 下每块 1,000 token，差不多正好装下一轮「提问 + 读一个文件 + 回答」。
+     * 再低下去，块预算连一轮都装不下，{@code splitOversizedTurn} 会把每一轮都从中间切开，
+     * 摘出来的东西前言不搭后语。
+     *
+     * <p>另外两处也在这个量级上顶住：工具菜单实测约 700 token
+     * （5 个内置工具；带上 remember/recall 约 1,200），而阶梯的触发线是
+     * {@code 4,000 × 0.987 − 1,200 ≈ 2,748}，留给历史的空间还够用；
+     * 记忆索引则按 {@code MemoryIndex.budgetFor} 跟着窗口缩，不会反过来把窗口撑爆。
      */
     public static final int MIN_MAX_TOKENS = 4_000;
 

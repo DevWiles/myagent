@@ -12,6 +12,7 @@ import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
+import dev.wiles.myagent.memory.MemoryIndex;
 import dev.wiles.myagent.memory.MemoryScope;
 import dev.wiles.myagent.memory.MemorySource;
 import dev.wiles.myagent.memory.MemoryStore;
@@ -215,7 +216,8 @@ public final class Repl {
         // 而模型刚 remember 完，那条事实本来就还在它眼前的上下文里。
         this.agent = config.hasApiKey()
                 ? new Agent(newClient(), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root())),
+                        SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
+                                MemoryIndex.budgetFor(config.contextTokens()))),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，表现为「按了 Esc 停不下来」

@@ -121,7 +121,7 @@ public final class Cli {
                       --port <端口>    无头模式监听端口，默认 0（系统分配，推荐）
 
                 配置:
-                  ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-chat"}
+                  ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-flash"}
                   环境变量 DEEPSEEK_API_KEY 优先级高于配置文件
 
                 示例:
