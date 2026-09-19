@@ -1,6 +1,9 @@
 package dev.wiles.myagent.plan;
 
 import dev.wiles.myagent.agent.SystemPrompt;
+import dev.wiles.myagent.prompt.PromptAssembler;
+import dev.wiles.myagent.prompt.PromptContext;
+import dev.wiles.myagent.prompt.PromptMode;
 
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
@@ -23,27 +26,31 @@ public final class TaskPrompt {
     public static final String VERDICT_PASS = "结论: 通过";
     public static final String VERDICT_FAIL = "结论: 不通过";
 
+    private static final PromptAssembler ASSEMBLER = PromptAssembler.createDefault();
+
     private TaskPrompt() {
     }
 
+    /**
+     * 子任务执行体的 system。
+     *
+     * <p>正文在 {@code prompts/modes/task.md}，这里只负责把这一步的类型和纪律填进去。
+     * 搬出去的理由见 {@code PromptRepository}——这段文字会被反复调，
+     * 而「调一次要重新编译」等于没人会去调。
+     *
+     * <p><b>不带记忆索引</b>：{@code TaskTools} 的白名单里没有 {@code recall}，
+     * 交代「你没有记忆」纯属噪音，甚至会勾着模型去找一个它调不到的工具。
+     */
     public static String system(Task task, Path workspaceRoot) {
-        return SystemPrompt.forWorkspace(workspaceRoot) + """
-
-                ---
-
-                当前你在执行一个更大计划中的**一个子任务**，任务类型是「%s」。
-
-                %s
-
-                这一步的纪律:
-                - **下面会给出这一步的完成标准，达到它就收口**，不要再往下做，\
-也不要在没达到的情况下宣布做完了。
-                - 只做这个子任务要求的事。计划里别的活有别的步骤负责，**不要顺手做掉**——\
-                你以为的顺手，在别人那儿是重复劳动或者冲突。
-                - 做完用几句话交代产出。下游任务只能看到你这段交代，看不到你的执行过程，\
-                所以关键结论（读到了什么、改了哪个文件、命令输出说明了什么）必须写进去。
-                - 交代要短。它会被原样塞进下游任务的上下文，写成长篇大论就是在烧后面每一步的额度。
-                """.formatted(typeName(task.type()), rules(task.type()));
+        // 不再拼 SystemPrompt.forWorkspace()：那一份里已经含 base.md 和**主循环**的
+        // 模式段，再拼一次 assemble(TASK) 会把 base 装两遍，还让模型同时收到
+        // 「按用户目标自己决定要不要用工具」和「只做这一步别越界」两条相反的指令。
+        // 模式本来就是用来选的，不是用来叠的
+        return ASSEMBLER.assemble(PromptMode.TASK, PromptContext.builder()
+                .variable("workspace", String.valueOf(workspaceRoot))
+                .variable("taskType", typeName(task.type()))
+                .variable("taskRules", rules(task.type()))
+                .build());
     }
 
     /**
