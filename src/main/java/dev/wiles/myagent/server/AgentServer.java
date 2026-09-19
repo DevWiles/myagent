@@ -15,6 +15,7 @@ import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
 import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
+import dev.wiles.myagent.memory.MemoryMetadata;
 import dev.wiles.myagent.memory.MemoryIndex;
 import dev.wiles.myagent.memory.MemoryScope;
 import dev.wiles.myagent.memory.MemorySource;
@@ -54,6 +55,8 @@ import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -219,10 +222,30 @@ public final class AgentServer extends WebSocketServer {
         if (readOnly) {
             return context;
         }
-        return context.onHarvest(h -> memory.save(new MemoryEntry(
-                h.name(), h.description(), h.content(),
-                MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now()),
-                workspace.root()));
+        return context
+                // 主题词喂回给模型，让它复用已有的而不是每次另起一个近义词。
+                // 取代靠主题匹配，而模型不知道历史时给出的词会随机漂移
+                .withTopicHints(() -> memory.activeTopicKeys(workspace.root()))
+                .onHarvest(h -> memory.save(withProvenance(h), workspace.root()));
+    }
+
+    /**
+     * 把顺手捡到的一条排成记忆条目，带上溯源信息。
+     *
+     * <p>{@code topic_key} 让同主题的后续纠正能正确顶掉这一条；
+     * {@code turn_id} 记下它是从哪一段原文里捡的——用户问「你怎么知道的」时，
+     * 这是唯一能指回去的线索。
+     */
+    private static MemoryEntry withProvenance(ContextManager.Harvested h) {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        if (h.topicKey() != null && !h.topicKey().isBlank()) {
+            metadata.put(MemoryMetadata.TOPIC_KEY, h.topicKey().strip());
+        }
+        if (h.turnId() != null && !h.turnId().isBlank()) {
+            metadata.put(MemoryMetadata.TURN_ID, h.turnId().strip());
+        }
+        return new MemoryEntry(h.name(), h.description(), h.content(),
+                MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now(), metadata);
     }
 
     /**

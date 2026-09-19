@@ -91,7 +91,10 @@ public final class RecallTool implements Tool {
     }
 
     private String available() {
-        List<MemoryEntry> all = store.scan(workspace);
+        // 用模型视角而不是 scan()：load 已经把被取代的条目当作不存在了，
+        // 这里再按审计视角列清单，错误信息就会自相矛盾——
+        // 一边说「没有叫 X 的记忆」，一边把 X 列进「现有的是」
+        List<MemoryEntry> all = store.scanActive(workspace);
         if (all.isEmpty()) {
             return "目前一条记忆都没有。";
         }

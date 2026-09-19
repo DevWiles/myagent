@@ -253,4 +253,162 @@ class MemoryStoreTest {
         assertEquals(Optional.empty(), store.load("", ws()));
         assertEquals(Optional.empty(), store.load(null, ws()));
     }
+
+    // ─────────────────────────── 取代与撤销 ───────────────────────────
+
+    private static MemoryEntry topical(String name, String topic, MemorySource source) {
+        return new MemoryEntry(name, "摘要 " + name, "正文 " + name, MemoryScope.PROJECT,
+                source, LocalDate.of(2026, 9, 17),
+                java.util.Map.of(MemoryMetadata.TOPIC_KEY, topic));
+    }
+
+    @Test
+    @DisplayName("同主题的新事实把旧的顶掉——但旧文件留着，用户要能看见系统记过什么")
+    void newFactSupersedesSameTopic() {
+        MemoryStore store = store();
+        store.save(topical("uses-npm", "包管理器", MemorySource.OBSERVATION), ws());
+
+        store.save(topical("uses-bun", "包管理器", MemorySource.USER_CORRECTION), ws());
+
+        MemoryEntry old = store.scan(ws()).stream()
+                .filter(e -> e.name().equals("uses-npm")).findFirst().orElseThrow();
+        assertTrue(old.isSuperseded(), "旧事实必须退场，否则模型同时收到两条自相矛盾的上下文");
+        assertEquals("uses-bun", old.supersededBy());
+        assertEquals(2, store.scan(ws()).size(), "审计视角要能看见历史条目");
+        assertEquals(1, store.scanActive(ws()).size(), "模型视角只该看见生效的那条");
+    }
+
+    @Test
+    @DisplayName("被取代的条目不进索引、也 recall 不到")
+    void supersededIsInvisibleToTheModel() {
+        MemoryStore store = store();
+        store.save(topical("uses-npm", "包管理器", MemorySource.OBSERVATION), ws());
+        store.save(topical("uses-bun", "包管理器", MemorySource.USER_CORRECTION), ws());
+
+        assertFalse(store.index(ws()).render().contains("uses-npm"),
+                "注入了过期事实，模型没有任何办法判断哪条新");
+        assertTrue(store.load("uses-npm", ws()).isEmpty(),
+                "索引里早没它了，还来问多半是上一段会话记住的名字——这时候给过期正文正是要防的");
+        assertTrue(store.load("uses-bun", ws()).isPresent());
+    }
+
+    @Test
+    @DisplayName("没写主题词的条目一律不参与取代——存量数据行为完全不变")
+    void entriesWithoutTopicAreNeverTouched() {
+        MemoryStore store = store();
+        store.save(entry("old-one", MemoryScope.PROJECT), ws());
+
+        store.save(topical("new-one", "某主题", MemorySource.USER_STATED), ws());
+
+        assertEquals(2, store.scanActive(ws()).size(), "两条都该还生效");
+    }
+
+    @Test
+    @DisplayName("主题词靠子串兜底：模型把同一件事叫成两个名字时也能对上")
+    void topicMatchingToleratesDrift() {
+        assertTrue(MemoryStore.isSameTopic("测试命令", "构建测试命令"),
+                "模型实测会给出这两种叫法，精确匹配下取代永远不触发");
+        assertTrue(MemoryStore.isSameTopic(" 包管理器 ", "包管理器"));
+        assertFalse(MemoryStore.isSameTopic("命令", "测试命令"),
+                "太短的词会把不同主题合并，把过度取代变成新的问题");
+        assertFalse(MemoryStore.isSameTopic("测试命令", "包管理器"));
+        assertFalse(MemoryStore.isSameTopic(null, "x"));
+    }
+
+    @Test
+    @DisplayName("撤销自动写入时，被它取代的旧事实要跟着复活——不然用户「两条都没了」")
+    void undoRestoresWhatItSuperseded() {
+        MemoryStore store = store();
+        store.save(topical("uses-npm", "包管理器", MemorySource.USER_STATED), ws());
+        store.save(topical("uses-bun", "包管理器", MemorySource.OBSERVATION), ws());
+        assertEquals(1, store.scanActive(ws()).size());
+
+        MemoryEntry undone = store.undoLastAutoWrite(ws()).orElseThrow();
+
+        assertEquals("uses-bun", undone.name());
+        assertTrue(store.load("uses-bun", ws()).isEmpty(), "撤销了就该没了");
+        assertTrue(store.load("uses-npm", ws()).isPresent(),
+                "旧事实必须回来。少了这一步，撤销之后新旧都不生效，比不给撤销更糟");
+        assertEquals(1, store.scanActive(ws()).size());
+    }
+
+    @Test
+    @DisplayName("撤销只认自动写入的，用户自己记的一条都不碰")
+    void undoNeverTouchesManualMemories() {
+        MemoryStore store = store();
+        store.save(new MemoryEntry("by-hand", "用户亲口说的", "正文", MemoryScope.PROJECT,
+                MemorySource.USER_STATED, LocalDate.of(2026, 9, 18)), ws());
+
+        assertTrue(store.undoLastAutoWrite(ws()).isEmpty(), "没有自动写入可撤销");
+        assertTrue(store.load("by-hand", ws()).isPresent(), "他记的时候是清醒的");
+    }
+
+    @Test
+    @DisplayName("批量清理同样只删自动记的")
+    void clearAutoKeepsManualOnes() {
+        MemoryStore store = store();
+        store.save(entry("auto-1", MemoryScope.PROJECT), ws());          // OBSERVATION
+        store.save(entry("auto-2", MemoryScope.PROJECT), ws());
+        store.save(new MemoryEntry("manual", "用户记的", "正文", MemoryScope.PROJECT,
+                MemorySource.USER_CORRECTION, LocalDate.of(2026, 9, 18)), ws());
+
+        assertEquals(2, store.clearAutoMemories(ws()));
+
+        List<MemoryEntry> left = store.scan(ws());
+        assertEquals(1, left.size());
+        assertEquals("manual", left.get(0).name());
+    }
+
+    @Test
+    @DisplayName("主题词清单只给生效的那些，喂回模型让它复用而不是每次凭空取名")
+    void activeTopicKeysExcludeSuperseded() {
+        MemoryStore store = store();
+        store.save(topical("uses-npm", "包管理器", MemorySource.OBSERVATION), ws());
+        store.save(topical("uses-bun", "包管理器", MemorySource.USER_CORRECTION), ws());
+        store.save(topical("test-cmd", "测试命令", MemorySource.USER_STATED), ws());
+
+        List<String> topics = store.activeTopicKeys(ws());
+
+        assertEquals(2, topics.size(), "同主题只剩一条，不该报两遍");
+        assertTrue(topics.containsAll(List.of("包管理器", "测试命令")));
+    }
+
+    @Test
+    @DisplayName("frontmatter 里我们不认识的键要原样留着——这是个用户能直接编辑的文件")
+    void unknownFrontmatterKeysSurviveARoundTrip() throws IOException {
+        MemoryStore store = store();
+        store.save(new MemoryEntry("x", "摘要", "正文", MemoryScope.PROJECT,
+                MemorySource.USER_STATED, LocalDate.of(2026, 9, 17),
+                java.util.Map.of("我自己加的", "别删我")), ws());
+
+        MemoryEntry read = store.load("x", ws()).orElseThrow();
+        assertEquals("别删我", read.metadata().get("我自己加的"));
+
+        // 再存一遍：经手一次保存也不能把人家写的东西抹了
+        store.save(read, ws());
+        assertEquals("别删我", store.load("x", ws()).orElseThrow().metadata().get("我自己加的"));
+    }
+
+    @Test
+    @DisplayName("类型化字段不会被重复写进 frontmatter——写两遍的话文件每存一次长一行")
+    void reservedKeysAreNotDuplicated() throws IOException {
+        MemoryStore store = store();
+        store.save(new MemoryEntry("y", "摘要", "正文", MemoryScope.PROJECT,
+                MemorySource.USER_STATED, LocalDate.of(2026, 9, 17),
+                java.util.Map.of("name", "冒充的", "source", "冒充的")), ws());
+
+        String raw = Files.readString(
+                tmp.resolve("memory").resolve(WorkspaceKeyProbe.of(ws())).resolve("y.md"),
+                StandardCharsets.UTF_8);
+
+        assertEquals(1, raw.lines().filter(l -> l.startsWith("name:")).count());
+        assertEquals(1, raw.lines().filter(l -> l.startsWith("source:")).count());
+    }
+
+    /** 测试要按工作区分片去找文件，算法在 WorkspaceKey 里。 */
+    private static final class WorkspaceKeyProbe {
+        static String of(Path workspace) {
+            return dev.wiles.myagent.tool.WorkspaceKey.of(workspace);
+        }
+    }
 }

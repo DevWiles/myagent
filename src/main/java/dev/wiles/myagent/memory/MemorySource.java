@@ -42,6 +42,23 @@ public enum MemorySource {
         return wire;
     }
 
+    /**
+     * 注入提示词时贴的标签。
+     *
+     * <p>和 {@link #wire()} 分开：wire 是盘上的值，改了会读不出老文件；
+     * 这个是给模型看的话，可以随时调措辞。
+     *
+     * <p>自动记录那档特意写明「可撤销」——它同时告诉模型两件事：
+     * 这条可信度最低，以及用户有办法让它消失，所以别把它当成铁律。
+     */
+    public String label() {
+        return switch (this) {
+            case USER_CORRECTION -> "用户纠正过";
+            case USER_STATED -> "用户亲口说的";
+            case OBSERVATION -> "自动记录·可撤销";
+        };
+    }
+
     /** 认不出来就当 OBSERVATION——可信度最低的那个，宁可低估。 */
     public static MemorySource from(String raw) {
         if (raw != null) {

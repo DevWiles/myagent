@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -199,5 +200,29 @@ class MemoryToolsTest {
         String description = new RememberTool(store(), ws()).description();
         assertTrue(description.contains("不要"), "只讲什么时候该记，模型会把什么都记下来");
         assertTrue(description.contains("一次性"), "得点名一次性中间结果这个最常见的误记");
+    }
+
+    @Test
+    @DisplayName("扑空时列的清单不能含被取代的条目——否则错误信息自相矛盾")
+    void availableListExcludesSupersededEntries() {
+        MemoryStore store = new MemoryStore(tmp.resolve("memory"));
+        Path ws = tmp.resolve("proj");
+        store.save(new MemoryEntry("uses-npm", "用 npm", "正文", MemoryScope.PROJECT,
+                MemorySource.OBSERVATION, LocalDate.of(2026, 9, 17),
+                java.util.Map.of(MemoryMetadata.TOPIC_KEY, "包管理器")), ws);
+        store.save(new MemoryEntry("uses-bun", "用 bun", "正文", MemoryScope.PROJECT,
+                MemorySource.USER_CORRECTION, LocalDate.of(2026, 9, 18),
+                java.util.Map.of(MemoryMetadata.TOPIC_KEY, "包管理器")), ws);
+
+        ToolResult result = new RecallTool(store, ws)
+                .execute(args("{\"name\":\"uses-npm\"}"));
+
+        assertFalse(result.ok());
+        // 开头那句「没有叫 uses-npm 的记忆」本来就要回显模型问的名字，
+        // 所以只能断言「现有的是」后面那一截
+        String available = result.content().substring(result.content().indexOf("现有的是"));
+        assertFalse(available.contains("uses-npm"),
+                "一边说没有 uses-npm，一边把它列进「现有的是」——模型会照着再试一次");
+        assertTrue(available.contains("uses-bun"), "生效的那条要列出来，模型才纠正得了");
     }
 }

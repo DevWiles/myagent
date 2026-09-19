@@ -145,6 +145,75 @@ class CompactionHarvestTest {
     }
 
     @Test
+    @DisplayName("四段格式：主题词收下来，取代机制全靠它")
+    void capturesTopicKey() {
+        List<ContextManager.Harvested> caught = new ArrayList<>();
+
+        manager().onHarvest(caught::add).compute(oneChunk(), List.of(),
+                saying("摘要正文\n\n===值得记住===\nuses-bun | 包管理器 | 这项目用 bun | 不是 npm\n"));
+
+        assertEquals(1, caught.size());
+        assertEquals("uses-bun", caught.get(0).name());
+        assertEquals("包管理器", caught.get(0).topicKey(),
+                "主题词丢了的话，同一件事的后续纠正永远顶不掉旧的");
+        assertEquals("这项目用 bun", caught.get(0).description());
+        assertEquals("不是 npm", caught.get(0).content());
+        assertNotNull(caught.get(0).turnId(), "要能指回是从哪一段原文里捡的");
+    }
+
+    @Test
+    @DisplayName("模型少写一段时整条仍然收下，只是不参与取代——不是把这条丢掉")
+    void threeFieldLineStillWorks() {
+        List<ContextManager.Harvested> caught = new ArrayList<>();
+
+        manager().onHarvest(caught::add).compute(oneChunk(), List.of(),
+                saying("摘要正文\n\n===值得记住===\nuses-bun | 这项目用 bun | 不是 npm\n"));
+
+        assertEquals(1, caught.size());
+        assertEquals("这项目用 bun", caught.get(0).description());
+        assertEquals("不是 npm", caught.get(0).content());
+        assertNull(caught.get(0).topicKey());
+    }
+
+    @Test
+    @DisplayName("已经在用的主题词要出现在提示词里，让模型复用而不是另起近义词")
+    void feedsExistingTopicsBackToTheModel() {
+        List<String> seen = new ArrayList<>();
+        var recorder = new RecordingClient(seen);
+
+        manager().withTopicHints(() -> List.of("包管理器", "测试命令"))
+                .compute(oneChunk(), List.of(), recorder);
+
+        assertTrue(seen.stream().anyMatch(p -> p.contains("包管理器") && p.contains("测试命令")),
+                "不喂回去的话模型每次凭空取名，主题匹配就成了碰运气");
+    }
+
+    /** 把发出去的提示词原文记下来。 */
+    private static final class RecordingClient implements dev.wiles.myagent.llm.LlmClient {
+        private final List<String> seen;
+
+        RecordingClient(List<String> seen) {
+            this.seen = seen;
+        }
+
+        @Override
+        public dev.wiles.myagent.llm.ChatResponse chat(
+                List<dev.wiles.myagent.llm.ChatMessage> messages,
+                List<dev.wiles.myagent.llm.ToolSpec> tools) {
+            messages.stream().map(dev.wiles.myagent.llm.ChatMessage::content)
+                    .filter(java.util.Objects::nonNull).forEach(seen::add);
+            return new dev.wiles.myagent.llm.ChatResponse("id", "fake",
+                    List.of(new dev.wiles.myagent.llm.ChatResponse.Choice(0,
+                            dev.wiles.myagent.llm.ChatMessage.assistant("摘要"), "stop")), null);
+        }
+
+        @Override
+        public String modelName() {
+            return "fake";
+        }
+    }
+
+    @Test
     @DisplayName("封顶是整次压缩三条，不是每块三条——多块时预算跨块共享")
     void harvestBudgetIsSharedAcrossChunks() {
         List<ContextManager.Harvested> caught = new ArrayList<>();

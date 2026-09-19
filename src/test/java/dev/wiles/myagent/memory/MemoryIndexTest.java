@@ -60,8 +60,31 @@ class MemoryIndexTest {
                 entry("mvn-offline", "跑测试要加 -o"),
                 entry("prefers-cn", "始终用中文回复"))).render();
 
-        assertTrue(rendered.contains("- mvn-offline — 跑测试要加 -o"));
-        assertTrue(rendered.contains("- prefers-cn — 始终用中文回复"));
+        assertTrue(rendered.contains("mvn-offline — 跑测试要加 -o"));
+        assertTrue(rendered.contains("prefers-cn — 始终用中文回复"));
+    }
+
+    @Test
+    @DisplayName("每行标出来源——模型得分得清「用户亲口说的」和「自己猜的」")
+    void everyLineCarriesItsSource() {
+        String rendered = MemoryIndex.of(List.of(
+                new MemoryEntry("uses-bun", "这个项目用 bun", "正文", MemoryScope.PROJECT,
+                        MemorySource.USER_CORRECTION, LocalDate.now()),
+                entry("maybe-java21", "看着像 Java 21"))).render();
+
+        assertTrue(rendered.contains("[用户纠正过] uses-bun"),
+                "用户纠正过的是最可信的一档，不标出来就和模型自己猜的一样重");
+        assertTrue(rendered.contains("[自动记录·可撤销] maybe-java21"),
+                "自动记录的要写明可撤销：既告诉模型可信度低，也告诉它用户能让这条消失");
+    }
+
+    @Test
+    @DisplayName("索引要声明自己不是项目文件——不然模型会把记忆当成文件内容引用")
+    void declaresItIsNotFileContent() {
+        String rendered = MemoryIndex.of(List.of(entry("x", "某件事"))).render();
+
+        assertTrue(rendered.contains("不是项目文件"),
+                "不写明出处时，用户追问「你从哪看到的」，模型会指向一个没写这件事的文件");
     }
 
     @Test

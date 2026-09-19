@@ -56,8 +56,21 @@ public record MemoryIndex(List<MemoryEntry> entries) {
         return Math.min(MAX_TOKENS, Math.max(1, (int) (windowTokens * WINDOW_SHARE)));
     }
 
-    /** 表头和表尾是渲染和估算<b>共用</b>的，分开写迟早会算漏一边。 */
-    private static final String HEADER = "\n## 你记住的事\n\n";
+    /**
+     * 表头和表尾是渲染和估算<b>共用</b>的，分开写迟早会算漏一边。
+     *
+     * <p>第二句是有来历的：不写明出处时，模型会把注入的记忆<b>当成项目文件里的内容</b>，
+     * 用户追问「你从哪看到的」时它会指向一个根本没写这件事的文件。
+     * 记忆是记忆，文件是文件，得让它分得开。
+     */
+    private static final String HEADER = """
+
+            ## 你记住的事
+
+            （以下条目来自长期记忆存储，<b>不是项目文件里的内容</b>。
+            方括号里是来源：用户亲口说的可信度最高，自动记录的可能已经过期。）
+
+            """;
 
     /**
      * 一条记忆都没有时说的话。

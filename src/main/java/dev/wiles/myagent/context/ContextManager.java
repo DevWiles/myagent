@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * 上下文压缩：把一份<b>只追加、永不改写</b>的会话记录，压成能发出去的窗口。
@@ -138,6 +139,18 @@ public final class ContextManager {
     };
 
     /**
+     * 已经在用的主题词，喂回给模型让它复用。
+     *
+     * <p>用 {@code Supplier} 而不是一份定值：每捡一条记忆主题就可能多一个，
+     * 传定值的话第二块摘要看到的还是第一块之前的旧清单。
+     *
+     * <p>为什么由调用方提供——这个包不该认识 {@code MemoryStore}，
+     * 和 {@link Harvested} 不引用 {@code MemoryEntry} 是同一条理由：
+     * 低层只认自己的数据形状。
+     */
+    private Supplier<List<String>> topicHints = List::of;
+
+    /**
      * 真的接了下游吗。
      *
      * <p>不判这个的话，{@code --readonly}（刻意不接 sink）下会打出
@@ -225,7 +238,14 @@ public final class ContextManager {
      * 上下文压缩不该知道记忆是怎么存的，它只负责把候选递出去，
      * 由 {@code Repl} / {@code AgentServer} 决定收不收、怎么收。
      */
-    public record Harvested(String name, String description, String content) {
+    public record Harvested(String name, String description, String content,
+                            String topicKey, String turnId) {
+
+        /** 不带溯源信息的版本，测试和老调用方用。 */
+        public Harvested(String name, String description, String content) {
+            this(name, description, content, null, null);
+        }
+
     }
 
     /**
@@ -243,6 +263,29 @@ public final class ContextManager {
      * 模型没给这段、或者给歪了，{@link #splitSummary} 就把全文当摘要——
      * 和加这个功能之前的行为一模一样。<b>捡记忆失败绝不能伤到压缩本身。</b>
      */
+    /** 接上「已经在用的主题词」。不接就是空清单，模型每次自己取名，取代命中率会低一些。 */
+    public ContextManager withTopicHints(Supplier<List<String>> hints) {
+        this.topicHints = hints == null ? List::of : hints;
+        return this;
+    }
+
+    /**
+     * 排成提示词里那一句。取不到就说「暂时没有」——
+     * 留空的话模型会把前面那句「照原样复用」当成一条没有对象的指令，
+     * 有实测见过它因此编出一个「（无）」主题。
+     */
+    private String renderTopicHints() {
+        List<String> hints;
+        try {
+            hints = topicHints.get();
+        } catch (RuntimeException e) {
+            log.debug("取主题词清单失败，当作没有: {}", e.toString());
+            hints = List.of();
+        }
+        return hints == null || hints.isEmpty() ? "（暂时还没有，你取的就是第一个）"
+                : String.join("、", hints);
+    }
+
     public ContextManager onHarvest(Consumer<Harvested> harvest) {
         this.harvest = harvest == null ? h -> { } : harvest;
         this.harvestWired = harvest != null;
@@ -462,9 +505,13 @@ public final class ContextManager {
 
                             摘要写完之后，如果这段记录里有**下次打开这个项目还用得上**的事实
                             （用户的纠正和偏好、构建命令、架构约定、某个坑的成因），
-                            另起一行写 %s，然后每行一条，用 | 分成三段：
+                            另起一行写 %s，然后每行一条，用 | 分成四段：
 
-                            短名字(小写连字符) | 一句话摘要 | 详细说明
+                            短名字(小写连字符) | 主题词 | 一句话摘要 | 详细说明
+
+                            **主题词**说的是「这条讲的是哪件事」，比如「包管理器」「测试命令」。
+                            它决定同一件事的新说法能不能把旧的顶掉，所以<b>已经用过的主题词要照原样复用</b>，
+                            不要另起一个近义的。这个项目已经在用的主题词：%s
 
                             只挑真正跨会话有用的，最多 %d 条。一次性的中间结果、
                             读一遍文件就知道的事、这轮做完就没意义的进度，都不要写。
@@ -472,14 +519,14 @@ public final class ContextManager {
 
                             ----- 工作记录 -----
                             %s
-                            """.formatted(HARVEST_MARKER, Math.max(harvestBudget[0], 0),
-                            transcript))), null);
+                            """.formatted(HARVEST_MARKER, renderTopicHints(),
+                            Math.max(harvestBudget[0], 0), transcript))), null);
 
             String[] parts = splitSummary(response.text());
             if (parts[0].isBlank()) {
                 return new SummarySegment(from, to, placeholder(slice.size()));
             }
-            emitHarvest(parts[1], harvestBudget);
+            emitHarvest(parts[1], harvestBudget, "seg[" + from + "," + to + ")");
             return new SummarySegment(from, to, parts[0]);
 
         } catch (LlmException e) {
@@ -523,7 +570,7 @@ public final class ContextManager {
      *
      * @param budget 单元素数组当计数器用，跨块共享，保证整次压缩不超 {@value #MAX_HARVEST} 条
      */
-    private void emitHarvest(String block, int[] budget) {
+    private void emitHarvest(String block, int[] budget, String turnId) {
         if (!harvestWired || block == null || block.isBlank() || budget[0] <= 0) {
             return;     // 没接下游就别解析，更别打「记下了 N 条」
         }
@@ -537,15 +584,20 @@ public final class ContextManager {
                 continue;   // 模型写歪的行直接跳过，不去猜它想说什么
             }
             String name = fields[0].strip().replaceAll("^[-*\\s]+", "");
-            String description = fields[1].strip();
-            String content = fields[2].strip();
+            // 只有三段时按老格式读（名字|摘要|说明），主题词留空。
+            // 这条兼容不是为了老数据——是为了模型少写一段时**整条仍然能收下**，
+            // 顶多是这条不参与取代，而不是整条丢掉
+            boolean withTopic = fields.length >= 4;
+            String topicKey = withTopic ? fields[1].strip() : null;
+            String description = fields[withTopic ? 2 : 1].strip();
+            String content = fields[withTopic ? 3 : 2].strip();
             if (name.isBlank() || description.isBlank() || content.isBlank()) {
                 continue;
             }
             // try 包在**单条**上，不是包在整个循环上：
             // 一条名字不合规就让剩下几条全丢掉，未免太亏
             try {
-                harvest.accept(new Harvested(name, description, content));
+                harvest.accept(new Harvested(name, description, content, topicKey, turnId));
                 budget[0]--;
                 taken++;
             } catch (RuntimeException e) {
