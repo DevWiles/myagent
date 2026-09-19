@@ -108,6 +108,15 @@ public final class ContextManager {
     private Consumer<Harvested> harvest = h -> {
     };
 
+    /**
+     * 真的接了下游吗。
+     *
+     * <p>不判这个的话，{@code --readonly}（刻意不接 sink）下会打出
+     * 「压缩时顺手记下了 1 条长期记忆」——因为空实现的 accept 也算成功。
+     * 记忆一条都没落盘，日志却说记下了，谁照着日志查都得绕一圈。
+     */
+    private boolean harvestWired;
+
     public ContextManager() {
         this(DEFAULT_MAX_TOKENS);
     }
@@ -207,6 +216,7 @@ public final class ContextManager {
      */
     public ContextManager onHarvest(Consumer<Harvested> harvest) {
         this.harvest = harvest == null ? h -> { } : harvest;
+        this.harvestWired = harvest != null;
         return this;
     }
 
@@ -485,8 +495,8 @@ public final class ContextManager {
      * @param budget 单元素数组当计数器用，跨块共享，保证整次压缩不超 {@value #MAX_HARVEST} 条
      */
     private void emitHarvest(String block, int[] budget) {
-        if (block == null || block.isBlank() || budget[0] <= 0) {
-            return;
+        if (!harvestWired || block == null || block.isBlank() || budget[0] <= 0) {
+            return;     // 没接下游就别解析，更别打「记下了 N 条」
         }
         int taken = 0;
         for (String line : block.lines().toList()) {

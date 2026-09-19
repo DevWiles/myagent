@@ -178,6 +178,57 @@ class PrecomputeTest {
     }
 
     @Test
+    @DisplayName("到硬线时可以等在途的那一份，不用把同一件事买两遍")
+    void awaitsInFlightWork() {
+        ContextManager context = new ContextManager(64_000);
+        try (Precompute pre = new Precompute(context, () -> saying("后台算的"))) {
+            pre.start(record(8), List.of());
+
+            var taken = pre.awaitReady(5_000);
+
+            assertNotNull(taken, "在途的那份算完就该拿得到");
+            assertTrue(taken.summary().contains("后台算的"));
+            assertFalse(pre.hasPending(), "拿走了就不该还挂着");
+        }
+    }
+
+    @Test
+    @DisplayName("等超时就返回 null 让调用方自己压，但后台那份留着——下一轮可能就用上了")
+    void awaitTimesOutWithoutKillingTheTask() {
+        CountDownLatch release = new CountDownLatch(1);
+        ContextManager context = new ContextManager(64_000);
+        try (Precompute pre = new Precompute(context, () -> new LlmClient() {
+            public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t) {
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return new ChatResponse("x", "f", List.of(new ChatResponse.Choice(
+                        0, ChatMessage.assistant("慢摘要"), "stop")), null);
+            }
+
+            public String modelName() { return "fake"; }
+        })) {
+            pre.start(record(8), List.of());
+
+            assertNull(pre.awaitReady(150), "没算完就别干等");
+            assertTrue(pre.hasPending(), "超时不等于取消，那份还得留着");
+            release.countDown();
+        }
+    }
+
+    @Test
+    @DisplayName("没有在途任务时等也是白等，立刻返回 null")
+    void awaitWithNothingPending() {
+        ContextManager context = new ContextManager(64_000);
+        try (Precompute pre = new Precompute(context, () -> saying("x"))) {
+            assertNull(pre.awaitReady(5_000));
+        }
+        assertNull(Precompute.disabled(new ContextManager(64_000)).awaitReady(5_000));
+    }
+
+    @Test
     @DisplayName("关掉后台的那一版什么都不做，压缩退化成到硬线才同步压")
     void disabledNeverStarts() {
         Precompute pre = Precompute.disabled(new ContextManager(64_000));

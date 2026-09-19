@@ -989,8 +989,10 @@ public final class Repl {
         }
         var result = agent.compactNow();
         if (result == null) {
-            emit(Ansi.dim("还没有可压的内容——最近几轮是原样保留的，"
-                    + "得聊够几轮才有东西可摘。"));
+            // 两种「压不了」长得一样但含义完全不同，混着说会让人以为命令坏了
+            emit(Ansi.dim(agent.hasCompacted()
+                    ? "已经压到头了——剩下的就是最近几轮，那几轮是原样保留的。"
+                    : "还没有可压的内容——最近几轮原样保留，得再聊几轮才有东西可摘。"));
             return;
         }
         // 不在这儿再打一遍 token 数：压缩本身会发 Compacted 事件，render 已经画了一行。

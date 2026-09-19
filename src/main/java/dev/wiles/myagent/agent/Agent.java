@@ -59,6 +59,15 @@ public final class Agent {
      */
     public static final int DEFAULT_MAX_STEPS = 25;
 
+    /**
+     * 到了硬线、且后台正在算时，最多等它多久。
+     *
+     * <p>等超了就自己同步压一遍，后台那份留着——说不定下一轮就用上了。
+     * 取 20 秒是因为一块摘要实测一两秒，几块也就几秒；再久多半是网络出了问题，
+     * 那时候继续干等还不如自己去撞一次，好歹能拿到明确的错误。
+     */
+    private static final long FORCE_WAIT_MILLIS = 20_000;
+
     private final LlmClient client;
     private final ToolRegistry tools;
     /**
@@ -371,6 +380,11 @@ public final class Agent {
         return segments;
     }
 
+    /** 这段会话压过了吗——界面用它把「还没聊够」和「已经压到头了」说清楚。 */
+    public boolean hasCompacted() {
+        return summary != null;
+    }
+
     /**
      * 立刻压缩一次，不管占用到没到线。{@code /compact} 走这条路。
      *
@@ -438,8 +452,16 @@ public final class Agent {
                 }
             }
             case FORCE -> {
-                ContextManager.Compaction c = precompute.ready() ? precompute.take()
-                        : canAdvance() ? context.compute(conversation(), segments, client) : null;
+                ContextManager.Compaction c = precompute.ready() ? precompute.take() : null;
+                if (c == null && precompute.hasPending()) {
+                    // 后台八成正在算同一件事。反正到了硬线这一轮就要卡，
+                    // 等它比再买一遍便宜——实测见过 [precompute] 和 [main]
+                    // 前后脚跑同一个区间，token 白花一倍
+                    c = precompute.awaitReady(FORCE_WAIT_MILLIS);
+                }
+                if (c == null && canAdvance()) {
+                    c = context.compute(conversation(), segments, client);
+                }
                 if (c != null) {
                     result = land(c, result, specs);
                 }
@@ -543,12 +565,15 @@ public final class Agent {
                                 String userInput, int step) {
         String reason = "最近几轮的原文本身就超过了上下文窗口（约 "
                 + context.estimate(prepared.window(), specs) + " / 上限 "
-                + context.maxTokens() + " tokens）";
-        log.error("{}，这一轮发不出去", reason);
-        seal(reason, userInput, step);
+                + context.maxTokens() + " tokens）。压缩救不了——最近几轮是原样保留的。"
+                + "开一段新会话（/clear），或者把 contextTokens 调大。";
+        log.error("{}", reason);
+        // 封口但**不记断点**。记了的话界面会提示「说一句『继续』就接着干」，
+        // 而那是彻头彻尾的误导：撑破窗口的那条消息还在记录里（记录只追加），
+        // 说一次「继续」就原地再撞一次同一堵墙，用户会一直循环下去。
+        sealWithoutInterruption(reason);
         listener.accept(new AgentEvent.Failed(reason));
-        return reason + "。压缩救不了这种情况——最近几轮是原样保留的。"
-                + "请开一段新会话，或者把 contextTokens 调大。";
+        return reason;
     }
 
     /**
@@ -587,10 +612,20 @@ public final class Agent {
     }
 
     private void seal(String reason, String userInput, int step) {
+        sealWithoutInterruption(reason);
+        unfinished = new Interruption(reason, userInput, step, System.currentTimeMillis());
+    }
+
+    /**
+     * 只封口，不记断点。
+     *
+     * <p>用在「重试也没用」的场合：断点的全部意义是告诉用户「说一句继续就接着干」，
+     * 而有些失败重试一万次也还是同一个结果，那时候提示续做就是在骗人。
+     */
+    private void sealWithoutInterruption(String reason) {
         List<ChatMessage> sealed = HistoryRepair.seal(conversation(), reason);
         history.subList(1, history.size()).clear();   // 留下 system
         history.addAll(sealed);
-        unfinished = new Interruption(reason, userInput, step, System.currentTimeMillis());
     }
 
     /**

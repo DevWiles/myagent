@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -139,6 +141,54 @@ public final class Precompute implements AutoCloseable {
         pending.cancel(true);
         pending = null;
         log.debug("占用跌回预压缩线以下，待用件已丢弃");
+    }
+
+    /**
+     * 等在途的那一份算完。<b>会阻塞</b>，只该在已经到硬线、反正要卡一下的时候调。
+     *
+     * <h3>为什么要等，而不是自己再算一遍</h3>
+     * 到了硬线说明「不压就发不出去」，用户这一轮无论如何都要等。
+     * 此时后台大概率正在算<b>同一件事</b>（同一份记录、同一批段），
+     * 再起一次同步压缩就是把那几个调用原封不动买两遍——
+     * 实测见过 {@code [precompute] map: [8,22)} 和 {@code [main] map: [8,22)}
+     * 前后脚各跑一次，token 白花一倍，而且偏偏发生在压力最大的时候。
+     *
+     * <p>没在途、等超时、或者等出异常，都返回 null，调用方照旧自己同步压。
+     *
+     * <p><b>这个方法不能加 synchronized</b>：它要阻塞好几秒，
+     * 而 {@link #discard()} 和 {@link #start} 都是 synchronized 的，
+     * 占着锁睡觉会把取消也一起堵死。
+     */
+    public ContextManager.Compaction awaitReady(long timeoutMillis) {
+        Future<ContextManager.Compaction> inFlight;
+        synchronized (this) {
+            inFlight = pending;
+        }
+        if (inFlight == null) {
+            return null;
+        }
+        try {
+            ContextManager.Compaction result =
+                    inFlight.get(timeoutMillis, TimeUnit.MILLISECONDS);
+            clearIfSame(inFlight);
+            return result;
+        } catch (TimeoutException e) {
+            log.debug("等后台预压缩超时（{}ms），这一轮自己同步压", timeoutMillis);
+            return null;    // 让它接着算，说不定下一轮就用上了
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception e) {
+            log.warn("后台预压缩失败，退回同步压缩: {}", e.toString());
+            clearIfSame(inFlight);
+            return null;
+        }
+    }
+
+    private synchronized void clearIfSame(Future<ContextManager.Compaction> f) {
+        if (pending == f) {
+            pending = null;
+        }
     }
 
     /** 还有任务在跑或者有现货挂着吗——给测试和状态栏用。 */

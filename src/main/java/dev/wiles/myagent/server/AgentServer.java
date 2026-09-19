@@ -660,7 +660,9 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         if (agent.compactNow() == null) {
-            send(conn, error("还没有可压的内容——最近几轮是原样保留的"));
+            send(conn, error(agent.hasCompacted()
+                    ? "已经压到头了——剩下的就是最近几轮，那几轮是原样保留的"
+                    : "还没有可压的内容——最近几轮原样保留，得再聊几轮才有东西可摘"));
             return;
         }
         // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
