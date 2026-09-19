@@ -7,6 +7,8 @@ import dev.wiles.myagent.agent.Interruption;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
+import dev.wiles.myagent.context.TokenLedger;
+import dev.wiles.myagent.context.TokenMeter;
 import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
@@ -90,6 +92,13 @@ public final class Repl {
     private final MemoryStore memory;
     private final SessionStore sessions;
     private final ToolRegistry tools;
+    /**
+     * 会话级的 token 电表。
+     *
+     * <p>随 Repl 活一辈子，但账本按<b>会话</b>清零（{@code /clear} 和接回旧会话时）——
+     * 用户问的是「这段对话花了多少」，不是「这个进程开着期间花了多少」。
+     */
+    private final TokenMeter meter = new TokenMeter();
     private final TerminalMode terminal = new TerminalMode();
     private final LineReader reader;
     private final Agent agent;
@@ -263,8 +272,12 @@ public final class Repl {
                 workspace.root()));
     }
 
+    /**
+     * 造一个客户端。<b>一律经过电表</b>——主循环、压缩、后台预压缩、规划器、
+     * 每个子任务的执行体都走这一个入口，包在这儿就漏不掉账。
+     */
     private LlmClient newClient() {
-        return new DeepSeekClient(config);
+        return meter.meter(new DeepSeekClient(config));
     }
 
     /**
@@ -601,6 +614,7 @@ public final class Repl {
             // 现象是「/continue 说没有可以接着聊的会话」，而你明明刚聊了半小时
             runOnce(line);
         }
+        emitUsageSummary();
         emit(Ansi.dim("bye."));
     }
 
@@ -975,6 +989,37 @@ public final class Repl {
     }
 
     /**
+     * 退出时交代这一段一共发出去多少。
+     *
+     * <h3>为什么这个数会比用户以为的大很多</h3>
+     * 状态栏上那个百分比说的是「当前这份窗口有多大」，是瞬时快照。
+     * 而 ReAct 每走一步都要把整个窗口<b>重发一遍</b>——一轮跑 5 步、窗口 50k，
+     * 实际发出去的是 250k。不说的话，用户会拿状态栏那个数当成花销，
+     * 而真实数字可能是它的十倍。
+     */
+    private void emitUsageSummary() {
+        TokenLedger ledger = meter.snapshot();
+        if (ledger.isEmpty()) {
+            return;     // 一句话没说过，不用交代
+        }
+        String line = "这段会话发出 " + formatCount(ledger.promptTokens()) + " 提示词 + "
+                + formatCount(ledger.completionTokens()) + " 生成，共 "
+                + ledger.requests() + " 次请求（平均每次上下文 "
+                + formatCount(ledger.averagePrompt()) + "）";
+        if (!ledger.isComplete()) {
+            // 承认低报，别让用户拿一个缺角的数去对账
+            line += "；其中 " + ledger.missingUsage() + " 次没拿到用量，实际还要更多";
+        }
+        emit(Ansi.dim(line));
+    }
+
+    /** 上万的数字写成 12.3k，和状态栏一个写法。 */
+    private static String formatCount(long tokens) {
+        return tokens < 1000 ? String.valueOf(tokens)
+                : String.format("%.1fk", tokens / 1000.0);
+    }
+
+    /**
      * 手动压一次。
      *
      * <h3>为什么要有手动这条路</h3>
@@ -1016,6 +1061,7 @@ public final class Repl {
                 // 换个 id 从头记，于是刚才那段就定在盘上不再被续写了
                 sessionId = SessionId.create(System.currentTimeMillis());
                 sessionStartedAt = System.currentTimeMillis();
+                meter.reset();      // 新会话新账本——用户问的是「这段对话花了多少」
                 emit(Ansi.dim("对话历史已清空，开了一段新会话。"
                         + "（刚才那段还在 /resume 里）"));
                 return true;

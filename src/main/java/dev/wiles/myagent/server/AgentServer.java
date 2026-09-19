@@ -8,6 +8,8 @@ import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
+import dev.wiles.myagent.context.TokenLedger;
+import dev.wiles.myagent.context.TokenMeter;
 import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
@@ -22,6 +24,7 @@ import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
+import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.GitBranch;
 import dev.wiles.myagent.tool.Tool;
@@ -88,6 +91,12 @@ public final class AgentServer extends WebSocketServer {
     private final MemoryStore memory;
     private final SessionStore sessions;
     private final ToolRegistry tools;
+    /**
+     * 会话级 token 电表，按会话清零。
+     *
+     * <p>字段初始化器在构造体之前跑完，所以构造体里的 {@code newClient()} 拿得到它。
+     */
+    private final TokenMeter meter = new TokenMeter();
     private final Agent agent;
     private final RemoteApproval approval;
 
@@ -164,25 +173,25 @@ public final class AgentServer extends WebSocketServer {
 
         // 索引扫一次就定，理由同 Repl：它是 history 的第 0 条，不能中途换
         this.agent = config.hasApiKey()
-                ? new Agent(new DeepSeekClient(config), tools,
+                ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
                                 MemoryIndex.budgetFor(config.contextTokens()))),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，取消就失灵
                         .withPrecompute(new Precompute(contextManager(options.readOnly()),
-                                () -> new DeepSeekClient(config)))
+                                () -> newClient()))
                         .withWritingTools(BuiltinTools.WRITING_TOOLS)
                         .onEvent(this::onAgentEvent)
                 : null;
         this.planner = config.hasApiKey()
-                ? new Planner(new DeepSeekClient(config))
+                ? new Planner(newClient())
                         .readOnly(options.readOnly())
                         .context(PlanContext.of(workspace.root(), tools))
                 : null;
         // 编排全交出去，这边只留「怎么问」和「怎么发事件」
         this.planAgent = planner == null ? null
-                : new PlanExecuteAgent(planner, () -> new DeepSeekClient(config), tools,
+                : new PlanExecuteAgent(planner, () -> newClient(), tools,
                         workspace.root(), PlanStore.inUserHome())
                         .approval(plan -> planConfirm.confirm())
                         .listener(new ProtocolPlanView());
@@ -197,6 +206,14 @@ public final class AgentServer extends WebSocketServer {
      * <p>来源记 OBSERVATION——这是模型自己的判断，不是用户亲口说的，
      * 可信度最低的那一档。<b>只读模式不捡</b>：它承诺不动用户的任何东西，磁盘也算。
      */
+    /**
+     * 造一个客户端。<b>一律经过电表</b>——主循环、压缩、后台预压缩、规划器、
+     * 每个子任务的执行体都走这一个入口，包在这儿就漏不掉账。
+     */
+    private LlmClient newClient() {
+        return meter.meter(new DeepSeekClient(config));
+    }
+
     private ContextManager contextManager(boolean readOnly) {
         ContextManager context = new ContextManager(config.contextTokens());
         if (readOnly) {
@@ -686,6 +703,7 @@ public final class AgentServer extends WebSocketServer {
         // 两边不一致的话，同一个存档在两个界面里表现不同，那种 bug 没人查得动
         sessionId = SessionId.create(System.currentTimeMillis());
         sessionStartedAt = System.currentTimeMillis();
+        meter.reset();      // 新会话新账本，和终端的 /clear 是同一条语义
         approval.reset();
         publish(Protocol.event("reset_done"));
     }
