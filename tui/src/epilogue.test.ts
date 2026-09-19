@@ -3,7 +3,12 @@ import { buildEpilogue } from "./epilogue.ts"
 import type { Entry, SessionState } from "./store.ts"
 
 /** 只填测试关心的字段，其余给个能用的默认值。 */
-function stateOf(partial: { entries?: Entry[]; tokens?: number; auditLog?: string }): SessionState {
+function stateOf(partial: {
+  entries?: Entry[]
+  tokens?: number
+  sentTokens?: number
+  auditLog?: string
+}): SessionState {
   return {
     ready: partial.auditLog
       ? {
@@ -25,7 +30,8 @@ function stateOf(partial: { entries?: Entry[]; tokens?: number; auditLog?: strin
     approval: null,
     planConfirm: null,
     tokens: partial.tokens ?? 0,
-    contextLimit: 64000,
+    sentTokens: partial.sentTokens ?? 0,
+    contextLimit: 1_000_000,
     lastDurationMs: null,
     startedAt: null,
     closed: null,
@@ -90,5 +96,20 @@ describe("buildEpilogue", () => {
   test("没有审计日志字段时只有一行（老后端连上来也不该崩）", () => {
     const lines = buildEpilogue(stateOf({ entries: [user("你好")] }), 1000)
     expect(lines).toHaveLength(1)
+  })
+})
+
+describe("退出摘要报的是发出量，不是窗口占用", () => {
+  test("有累计就报累计——这几行的本意是「刚才烧了多少」", () => {
+    const line = buildEpilogue(stateOf({ entries: [user("问")], tokens: 3_200, sentTokens: 9_800 }), 1000)[0]
+
+    expect(line).toContain("发出 9.8k tokens")
+    expect(line).not.toContain("3.2k")
+  })
+
+  test("后端没给累计时退回老行为，不至于什么都不显示", () => {
+    const line = buildEpilogue(stateOf({ entries: [user("问")], tokens: 3_200 }), 1000)[0]
+
+    expect(line).toContain("3.2k tokens")
   })
 })

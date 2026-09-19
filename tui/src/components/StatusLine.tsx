@@ -22,6 +22,8 @@ export type StatusLineProps = {
   columns: number
   busy?: boolean
   tokens?: number
+  /** 累计真正发出去的提示词。 */
+  sentTokens?: number
   contextLimit?: number
 }
 
@@ -30,10 +32,33 @@ const SEPARATOR = "  │  "
 export function StatusLine(props: StatusLineProps) {
   const theme = useTheme()
 
+  const percent = createMemo(() =>
+    !props.contextLimit || !props.tokens
+      ? 0
+      : Math.round((props.tokens / props.contextLimit) * 100),
+  )
+
+  /**
+   * 窗口占用 + 累计发出。
+   *
+   * 两个数都要，因为它们不是一回事：前者是「这一份窗口有多大」的瞬时快照，
+   * 后者是把窗口重发了几十遍之后的总和。只显示前者，用户会拿它当花销，
+   * 而真实数字可能是它的十倍；只显示后者，又看不出离上限还有多远。
+   */
   const usage = createMemo(() => {
-    if (!props.contextLimit || !props.tokens) return ""
-    const percent = Math.round((props.tokens / props.contextLimit) * 100)
-    return `  ${formatTokens(props.tokens)} (${percent}%)`
+    const parts: string[] = []
+    if (props.contextLimit && props.tokens) {
+      parts.push(`${formatTokens(props.tokens)} (${percent()}%)`)
+    }
+    if (props.sentTokens) parts.push(`已发 ${formatTokens(props.sentTokens)}`)
+    return parts.length === 0 ? "" : `  ${parts.join("  ·  ")}`
+  })
+
+  /** 过半转黄、八成转红。和终端版 ContextBar 是同一组阈值，两边不一致会很怪。 */
+  const usageColor = createMemo(() => {
+    if (percent() >= 80) return theme.error
+    if (percent() >= 50) return theme.warning
+    return theme.inactive
   })
 
   // 路径能占的列数 = 总宽 - 左右内边距 - 各段固定内容。
@@ -53,7 +78,7 @@ export function StatusLine(props: StatusLineProps) {
       <text fg={theme.inactive}>{SEPARATOR}</text>
       <text fg={theme.subtle}>{workspace()}</text>
       {props.branch ? <text fg={theme.thought}> git:({props.branch})</text> : null}
-      {usage() ? <text fg={theme.inactive}>{usage()}</text> : null}
+      {usage() ? <text fg={usageColor()}>{usage()}</text> : null}
     </box>
   )
 }

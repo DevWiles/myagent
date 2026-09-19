@@ -202,7 +202,7 @@ class SessionStoreTest {
         List<SummarySegment> segments = List.of(
                 new SummarySegment(0, 2, "前两条聊了怎么跑测试"));
 
-        store.save(ID, history(), ws(), "deepseek-chat", STARTED, segments);
+        store.save(ID, history(), ws(), "deepseek-chat", STARTED, segments, TokenLedger.EMPTY);
 
         var loaded = store.latest(ws()).orElseThrow();
         assertEquals(segments, loaded.segments());
@@ -215,7 +215,7 @@ class SessionStoreTest {
         SessionStore store = store();
         // history() 去掉 system 之后是 4 条，这个段说自己覆盖到第 99 条
         store.save(ID, history(), ws(), "deepseek-chat", STARTED,
-                List.of(new SummarySegment(0, 99, "指向不存在的消息")));
+                List.of(new SummarySegment(0, 99, "指向不存在的消息")), TokenLedger.EMPTY);
 
         var loaded = store.latest(ws()).orElseThrow();
         assertEquals(1, loaded.segments().size(), "原样读回来");
@@ -237,7 +237,8 @@ class SessionStoreTest {
 
         // 摘要覆盖了前 4 条，但它只活在 segments 里，记录一个字没动
         store.save(ID, withSummaryShaped, ws(), "deepseek-chat", STARTED,
-                List.of(new SummarySegment(0, 4, "[以下是早先对话的摘要，原文已省略] 用户要改 README")));
+                List.of(new SummarySegment(0, 4, "[以下是早先对话的摘要，原文已省略] 用户要改 README")),
+                TokenLedger.EMPTY);
 
         var summary = store.list(ws()).get(0);
 
@@ -535,5 +536,34 @@ class SessionStoreTest {
 
         assertEquals(2, store.list(ws()).size());
         assertEquals("今天聊的", store.list(ws()).get(0).title(), "新的排前面");
+    }
+
+    @Test
+    @DisplayName("用量账本跟着存档走——续聊之后「这次会话花了多少」不该归零")
+    void roundTripsLedger() {
+        SessionStore store = store();
+        TokenLedger spent = new TokenLedger(156_800, 3_100, 42, 1);
+
+        store.save(ID, history(), ws(), "deepseek-flash", STARTED, List.of(), spent);
+
+        assertEquals(spent, store.latest(ws()).orElseThrow().ledger());
+    }
+
+    @Test
+    @DisplayName("没有账本字段的老存档照样读得出来——加字段不该把已有会话作废")
+    void oldArchiveWithoutLedgerStillLoads() throws IOException {
+        SessionStore store = store();
+        store.save(ID, history(), ws(), "deepseek-flash", STARTED, List.of(),
+                new TokenLedger(100, 10, 1, 0));
+
+        // 把字段整个删掉，模拟这次改动之前存下来的档
+        String raw = Files.readString(store.pathFor(ws(), ID));
+        ObjectNode node = (ObjectNode) new ObjectMapper().readTree(raw);
+        node.remove("ledger");
+        Files.writeString(store.pathFor(ws(), ID), node.toString(), StandardCharsets.UTF_8);
+
+        var loaded = store.latest(ws());
+        assertTrue(loaded.isPresent(), "少一个可选字段不该让整份存档读不出来");
+        assertEquals(TokenLedger.EMPTY, loaded.get().ledger(), "当空账本处理");
     }
 }

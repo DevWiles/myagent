@@ -45,6 +45,16 @@ import java.util.List;
  * @param startedAt 这段对话最早那一句的时刻，epoch 毫秒
  * @param savedAt  最后一次存盘的时刻，epoch 毫秒
  * @param messages 对话内容，<b>不含 system</b>
+ * @param segments 已经算好的摘要段，见 {@link SummarySegment}。存它是为了<b>续聊时不用重算</b>：
+ *                 段是从原文 map 出来的，而记录只追加，所以段永远有效，下次开机直接接着用。
+ *                 reduce 的产物<b>不存</b>——那是一次性的，重算一次很便宜
+ * @param ledger   这段会话累计发出去多少，见 {@link TokenLedger}。续聊时要接着累加——
+ *                 不存的话，{@code /resume} 之后「这次会话花了多少」会莫名其妙归零，
+ *                 而对话明明是接着的。
+ *                 <p><b>加这两个字段都没有升 FORMAT</b>：它们是可选的，老存档读出来是 null，
+ *                 当空值处理即可。升版号只该用在「按旧结构解析会得到<b>错误</b>数据」那种场合——
+ *                 比如格式 2 存的是压缩后的历史，收进来会让用户看见一段假对话。
+ *                 为一个新增字段把用户已有的会话全作废，代价和收益不成比例
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SessionSnapshot(
@@ -56,7 +66,8 @@ public record SessionSnapshot(
         long startedAt,
         long savedAt,
         List<ChatMessage> messages,
-        List<SummarySegment> segments) {
+        List<SummarySegment> segments,
+        TokenLedger ledger) {
 
     /**
      * 当前格式版本。改了消息结构就把它 +1，老存档会被自动忽略。
@@ -75,6 +86,7 @@ public record SessionSnapshot(
     public SessionSnapshot {
         messages = List.copyOf(messages == null ? List.of() : messages);
         segments = List.copyOf(segments == null ? List.of() : segments);
+        ledger = ledger == null ? TokenLedger.EMPTY : ledger;   // 老存档没这个字段
     }
 
     /**
@@ -84,13 +96,13 @@ public record SessionSnapshot(
      */
     public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
                                      String model, String branch, long startedAt, long now,
-                                     List<SummarySegment> segments) {
+                                     List<SummarySegment> segments, TokenLedger ledger) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
         return new SessionSnapshot(FORMAT, id,
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
-                model, branch, startedAt, now, conversation, segments);
+                model, branch, startedAt, now, conversation, segments, ledger);
     }
 
     /**

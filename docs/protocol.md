@@ -86,7 +86,8 @@ token 随进程生灭，每次启动都不一样。
   "hasApiKey": true,
   "busy": false,
   "tokens": 1234,
-  "contextLimit": 65536,
+  "sentTokens": 156800,
+  "contextLimit": 1000000,
   "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
                "compact"],
   "tools": [{"name": "read_file", "description": "…"}],
@@ -373,7 +374,28 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ---
 
-### 3.10 上下文压缩（feature: `compact`）
+### 3.10 用量：`tokens` 和 `sentTokens` 不是一回事
+
+`ready` 和 `busy:false` 上都带这两个数，**别把它们当成一个东西**：
+
+| 字段 | 含义 | 特点 |
+|---|---|---|
+| `tokens` | **当前这一份窗口**有多大 | 瞬时快照，压缩之后会变小 |
+| `sentTokens` | 这段会话**累计真正发出去**的提示词 | 只增不减 |
+
+差别来自 ReAct：每走一步都要把整个窗口重发一遍。一轮跑 5 步、窗口 50k，
+`tokens` 是 50k，而 `sentTokens` 涨了 250k。实测一段三轮对话（含一次读文件）
+`sentTokens` 是 16.2k，而结束时 `tokens` 才 4k 出头。
+
+**界面要把两个都显示出来**。只显示 `tokens` 的话，用户会拿它当花销，
+而真实数字可能是它的十倍；只显示 `sentTokens` 的话，又看不出离窗口上限还有多远。
+
+`sentTokens` 全部来自响应里的 `usage`，不是估算。网关不回 usage 时这个数会低报——
+后端不会拿估算值去凑，宁可少报也不给假精确。
+
+---
+
+### 3.11 上下文压缩（feature: `compact`）
 
 压缩只动**发给模型的那份窗口**，不动会话记录。记录是只追加的，原文永远留在存档里——
 所以 `session_list` 里那一行显示的始终是用户真说的第一句，压过多少次都一样。

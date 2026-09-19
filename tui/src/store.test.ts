@@ -706,3 +706,27 @@ describe('会话选择器', () => {
     expect(pushes).toBe(0)
   })
 })
+
+describe("用量：占用和累计是两个数", () => {
+  test("busy 结束时两个都更新，累计只增不减", () => {
+    const store = new SessionStore()
+
+    feed(store, { t: "busy", busy: false, tokens: 21_400, sentTokens: 156_800 })
+    expect(store.getSnapshot().tokens).toBe(21_400)
+    expect(store.getSnapshot().sentTokens).toBe(156_800)
+
+    // 压缩之后窗口变小了，但已经发出去的不会退回来
+    feed(store, { t: "busy", busy: false, tokens: 6_800, sentTokens: 191_000 })
+    expect(store.getSnapshot().tokens).toBe(6_800)
+    expect(store.getSnapshot().sentTokens).toBe(191_000)
+  })
+
+  test("后端没给 sentTokens 时保持原值，不要当成 0", () => {
+    const store = new SessionStore()
+    feed(store, { t: "busy", busy: false, tokens: 100, sentTokens: 5_000 })
+
+    feed(store, { t: "busy", busy: false, tokens: 200 })
+
+    expect(store.getSnapshot().sentTokens).toBe(5_000)
+  })
+})

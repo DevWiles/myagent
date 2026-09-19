@@ -436,12 +436,13 @@ public final class AgentServer extends WebSocketServer {
             } finally {
                 // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
                 sessions.save(sessionId, agent.history(), workspace.root(),
-                        config.model(), sessionStartedAt, agent.segments());
+                        config.model(), sessionStartedAt, agent.segments(), meter.snapshot());
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
                 idle.put("durationMs", System.currentTimeMillis() - startedAt);
                 idle.put("tokens", agent.estimatedTokens());
+                idle.put("sentTokens", meter.snapshot().promptTokens());
                 idle.put("contextLimit", agent.contextLimit());
                 publish(idle);
             }
@@ -595,6 +596,9 @@ public final class AgentServer extends WebSocketServer {
     private void adopt(SessionSnapshot snapshot) {
         // 段一起带回来，续聊时不用重新 map 一遍
         int restored = agent.restore(snapshot.restorable(), snapshot.usableSegments());
+        // 账本也接回来，理由同 Repl：对话是接着的，账就不该归零
+        meter.reset();
+        meter.seed(snapshot.ledger());
         sessionId = snapshot.id();
         sessionStartedAt = snapshot.startedAt();
         ObjectNode done = Protocol.event("session_restored");
@@ -604,6 +608,7 @@ public final class AgentServer extends WebSocketServer {
         done.put("firstMessage", snapshot.firstUserMessage());
         done.put("savedAt", snapshot.savedAt());
         done.put("tokens", agent.estimatedTokens());
+        done.put("sentTokens", meter.snapshot().promptTokens());
         done.put("contextLimit", agent.contextLimit());
         publish(done);
     }
@@ -687,7 +692,7 @@ public final class AgentServer extends WebSocketServer {
         // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
         // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
         sessions.save(sessionId, agent.history(), workspace.root(),
-                config.model(), sessionStartedAt, agent.segments());
+                config.model(), sessionStartedAt, agent.segments(), meter.snapshot());
     }
 
     private void handleReset(WebSocket conn) {
@@ -755,6 +760,7 @@ public final class AgentServer extends WebSocketServer {
         n.put("busy", busy.get());
         if (agent != null) {
             n.put("tokens", agent.estimatedTokens());
+            n.put("sentTokens", meter.snapshot().promptTokens());
             n.put("contextLimit", agent.contextLimit());
         }
         // 上次没跑完的计划。放进首帧而不是让界面再问一次——
