@@ -134,6 +134,8 @@ export type SessionState = {
    */
   activePlanKey: string | null
   tokens: number
+  /** 累计真正发出去的提示词。只增不减，压缩不会让它变小。 */
+  sentTokens: number
   contextLimit: number
   /** 上一轮耗时，画在状态栏上。 */
   lastDurationMs: number | null
@@ -160,6 +162,7 @@ const EMPTY_STATE: SessionState = {
   planConfirm: null,
   activePlanKey: null,
   tokens: 0,
+  sentTokens: 0,
   contextLimit: 0,
   lastDurationMs: null,
   startedAt: null,
@@ -335,6 +338,7 @@ export class SessionStore {
           },
           busy: event.busy,
           tokens: event.tokens ?? 0,
+          sentTokens: event.sentTokens ?? 0,
           contextLimit: event.contextLimit ?? 0,
         })
         if (!event.hasApiKey) {
@@ -453,6 +457,7 @@ export class SessionStore {
           planConfirm: event.busy ? this.state.planConfirm : null,
           step: event.busy ? this.state.step : 0,
           tokens: event.tokens ?? this.state.tokens,
+          sentTokens: event.sentTokens ?? this.state.sentTokens,
           contextLimit: event.contextLimit ?? this.state.contextLimit,
           lastDurationMs: event.durationMs ?? this.state.lastDurationMs,
           startedAt: event.busy ? (this.state.startedAt ?? Date.now()) : null,
@@ -494,6 +499,9 @@ export class SessionStore {
         )
         if (event.tokens !== undefined) {
           this.set({ tokens: event.tokens })
+        }
+        if (event.sentTokens !== undefined) {
+          this.set({ sentTokens: event.sentTokens })
         }
         if (event.contextLimit !== undefined) {
           this.set({ contextLimit: event.contextLimit })

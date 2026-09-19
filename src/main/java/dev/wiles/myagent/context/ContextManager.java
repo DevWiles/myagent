@@ -57,8 +57,17 @@ public final class ContextManager {
      * 聊到 51,200 token 就开始摘要，而模型还能再吃 95%。
      * 压缩的本意是避免撞窗口，那样就成了在离窗口还有 95% 的地方提前丢东西。
      *
-     * <p>换别的模型请改 {@code MYAGENT_CONTEXT_TOKENS} 或 config.json 的
-     * {@code contextTokens}——API 不返回上下文长度，代码没法自己发现这件事。
+     * <p>换别的模型请改 {@code MYAGENT_CONTEXT_TOKENS} 或 config.json 的 {@code contextTokens}。
+     *
+     * <h3>为什么写死，而不是启动时去问一下</h3>
+     * <b>不是「问不到」，是「不问」。</b>DeepSeek 的 {@code /models} 确实只回
+     * {@code id}/{@code object}/{@code owned_by} 三个字段（2026-09 实测），
+     * 但这不是通例：Gemini 回 {@code inputTokenLimit}，OpenRouter 回 {@code context_length}
+     * （446 个模型全都有），Groq、Mistral、vLLM 也各有各的字段。
+     *
+     * <p>这个项目是照着 DeepSeek 设计的，所以按它的窗口写死。将来真要探测，
+     * 该做成「问到了就打一行警告，不自动覆盖」——配置值是用户写下的明确意图，
+     * 被静默改掉比数字过期更难查。
      *
      * <h3>1M 之下压缩基本是休眠的</h3>
      * 正常会话到不了 800,000。这不代表白做：它仍是安全网，{@code /compact} 在成本上

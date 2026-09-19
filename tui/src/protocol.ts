@@ -38,6 +38,8 @@ export type ServerEvent =
       /** 后端支持的可选能力。老后端没有这个字段——界面据此决定画不画对应入口。 */
       features?: string[]
       tokens?: number
+      /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
+      sentTokens?: number
       contextLimit?: number
       workspaceWarning?: string
       /** 审计日志的位置。界面退出时显示给用户，好让人知道去哪儿查这趟做了什么。 */
@@ -94,6 +96,8 @@ export type ServerEvent =
       firstMessage: string
       savedAt: number
       tokens?: number
+      /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
+      sentTokens?: number
       contextLimit?: number
     }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
@@ -103,7 +107,15 @@ export type ServerEvent =
   /** 需要用户确认某个危险动作。回 approval_reply 之前后端是卡住的。 */
   | { t: 'approval_request'; id: number; action: string; detail: string; reason: string }
   /** 一轮对话的开始/结束。结束时带上耗时和上下文占用。 */
-  | { t: 'busy'; busy: boolean; durationMs?: number; tokens?: number; contextLimit?: number }
+  | {
+      t: 'busy'
+      busy: boolean
+      durationMs?: number
+      tokens?: number
+      /** 累计真正发出去的提示词，只增不减。见 protocol 3.10。 */
+      sentTokens?: number
+      contextLimit?: number
+    }
   | { t: 'reset_done' }
   /**
    * 这个工作区的会话历史，只回给问的那个连接。

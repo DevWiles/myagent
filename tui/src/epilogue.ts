@@ -35,7 +35,12 @@ export function buildEpilogue(state: SessionState, elapsedMs: number): string[] 
   // 分隔符沿用 summarizeTools 的 ' · '，用户在界面里已经看惯了
   const parts = [`${rounds} 轮对话`]
   if (toolCalls > 0) parts.push(`${toolCalls} 次工具调用`)
-  if (state.tokens > 0) parts.push(`${formatTokens(state.tokens)} tokens`)
+  // 这里要的是**发出去多少**，不是**窗口有多大**。
+  // 原先打的是 state.tokens（当前窗口占用），而这几行的本意是「刚才烧了多少」——
+  // 两个数差着一个数量级：ReAct 每步都要把整个窗口重发一遍，
+  // 三轮对话实测发出 9.8k，而结束时窗口才 3k 出头。
+  if (state.sentTokens > 0) parts.push(`发出 ${formatTokens(state.sentTokens)} tokens`)
+  else if (state.tokens > 0) parts.push(`${formatTokens(state.tokens)} tokens`)
   parts.push(formatDuration(elapsedMs))
 
   const lines = [`myagent 会话结束 · ${parts.join(" · ")}`]

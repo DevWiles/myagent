@@ -13,14 +13,22 @@ public final class ContextBar {
     private static final char EMPTY = '░';
 
     /** 超过这个比例开始变黄，提醒用户快满了。 */
-    private static final int WARN_PERCENT = 60;
+    private static final int WARN_PERCENT = 50;
     /** 超过这个比例变红，压缩随时会发生。 */
     private static final int DANGER_PERCENT = 80;
 
     private ContextBar() {
     }
 
-    public static String render(int usedTokens, int limitTokens, int messageCount, String model) {
+    /**
+     * @param sentTokens 这段会话<b>累计真正发出去</b>的提示词量。
+     *                   它和 {@code usedTokens} 不是一回事，而且通常大得多：
+     *                   前者是「这一份窗口有多大」的瞬时快照，后者是把窗口
+     *                   重发了几十遍之后的总和。不并排摆出来的话，
+     *                   用户会拿进度条那个数当成花销，而真实数字可能是它的十倍。
+     */
+    public static String render(int usedTokens, int limitTokens, int messageCount, String model,
+                                long sentTokens) {
         int percent = limitTokens <= 0 ? 0
                 : Math.min(100, (int) Math.round(usedTokens * 100.0 / limitTokens));
         int filled = Math.min(BAR_WIDTH, (int) Math.round(percent / 100.0 * BAR_WIDTH));
@@ -28,10 +36,13 @@ public final class ContextBar {
         String bar = String.valueOf(FILLED).repeat(filled)
                 + String.valueOf(EMPTY).repeat(BAR_WIDTH - filled);
 
+        String sent = sentTokens <= 0 ? ""
+                : "  ·  本会话已发 " + formatTokens(sentTokens);
+
         return "  " + Ansi.dim("上下文 ") + colorize(bar, percent) + " "
                 + colorize(percent + "%", percent)
-                + Ansi.dim("  ·  " + formatTokens(usedTokens) + "/" + formatTokens(limitTokens)
-                + " tokens  ·  " + messageCount + " 条消息  ·  " + model);
+                + Ansi.dim("  ·  " + formatTokens(usedTokens) + sent
+                + "  ·  " + messageCount + " 条  ·  " + model);
     }
 
     private static String colorize(String text, int percent) {
@@ -42,7 +53,7 @@ public final class ContextBar {
     }
 
     /** 上万的数字写成 12.3k，一行里塞得下也更好读。 */
-    private static String formatTokens(int tokens) {
+    public static String formatTokens(long tokens) {
         return tokens < 1000 ? String.valueOf(tokens)
                 : String.format("%.1fk", tokens / 1000.0);
     }

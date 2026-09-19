@@ -89,12 +89,13 @@ public final class SessionStore {
      */
     public void save(String id, List<ChatMessage> history, Path workspace,
                      String model, long startedAt) {
-        save(id, history, workspace, model, startedAt, List.of());
+        save(id, history, workspace, model, startedAt, List.of(), TokenLedger.EMPTY);
     }
 
-    /** 带上已经算好的摘要段一起存，续聊时就不用重算了。 */
+    /** 带上摘要段和用量账本一起存：续聊时既不用重算摘要，也不会把账清零。 */
     public void save(String id, List<ChatMessage> history, Path workspace,
-                     String model, long startedAt, List<SummarySegment> segments) {
+                     String model, long startedAt, List<SummarySegment> segments,
+                     TokenLedger ledger) {
         if (workspace == null) {
             return;
         }
@@ -110,7 +111,8 @@ public final class SessionStore {
         // 分支在这儿现算，不让调用方传：它是存档的属性（「这段是在哪个分支上聊的」），
         // 而且 GitBranch 只读一个小文件，比在两个界面里各记一遍靠得住
         SessionSnapshot snapshot = SessionSnapshot.of(id, history, workspace, model,
-                GitBranch.of(workspace), startedAt, System.currentTimeMillis(), segments);
+                GitBranch.of(workspace), startedAt, System.currentTimeMillis(),
+                segments, ledger);
         if (write(snapshot, pathFor(workspace, id))) {
             log.debug("会话已存档: {}（{} 条）", id, snapshot.messages().size());
         }
@@ -259,7 +261,7 @@ public final class SessionStore {
             // 拿今天的分支去填等于编一个「那段是在 dev 上聊的」出来
             SessionSnapshot adopted = new SessionSnapshot(SessionSnapshot.FORMAT, id,
                     node.path("workspace").asText(null), node.path("model").asText(null),
-                    null, savedAt, savedAt, messages, List.of());
+                    null, savedAt, savedAt, messages, List.of(), TokenLedger.EMPTY);
             if (!adopted.belongsTo(workspace)) {
                 log.warn("老存档 {} 记的工作区是 {}，不收", legacy, adopted.workspace());
                 return;
