@@ -617,7 +617,10 @@ public final class ContextManager {
     private Result finish(List<ChatMessage> window, List<ToolSpec> tools, int before,
                           int raw, boolean summarized, int level, String how) {
         int after = estimate(window, tools);
-        log.info("窗口组装({}): 记录 {} / 不裁 {} -> 实发 {} tokens", how, before, raw, after);
+        // debug 而不是 info：组装是纯函数，一轮里会被调好几次（状态栏一次、
+        // 判线一次、落地后再一次），按 info 打就是同样的三四行刷满日志，
+        // 把真正的事件（map 了几块、落地了没有）淹掉
+        log.debug("窗口组装({}): 记录 {} / 不裁 {} -> 实发 {} tokens", how, before, raw, after);
         return new Result(window, before, after, raw, summarized, level);
     }
 }

@@ -417,6 +417,11 @@ public final class Agent {
         // 判线用**不裁**的那个数：阶梯每轮都会把实发窗口压回软目标附近，
         // 拿裁后的数判线，占用率永远到不了 80%，摘要就一次都不会自动发生
         ContextManager.Stage stage = context.stageFor(calibrated(result.tokensRaw()), measured);
+        // 这一行是三条线唯一的观测口。没有它，「80% 到底有没有起后台预压缩」
+        // 只能靠猜——占用率、用的哪档阈值、判出什么，都得能对得上
+        log.debug("压力 {}/{} ({}) -> {}，实发 {}", calibrated(result.tokensRaw()),
+                context.maxTokens(), measured ? "实测" : "估算", stage,
+                calibrated(result.tokensAfter()));
 
         switch (stage) {
             case STEADY -> precompute.discard();
