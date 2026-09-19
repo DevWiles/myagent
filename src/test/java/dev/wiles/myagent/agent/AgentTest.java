@@ -350,6 +350,24 @@ class AgentTest {
     }
 
     @Test
+    @DisplayName("单轮撑破窗口：说清出路，且**不提示**「说一句继续」——继续会原地撞同一堵墙")
+    void oversizedTurnGivesAWayOut() {
+        FakeLlm llm = new FakeLlm();      // 剧本是空的：这一轮压根不该发出去
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys", 25, new ContextManager(4_000));
+
+        String answer = agent.run("请总结：" + "这是一段很长的粘贴内容。".repeat(600));
+
+        assertTrue(llm.received.isEmpty(), "明知道发不出去就别发，白烧一次失败的请求");
+        assertTrue(answer.contains("超过了上下文窗口"));
+        assertTrue(answer.contains("contextTokens"), "得告诉用户怎么办");
+        assertFalse(answer.contains("/compact"), "压缩救不了这种情况，提了就是误导");
+        // 断点的全部意义是「说一句继续就接着干」。这种失败重试一万次还是同一个结果，
+        // 撑破窗口的那条消息还在记录里（记录只追加），提示续做等于让用户无限循环
+        assertTrue(agent.unfinished().isEmpty(), "不该留下断点");
+        assertTrue(HistoryRepair.isIntact(agent.conversation()), "封口了，下一句话还发得出去");
+    }
+
+    @Test
     @DisplayName("上下文涨太大时自动压缩，压缩后对话照常进行")
     void compactsWhenContextGrows() {
         String huge = "很长的文件内容 ".repeat(400);
@@ -361,7 +379,7 @@ class AgentTest {
         ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
 
         List<AgentEvent> events = new ArrayList<>();
-        Agent agent = new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6))
+        Agent agent = new Agent(llm, tools, "sys", 25, new ContextManager(3_000))
                 .onEvent(events::add);
 
         String answer = agent.run("读三个文件");
@@ -370,9 +388,12 @@ class AgentTest {
         assertTrue(events.stream().anyMatch(e -> e instanceof AgentEvent.Compacted),
                 "上下文撑大了就该触发压缩");
 
-        AgentEvent.Compacted c = (AgentEvent.Compacted) events.stream()
-                .filter(e -> e instanceof AgentEvent.Compacted).findFirst().orElseThrow();
-        assertTrue(c.tokensAfter() < c.tokensBefore(), "压完必须真的变小了");
+        // 每一条都得是「变小了」。两个数的口径必须是同一把尺子——
+        // 记录的大小不含 system、窗口含，混着用就会打出「1302 → 1598」这种越压越大的行
+        events.stream().filter(e -> e instanceof AgentEvent.Compacted)
+                .map(e -> (AgentEvent.Compacted) e)
+                .forEach(c -> assertTrue(c.tokensAfter() < c.tokensBefore(),
+                        "压完必须真的变小了，实际是 " + c.tokensBefore() + " -> " + c.tokensAfter()));
     }
 
     @Test
@@ -386,7 +407,7 @@ class AgentTest {
                 .says("好了");
         ToolRegistry tools = new ToolRegistry().register(tool("read_file", a -> ToolResult.ok(huge)));
 
-        new Agent(llm, tools, "sys", 25, new ContextManager(3_000, 0.6)).run("读文件");
+        new Agent(llm, tools, "sys", 25, new ContextManager(3_000)).run("读文件");
 
         for (List<ChatMessage> sent : llm.received) {
             java.util.Set<String> pending = new java.util.HashSet<>();

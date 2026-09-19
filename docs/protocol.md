@@ -87,7 +87,8 @@ token 随进程生灭，每次启动都不一样。
   "busy": false,
   "tokens": 1234,
   "contextLimit": 65536,
-  "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions"],
+  "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
+               "compact"],
   "tools": [{"name": "read_file", "description": "…"}],
   "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
@@ -372,6 +373,38 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ---
 
+### 3.10 上下文压缩（feature: `compact`）
+
+压缩只动**发给模型的那份窗口**，不动会话记录。记录是只追加的，原文永远留在存档里——
+所以 `session_list` 里那一行显示的始终是用户真说的第一句，压过多少次都一样。
+
+后端按占用率分三档动作，界面不需要参与决策，只需要把 `compacted` 画出来：
+
+| 占用 | 后端干什么 | 界面看得到什么 |
+|---|---|---|
+| 80% | 后台**先把摘要算好**，不换上下文 | 什么都没有——这正是重点 |
+| 93.5% | **有算好的就换上**，零调用、无卡顿 | 一条 `compacted` |
+| 98.7% | 没算好也得压，此时才会卡一下 | 一条 `compacted` |
+| 跌回 80% 以下 | 把没用上的那份丢掉 | 无 |
+
+```
+界面 → {"t":"compact"}
+后端 → {"t":"compacted","tokensBefore":48210,"tokensAfter":19044,"summarized":true}
+```
+
+几条容易误会的地方：
+
+1. **`compacted` 不一定意味着摘要**。`summarized` 为 false 时是「工具输出被裁了」——
+   只有一轮对话时压不出摘要（最近几轮是原样保留的），但过长的工具输出照样会被裁。
+   这个也要显示：不然用户看到的是「它刚读过的文件怎么下一句就忘了」，而界面一声不吭。
+2. **`/compact` 救不了「单轮太大」**。最近几轮是硬约束，不为预算让路。
+   粘了一大段文本撑破窗口时，后端回 `failed` 并说明该开新会话或调大 `contextTokens`——
+   **这种时候别提示用户去按 `/compact`**，按了也没用。
+3. **`tokens` 可能是实测的，也可能是估的**。后端会向模型要真实的 `prompt_tokens`；
+   网关不支持时退回估算，并把三条线整体前移。界面不用区分，照显示就行。
+
+---
+
 ## 4. 界面 → 服务端
 
 | `t` | 字段 | 说明 |
@@ -386,6 +419,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `continue` | — | 接**最近**那段会话，见 3.9。没有存档、或当前已有对话时回 `error` |
 | `sessions` | — | 要会话历史列表，回 `session_list`。见 3.9 |
 | `session_resume` | `id` | 按 id 接一段历史会话，见 3.9。id 认不出、找不到、或当前已有对话时回 `error` |
+| `compact` | — | 现在就压一次上下文（feature: `compact`），见 3.10。忙的时候会被拒 |
 | `reset` | — | 清空对话历史、换一段新会话。**不删旧存档**。忙的时候会被拒 |
 | `ping` | — | 保活 |
 

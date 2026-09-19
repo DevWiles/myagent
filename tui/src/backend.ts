@@ -66,12 +66,30 @@ export function resolveJar(explicit?: string): string {
  * 已经按了 Ctrl-C。而此刻子进程句柄只活在本函数的作用域里——调用方拿到的 Promise
  * 还没 resolve，它手上什么都没有。不在这儿杀，就会留下一个还攥着端口的 java。
  */
+/**
+ * `MYAGENT_JAVA_OPTS` 里的东西原样塞给 java，放在 `-jar` 前面。
+ *
+ * 存在的理由只有一个：**调后端时把日志捞出来**。无头模式的日志走 stderr，
+ * 而这边把 stderr 收进一个只在启动失败时才露面的内存环（见下面的 stderrTail），
+ * 于是正常跑起来之后，后端日志对使用者是完全不可见的。
+ *
+ * 想看的时候这样起：
+ * ```
+ * MYAGENT_JAVA_OPTS="-Dorg.slf4j.simpleLogger.logFile=/tmp/be.log \
+ *                    -Dorg.slf4j.simpleLogger.defaultLogLevel=debug" ./myagent-tui
+ * ```
+ * 不设就是空数组，命令行和以前一字不差。
+ */
+function javaOptions(): string[] {
+  return (process.env.MYAGENT_JAVA_OPTS ?? '').split(' ').filter((s) => s.length > 0)
+}
+
 export async function startBackend(
   options: BackendOptions,
   signal?: AbortSignal,
 ): Promise<Backend> {
   const jar = resolveJar(options.jar)
-  const args = ['-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
+  const args = [...javaOptions(), '-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
   if (options.model) args.push('-m', options.model)
   if (options.planMode) args.push('--plan')
   if (options.unsafe) args.push('--unsafe')

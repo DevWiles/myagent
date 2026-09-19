@@ -55,7 +55,8 @@ public record SessionSnapshot(
         String branch,
         long startedAt,
         long savedAt,
-        List<ChatMessage> messages) {
+        List<ChatMessage> messages,
+        List<SummarySegment> segments) {
 
     /**
      * 当前格式版本。改了消息结构就把它 +1，老存档会被自动忽略。
@@ -63,11 +64,17 @@ public record SessionSnapshot(
      * <p>2：一个工作区从「一份档」改成「一份一个会话」，多了 {@code id} 和
      * {@code startedAt}。格式 1 的老档不是丢掉，而是由
      * {@link SessionStore} 收成历史里的一条会话。
+     *
+     * <p>3：压缩改成「记录只追加、窗口是投影」，多了 {@link #segments}。
+     * 格式 2 的老档直接忽略——它存的是<b>压缩后</b>的历史，原文早没了，
+     * 收进来只会让用户看着一段以「[以下是早先对话的摘要]」开头的假对话，
+     * 还以为那是自己说过的话。
      */
-    public static final int FORMAT = 2;
+    public static final int FORMAT = 3;
 
     public SessionSnapshot {
         messages = List.copyOf(messages == null ? List.of() : messages);
+        segments = List.copyOf(segments == null ? List.of() : segments);
     }
 
     /**
@@ -76,13 +83,14 @@ public record SessionSnapshot(
      * @param history 完整历史，<b>包含</b> index 0 的 system；这里会把它摘掉
      */
     public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
-                                     String model, String branch, long startedAt, long now) {
+                                     String model, String branch, long startedAt, long now,
+                                     List<SummarySegment> segments) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
         return new SessionSnapshot(FORMAT, id,
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
-                model, branch, startedAt, now, conversation);
+                model, branch, startedAt, now, conversation, segments);
     }
 
     /**
@@ -105,14 +113,27 @@ public record SessionSnapshot(
     }
 
     /**
-     * 修补过的、可以直接用的对话。
+     * 可以拿去恢复的对话——<b>原样返回，不做截断</b>。
      *
      * <p>存档可能停在「工具点了、结果没回来」的当口（{@code kill -9} 的典型现场），
-     * 那种残缺会让之后<b>每一次</b>请求都 400，见 {@link HistoryRepair}。
+     * 那种残缺会让之后每一次请求都 400。但处理它的正确方式是
+     * {@link HistoryRepair#seal}（补一条「这一步没有执行」把口封上），
+     * 不是 {@code repair}（把那一轮整个切掉）。
+     *
+     * <p>这里之所以不抢着修，是因为<b>记录只追加</b>之后，
+     * 截掉的东西再也回不来了，而存盘存的正是这份记录——
+     * 在这儿截一刀，等于每恢复一次就把用户的历史永久削掉一段。
+     * 封口的活交给 {@code Agent.restore}，它知道怎么补才不丢现场。
      */
     @JsonIgnore
     public List<ChatMessage> restorable() {
-        return HistoryRepair.repair(messages);
+        return messages;
+    }
+
+    /** 下标对得上这份记录的段。对不上说明存档被改过，那时候摘要指的是别的消息。 */
+    @JsonIgnore
+    public List<SummarySegment> usableSegments() {
+        return segments.stream().filter(seg -> seg.fitsIn(messages.size())).toList();
     }
 
     /** 恢复之后能接着聊的对话轮数——给界面显示「上次聊了 N 轮」用。 */

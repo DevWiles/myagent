@@ -15,6 +15,17 @@ import dev.wiles.myagent.tool.safety.FileWriteGuard;
 /** 内置工具的装配点。以后加新工具，在这里注册一行即可。 */
 public final class BuiltinTools {
 
+    /**
+     * 哪些工具算「改了文件」。
+     *
+     * <p>上下文压缩要靠它算出「这次会话动过哪些文件」那一条钉住块，
+     * 而那是压缩里<b>唯一不经过模型</b>的保证——摘要提示词里那四条是请模型自觉，
+     * 这一条是扫出来的。所以名字声明在注册它们的地方，
+     * 将来加了新的写工具，在这儿补一个名字就行，压缩那边不用改。
+     */
+    public static final java.util.Set<String> WRITING_TOOLS =
+            java.util.Set.of("write_file", "create_project");
+
     private BuiltinTools() {
     }
 

@@ -48,6 +48,56 @@ export function formatTokens(count: number): string {
 }
 
 /**
+ * 一个时刻 → 人话：`刚刚`、`12 分钟前`、`昨天 14:32`、`9-16 09:15`。
+ *
+ * <p>近的说相对、远的说绝对。相对时间在近处精确、在远处失真——「237 小时前」
+ * 谁也换算不出来是哪天；所以 6 小时内（「同一段工作」的尺度）说相对，
+ * 跨过去就报日期时间，让人自己认那天在干什么。
+ *
+ * <p>`now` 由调用方传，否则这个函数没法测，而它每条分支都是差一点就错的边界。
+ * 和 Java 那侧的 `Moment` 是同一套规矩——两边显示同一份存档，说法不该不一样。
+ */
+export function formatRelativeTime(when: number, now: number): string {
+  if (!when || when <= 0) return "时间不明"
+  const seconds = Math.floor((now - when) / 1000)
+  // 负数也走这条：时钟回拨、存档从别的机器拷过来，都会让「现在」比存档还早。
+  // 说「刚刚」不准，但「-3 小时前」是纯粹的乱码
+  if (seconds < 60) return "刚刚"
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`
+  if (seconds < 6 * 3600) return `${Math.floor(seconds / 3600)} 小时前`
+
+  const then = new Date(when)
+  const today = new Date(now)
+  const hhmm = `${String(then.getHours()).padStart(2, "0")}:${String(then.getMinutes()).padStart(2, "0")}`
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+
+  if (sameDay(then, today)) return `今天 ${hhmm}`
+  const yesterday = new Date(now - 24 * 3600 * 1000)
+  if (sameDay(then, yesterday)) return `昨天 ${hhmm}`
+  if (then.getFullYear() === today.getFullYear()) {
+    return `${then.getMonth() + 1}-${then.getDate()} ${hhmm}`
+  }
+  // 跨年就不报时刻了：隔了这么久，具体几点几分帮不上任何决定
+  return `${then.getFullYear()}-${then.getMonth() + 1}-${then.getDate()}`
+}
+
+/**
+ * 字节数 → 人话。
+ *
+ * <p>存档大小是「这段聊得有多沉」的便宜代理：几十 KB 是随手问两句，
+ * 几百 KB 是啃了半天。所以一位小数就够，没人需要知道是 33.4 还是 33.44KB。
+ */
+export function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0B"
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+/**
  * 截到指定宽度，超出部分用 … 收尾。
  *
  * 按 code point 而不是 UTF-16 code unit 切，否则会把 emoji 劈成两半变成乱码。

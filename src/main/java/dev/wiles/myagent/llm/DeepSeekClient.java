@@ -115,6 +115,7 @@ public final class DeepSeekClient implements LlmClient {
                 temperature,
                 maxTokens,
                 false,                              // 流式输出留到后面再做
+                null,                               // 非流式的响应本来就带 usage
                 responseFormat());
 
         String body = writeJson(payload);
@@ -146,6 +147,7 @@ public final class DeepSeekClient implements LlmClient {
                 withTools ? "auto" : null,
                 temperature, maxTokens,
                 true,                               // 唯一的区别就是这个 true
+                StreamOptions.INCLUDE_USAGE,        // 不给这个字段，流式就一个 token 数都不回
                 responseFormat());
 
         String body = writeJson(payload);

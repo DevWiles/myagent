@@ -17,6 +17,7 @@
  */
 
 import type { PlanTaskWire, ServerEvent, ToolInfo } from './protocol.ts'
+import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
   id: number
@@ -139,6 +140,14 @@ export type SessionState = {
   startedAt: number | null
   /** 非空表示后端没了，界面该退出。 */
   closed: string | null
+  /**
+   * 会话选择器的数据。null = 面板没开。
+   *
+   * <p>**不缓存**：每次 /resume 都重新问一次后端。会话列表随时在变
+   * （另一个界面可能刚聊了一轮、刚清过一段），拿着上次的列表让人挑，
+   * 挑中的那个 id 可能已经不在了。
+   */
+  sessionPicker: { currentId: string; sessions: SessionRow[] } | null
 }
 
 const EMPTY_STATE: SessionState = {
@@ -155,6 +164,7 @@ const EMPTY_STATE: SessionState = {
   lastDurationMs: null,
   startedAt: null,
   closed: null,
+  sessionPicker: null,
 }
 
 export class SessionStore {
@@ -251,6 +261,11 @@ export class SessionStore {
   }
 
   /** 本地提示（错误、帮助、连接状态）。不经过后端。 */
+  /** 收起会话选择器（用户按了 Esc，或者挑完了）。 */
+  closeSessionPicker(): void {
+    if (this.state.sessionPicker) this.set({ sessionPicker: null })
+  }
+
   notice(level: 'info' | 'warn' | 'error', text: string): void {
     this.append({ kind: 'notice', key: this.nextKey('notice'), level, text })
   }
@@ -463,9 +478,15 @@ export class SessionStore {
         return
       }
 
+      case 'session_list': {
+        this.set({ sessionPicker: { currentId: event.currentId, sessions: event.sessions } })
+        return
+      }
+
       case 'session_restored': {
-        // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史
-        this.set({ ready: this.clearContinuable() })
+        // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史。
+        // 面板也收：挑完了还摆在屏幕上，下一次 ↑↓ 会落在一个已经接过的列表上
+        this.set({ ready: this.clearContinuable(), sessionPicker: null })
         this.notice(
           'info',
           `接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。` +

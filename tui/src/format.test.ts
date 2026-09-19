@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { LOGO_LINES, LOGO_WIDTH, formatDuration, formatTokens, summarizeTools, truncate } from './format.ts'
+import {
+  LOGO_LINES,
+  LOGO_WIDTH,
+  formatBytes,
+  formatDuration,
+  formatRelativeTime,
+  formatTokens,
+  summarizeTools,
+  truncate,
+} from './format.ts'
 import type { ToolCall } from './store.ts'
 
 function call(tool: string): ToolCall {
@@ -61,5 +70,47 @@ describe('招牌', () => {
     for (const line of LOGO_LINES) {
       expect([...line]).toHaveLength(LOGO_WIDTH)
     }
+  })
+})
+
+describe("相对时间", () => {
+  const at = (y: number, mo: number, d: number, h: number, mi: number) =>
+    new Date(y, mo - 1, d, h, mi).getTime()
+  const now = at(2026, 9, 18, 14, 0)
+
+  test("一分钟内说「刚刚」", () => {
+    expect(formatRelativeTime(now, now)).toBe("刚刚")
+    expect(formatRelativeTime(now - 59_000, now)).toBe("刚刚")
+  })
+
+  test("一小时内报分钟，六小时内报小时", () => {
+    expect(formatRelativeTime(now - 60_000, now)).toBe("1 分钟前")
+    expect(formatRelativeTime(now - 4 * 60_000, now)).toBe("4 分钟前")
+    expect(formatRelativeTime(now - 3600_000, now)).toBe("1 小时前")
+    expect(formatRelativeTime(now - 5 * 3600_000, now)).toBe("5 小时前")
+  })
+
+  test("超过六小时改报时刻——「237 小时前」谁也换算不出是哪天", () => {
+    expect(formatRelativeTime(at(2026, 9, 18, 6, 0), now)).toBe("今天 06:00")
+    expect(formatRelativeTime(at(2026, 9, 17, 22, 30), now)).toBe("昨天 22:30")
+    expect(formatRelativeTime(at(2026, 9, 16, 9, 15), now)).toBe("9-16 09:15")
+    expect(formatRelativeTime(at(2025, 9, 16, 9, 15), now)).toBe("2025-9-16")
+  })
+
+  test("时钟回拨、存档从别的机器拷过来，也不能打出「-3 小时前」", () => {
+    expect(formatRelativeTime(now + 3 * 3600_000, now)).toBe("刚刚")
+  })
+
+  test("没有时间就说没有，不打 1970 年", () => {
+    expect(formatRelativeTime(0, now)).toBe("时间不明")
+  })
+})
+
+describe("存档大小", () => {
+  test("按量级换单位，一位小数就够", () => {
+    expect(formatBytes(0)).toBe("0B")
+    expect(formatBytes(512)).toBe("512B")
+    expect(formatBytes(34_211)).toBe("33.4KB")
+    expect(formatBytes(12_900_000)).toBe("12.3MB")
   })
 })

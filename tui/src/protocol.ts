@@ -105,6 +105,27 @@ export type ServerEvent =
   /** 一轮对话的开始/结束。结束时带上耗时和上下文占用。 */
   | { t: 'busy'; busy: boolean; durationMs?: number; tokens?: number; contextLimit?: number }
   | { t: 'reset_done' }
+  /**
+   * 这个工作区的会话历史，只回给问的那个连接。
+   *
+   * 不在 ready 帧里：一个工作区能攒几十段，而首帧每次连上来都要发。
+   * 要列表的界面自己问一句（见 protocol.md 3.9）。
+   */
+  | {
+      t: 'session_list'
+      currentId: string
+      sessions: {
+        id: string
+        title: string
+        turns: number
+        model: string
+        /** 那段是在哪个分支上聊的。不在仓库里、或是老存档时是 null。 */
+        branch?: string | null
+        startedAt: number
+        savedAt: number
+        bytes: number
+      }[]
+    }
   | { t: 'error'; message: string }
   | { t: 'pong' }
   // ---- 先规划后执行（feature: 'plan'），时序见 docs/protocol.md 第 5 节 ----
@@ -154,7 +175,14 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 export type ClientCommand =
   | { t: 'prompt'; text: string }
   | { t: 'plan'; goal: string }
-  /** 接着跑上次没跑完的计划。没有存档时后端回 error。 */
+  /**
+   * 接着跑上次没跑完的计划。没有存档时后端回 error。
+   *
+   * 老名字是 `resume`（那会儿只有计划能续）。后端两个都认，界面发新的这个——
+   * `/resume` 在终端里指的是「挑一段会话」，协议再叫 resume 就是两头对不上。
+   */
+  | { t: 'resume_plan' }
+  /** `resume_plan` 的老名字。留着只是为了描述协议全貌，界面不再发它。 */
   | { t: 'resume' }
   /** 接着聊上次没聊完的对话。没有存档、或当前已经有对话时后端回 error。 */
   | { t: 'continue' }
@@ -162,6 +190,18 @@ export type ClientCommand =
   | { t: 'cancel' }
   | { t: 'approval_reply'; id: number; decision: ApprovalDecision }
   | { t: 'reset' }
+  /**
+   * 现在就压一次上下文（feature: `compact`）。
+   *
+   * 后端有后台算好的现货就直接用（零调用），没有就现算。正忙时回 error。
+   * 压完回一条 `compacted`。**记录不受影响**——原文一直留在存档里，
+   * 压的只是发给模型的那份窗口。
+   */
+  | { t: 'compact' }
+  /** 要会话历史列表，后端回 session_list。 */
+  | { t: 'sessions' }
+  /** 按 id 接一段历史会话。id 认不出、找不到、或当前已有对话时后端回 error。 */
+  | { t: 'session_resume'; id: string }
   | { t: 'ping' }
 
 /** 后端启动时打在 stdout 的握手行，界面靠它知道该连哪儿。 */

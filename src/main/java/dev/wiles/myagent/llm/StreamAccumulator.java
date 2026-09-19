@@ -45,6 +45,12 @@ final class StreamAccumulator {
     private String finishReason;
     private String id = "";
     private String model = "";
+    /**
+     * 实测 token 数。只有请求带了 {@link StreamOptions#INCLUDE_USAGE} 时才会到货，
+     * 而且是在最后一个 chunk 上——那个 chunk 的 {@code choices} 是空数组。
+     * 网关不认那个字段时它一直是 null，调用方据此退回估算。
+     */
+    private ChatResponse.Usage usage;
 
     /** 吃掉一个 chunk，并把新增文本回调出去。 */
     void accept(JsonNode chunk, StreamListener listener) {
@@ -53,6 +59,16 @@ final class StreamAccumulator {
         }
         if (chunk.hasNonNull("model")) {
             model = chunk.get("model").asText();
+        }
+        // usage 必须在 choices 那道闸**之前**取：带 usage 的那个 chunk
+        // choices 是空数组，按老逻辑会被直接 return 掉，token 数就永远拿不到。
+        // 中间的 chunk 上这个字段是 null，hasNonNull 正好把它们滤掉。
+        if (chunk.hasNonNull("usage")) {
+            JsonNode u = chunk.get("usage");
+            usage = new ChatResponse.Usage(
+                    u.path("prompt_tokens").asInt(),
+                    u.path("completion_tokens").asInt(),
+                    u.path("total_tokens").asInt());
         }
         JsonNode choices = chunk.get("choices");
         if (choices == null || !choices.isArray() || choices.isEmpty()) {
@@ -120,6 +136,6 @@ final class StreamAccumulator {
                 ? ChatMessage.assistant(text)
                 : ChatMessage.assistant(text, calls);
         return new ChatResponse(id, model,
-                List.of(new ChatResponse.Choice(0, message, finishReason)), null);
+                List.of(new ChatResponse.Choice(0, message, finishReason)), usage);
     }
 }

@@ -208,4 +208,78 @@ class StreamingTest {
         assertEquals("完整回答", plain.chat(List.of(ChatMessage.user("x")), null, listener).text());
         assertEquals(List.of("完整回答"), deltas, "退化时把全文当成一个增量发出");
     }
+
+    @Test
+    @DisplayName("流式请求要主动把 usage 要回来，否则一个 token 数都拿不到")
+    void requestsUsage() throws Exception {
+        enqueue("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}");
+
+        client.chat(List.of(ChatMessage.user("问题")), null, listener);
+
+        var sent = M.readTree(server.takeRequest().getBody().readUtf8());
+        assertTrue(sent.path("stream_options").path("include_usage").asBoolean(),
+                "没有这个字段，流式响应默认不带 usage");
+    }
+
+    @Test
+    @DisplayName("非流式不发 stream_options——响应本来就带 usage，多发反而可能被判非法参数")
+    void nonStreamingOmitsStreamOptions() throws Exception {
+        server.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,"
+                        + "\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},"
+                        + "\"finish_reason\":\"stop\"}]}"));
+
+        client.chat(List.of(ChatMessage.user("问题")), null);
+
+        var sent = M.readTree(server.takeRequest().getBody().readUtf8());
+        assertTrue(sent.path("stream_options").isMissingNode(), "非流式不该出现这个字段");
+    }
+
+    @Test
+    @DisplayName("usage 挂在最后那个 choices 为空的 chunk 上，照样要认出来")
+    void capturesUsageFromFinalChunk() {
+        enqueue(
+                "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答\"}}]}",
+                "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+                "{\"choices\":[],\"usage\":{\"prompt_tokens\":1234,"
+                        + "\"completion_tokens\":56,\"total_tokens\":1290}}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("问题")), null, listener);
+
+        assertNotNull(response.usage(), "choices 为空不等于这个 chunk 没用");
+        assertEquals(1234, response.usage().promptTokens());
+        assertEquals(56, response.usage().completionTokens());
+        assertEquals(1290, response.usage().totalTokens());
+        assertEquals("答", response.text(), "认 usage 不能把正文弄丢");
+        assertEquals("stop", response.finishReason());
+    }
+
+    @Test
+    @DisplayName("中间 chunk 上的 usage 是 null，不能被当成 0 覆盖掉真值")
+    void ignoresNullUsageOnIntermediateChunks() {
+        enqueue(
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答\"}}],\"usage\":null}",
+                "{\"choices\":[],\"usage\":{\"prompt_tokens\":10,"
+                        + "\"completion_tokens\":2,\"total_tokens\":12}}",
+                "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("问题")), null, listener);
+
+        assertNotNull(response.usage());
+        assertEquals(10, response.usage().promptTokens(), "后面的 null 不该把真值抹掉");
+    }
+
+    @Test
+    @DisplayName("网关忽略 stream_options 时 usage 为 null——调用方据此退回估算")
+    void usageStaysNullWhenGatewayIgnoresIt() {
+        enqueue(
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答\"}}]}",
+                "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("问题")), null, listener);
+
+        assertNull(response.usage(), "拿不到就是拿不到，不能编一个 0 出来");
+        assertEquals("答", response.text());
+    }
 }

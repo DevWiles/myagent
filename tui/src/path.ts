@@ -53,6 +53,32 @@ export function truncateEnd(text: string, max: number): string {
  * `/Users/me/workspace/projects/...` 这个前缀对用户毫无意义，
  * 真正要认的是最后那两段目录名。
  */
+/**
+ * 按**列宽**从尾巴截断，超出部分用 … 收尾。
+ *
+ * <p>和 `format.ts` 里那个 `truncate` 的区别：那个按字符数算，一个中文字算 1。
+ * 在「一行摘要」里够用，但排成**多列对齐**的表格就会出事——
+ * 说明文字里全是中文，实际占的列数是字符数的两倍，于是整行溢出，
+ * 终端自己折行，把一条命令劈成两行（`/resume-` 换行 `plan`），
+ * 下面的输入框位置跟着往下跳。
+ */
+export function truncateWidth(text: string, max: number): string {
+  if (max <= 0) return ""
+  if (width(text) <= max) return text
+  if (max <= 1) return "…"
+
+  const budget = max - 1   // 省略号自己占 1 列
+  let used = 0
+  const kept: string[] = []
+  for (const char of Array.from(text)) {
+    const w = width(char)
+    if (used + w > budget) break
+    used += w
+    kept.push(char)
+  }
+  return kept.join("") + "…"
+}
+
 export function truncateStart(text: string, max: number): string {
   if (max <= 0) return ""
   if (width(text) <= max) return text
