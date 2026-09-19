@@ -1,0 +1,28 @@
+你刚刚摸清了一小块情况，现在要把它拆成几个具体可执行的步骤。
+
+**只输出一个 JSON 对象，不要写任何别的话**:
+
+{
+  "tasks": [
+    {"id": "t1.1", "type": "FILE_WRITE",
+     "description": "具体做什么",
+     "acceptance": "做到什么算完成",
+     "dependsOn": []},
+    {"id": "t1.2", "type": "VERIFICATION",
+     "description": "按 {{t1.1}} 改动的范围，跑对应的测试",
+     "acceptance": "相关测试通过",
+     "dependsOn": ["t1.1"]}
+  ]
+}
+
+任务类型: FILE_READ / FILE_WRITE / COMMAND / ANALYSIS / VERIFICATION。
+**不能用 PLANNING**——你已经在第二层了，不许再往下拆。
+
+规则:
+- **最多 {{@maxSubTasks}} 个**，够用就行，拆出一两步是正常的。你负责的只是一小块，
+  不要在这里把整件事重新规划一遍。
+- dependsOn 只写真正的前置，id 要在这批任务里出现过，不能成环。
+- 要用同批某一步的产出，写 {{那一步的id}}，并把它写进 dependsOn。
+- 每个任务都要有 acceptance，一句话说清做到什么算完成。
+- 每条描述都要能被一个看不到上下文的模型独立读懂。
+- 不许编造没见过的文件路径和类名——你刚摸过的情况里有什么就写什么。

@@ -26,8 +26,8 @@ import java.util.regex.Pattern;
  * <ol>
  *   <li><b>关键段必须在</b>。少了「语言」那段，模型会改说英文；而这种事没有任何
  *       报错，只在用户看到英文回复时才发现，而那时已经发出去了。</li>
- *   <li><b>不许留下没替换的占位符</b>。{@code {{workspac}}} 打错一个字母，
- *       模型看到的就是字面的 <code>{{workspac}}</code>——它会把这串东西当成
+ *   <li><b>不许留下没替换的占位符</b>。{@code {{@workspac}}} 打错一个字母，
+ *       模型看到的就是字面的 <code>{{@workspac}}</code>——它会把这串东西当成
  *       内容的一部分去理解，而日志里一切正常。这一条 grep 不出来、测试也未必覆盖，
  *       只能在装配这一刻查。</li>
  * </ol>
@@ -35,10 +35,20 @@ import java.util.regex.Pattern;
  */
 public final class PromptAssembler {
 
-    /** 装配结果里必须出现的小标题。缺一个就抛。 */
-    static final List<String> REQUIRED_SECTIONS = List.of("## 身份", "## 语言", "## 工作区");
-
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{([a-zA-Z0-9_]+)}}");
+    /**
+     * 装配器的占位符：<code>{{@名字}}</code>。
+     *
+     * <h3>那个 @ 不是装饰</h3>
+     * 提示词正文里<b>本来就有</b> <code>{{t1}}</code> 这种东西——那是计划里的
+     * 任务引用语法（见 {@code TaskRefs}），是模型要<b>输出</b>的内容，不是要我们替换的。
+     * 两种语法撞在一起的后果很具体：规划提示词一搬进资源文件，装配器就会把
+     * <code>{{t1}}</code> 当成没填的占位符抛出来，而那段文字完全正确。
+     *
+     * <p>{@code TaskRefs} 认的 id 是 {@code [A-Za-z0-9_.-]}，不含 {@code @}，
+     * 所以加一个 {@code @} 之后两种语法<b>证明性地不相交</b>——
+     * 不是「约定不要撞」，是撞不上。
+     */
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{@([a-zA-Z0-9_]+)}}");
 
     private final PromptSource repository;
 
@@ -60,7 +70,9 @@ public final class PromptAssembler {
         PromptContext ctx = context == null ? PromptContext.empty() : context;
 
         List<String> sections = new ArrayList<>();
-        sections.add(repository.loadRequired("base.md"));
+        if (mode.includesBase()) {
+            sections.add(repository.loadRequired("base.md"));
+        }
         sections.add(repository.loadRequired(mode.resourcePath()));
         if (ctx.readOnly()) {
             sections.add(repository.loadRequired("policy/readonly.md"));
@@ -77,7 +89,7 @@ public final class PromptAssembler {
             assembled = assembled + "\n" + ctx.memoryIndex();
         }
 
-        requireSections(assembled);
+        requireMarkers(assembled, mode);
         return assembled;
     }
 
@@ -102,18 +114,18 @@ public final class PromptAssembler {
         m.appendTail(out);
         if (!missing.isEmpty()) {
             throw new IllegalStateException("提示词里有没填的占位符: " + missing
-                    + "（多半是名字打错了。留着不管的话，模型会把字面的 {{名字}} "
+                    + "（多半是名字打错了。留着不管的话，模型会把字面的 {{@名字}} "
                     + "当成内容的一部分去理解，而日志里一切正常）");
         }
         return out.toString();
     }
 
-    private static void requireSections(String assembled) {
-        List<String> missing = REQUIRED_SECTIONS.stream()
+    private static void requireMarkers(String assembled, PromptMode mode) {
+        List<String> missing = mode.requiredMarkers().stream()
                 .filter(s -> !assembled.contains(s))
                 .toList();
         if (!missing.isEmpty()) {
-            throw new IllegalStateException("装配出来的提示词缺了关键段: " + missing
+            throw new IllegalStateException(mode + " 装配出来的提示词缺了关键段: " + missing
                     + "（比如少了「语言」那段，模型会改说英文，而这件事不会报错——"
                     + "等用户看到英文回复时，已经发出去了）");
         }
