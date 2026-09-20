@@ -6,7 +6,7 @@
 
   <groupId>dev.wiles</groupId>
   <artifactId>myagent</artifactId>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
   <packaging>jar</packaging>
   <name>myagent</name>
   <description>A coding agent written from scratch in Java 17</description>
@@ -95,7 +95,7 @@
             <configuration>
               <!--
                 打成 target/myagent.jar，而不是带版本号的长名字，方便直接 java -jar 跑。
-                注意 target 下同时还有 maven-jar-plugin 产出的 myagent-0.2.0.jar，
+                注意 target 下同时还有 maven-jar-plugin 产出的 myagent-0.3.0.jar，
                 那个只有 class 文件、没有 Main-Class 也没有依赖，拿它启动会报
                 「没有主清单属性」——要跑的始终是 myagent.jar。
               -->

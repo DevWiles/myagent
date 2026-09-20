@@ -79,7 +79,7 @@ token 随进程生灭，每次启动都不一样。
 {
   "t": "ready",
   "protocol": 1,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "workspace": "/Users/x/proj",
   "branch": "dev",
   "model": "deepseek-chat",
