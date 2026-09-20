@@ -16,7 +16,7 @@ import {
   type Renderable,
   type RenderNodeContext,
 } from "@opentui/core"
-import { createMemo, For, Match, Show, Switch, untrack } from "solid-js"
+import { createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from "solid-js"
 import { summarizeTools } from "../format.ts"
 import { isListItem, splitBlocks } from "../markdown-blocks.ts"
 import type { MemoryRow } from "../protocol.ts"
@@ -51,6 +51,16 @@ export function EntryView(props: EntryViewProps) {
       </Match>
       <Match when={props.entry.kind === "notice" ? props.entry : null}>
         {(entry) => <NoticeEntry level={entry().level} text={entry().text} />}
+      </Match>
+      <Match when={props.entry.kind === "compacting" ? props.entry : null}>
+        {(entry) => (
+          <CompactingEntry
+            phase={entry().phase}
+            done={entry().done}
+            total={entry().total}
+            percent={entry().percent}
+          />
+        )}
       </Match>
       <Match when={props.entry.kind === "compacted" ? props.entry : null}>
         {(entry) => <CompactedEntry before={entry().before} after={entry().after} summarized={entry().summarized} />}
@@ -398,6 +408,62 @@ function NoticeEntry(props: { level: "info" | "warn" | "error"; text: string }) 
  * 后一种尤其不能一声不吭：用户看到的现象是「它刚读过的文件，怎么下一句就不记得了」，
  * 而界面上什么都没有，没人会想到是上下文在背后被削了。
  */
+/** 进度条有多宽（格）。窄一点，免得在 80 列的终端里把百分比挤下去。 */
+const BAR_WIDTH = 28
+/** 走过的格 / 还没走的格。用两种方块而不是 `#` 和 `-`，等宽终端里对齐更稳。 */
+const BAR_FILLED = "▰"
+const BAR_EMPTY = "▱"
+/** 转圈的四帧。转得慢一点（见 SPIN_MS）——终端里高频重绘会有肉眼可见的撕裂。 */
+const SPIN_FRAMES = ["✻", "✼", "✽", "✼"]
+const SPIN_MS = 240
+
+/**
+ * 正在压缩。
+ *
+ * <h3>为什么非有这个不可</h3>
+ * 压缩是一次完整的模型调用，几十秒起步。在这之前，用户敲完 `/compact` 面对的是
+ * 一块完全不动的屏幕——按键丢了、后端挂了、还是在干活，三种情况长得一模一样。
+ *
+ * <h3>那个百分比的内层是估的，所以要标出来</h3>
+ * 外层（第几块 / 共几块）是准的。内层是「摘要已经吐了多少字 ÷ 按输入规模估的预期长度」，
+ * 因为 1M 窗口下整段会话通常只切出**一块**，纯按块数报的话条会在 0% 上干等几十秒
+ * 再直接跳 100%。代价是条可能提前走完或者顶在 99%，所以那一行写的是「估算」——
+ * 让人以为这是精确进度，比没有进度条更糟。
+ */
+function CompactingEntry(props: {
+  phase: "map" | "reduce"
+  done: number
+  total: number
+  percent: number
+}) {
+  const theme = useTheme()
+  const [frame, setFrame] = createSignal(0)
+  const timer = setInterval(() => setFrame(f => (f + 1) % SPIN_FRAMES.length), SPIN_MS)
+  onCleanup(() => clearInterval(timer))
+
+  const filled = () => Math.round((Math.max(0, Math.min(100, props.percent)) / 100) * BAR_WIDTH)
+  const bar = () => BAR_FILLED.repeat(filled()) + BAR_EMPTY.repeat(BAR_WIDTH - filled())
+  const where = () =>
+    props.phase === "reduce"
+      ? "合并分段摘要"
+      : props.total > 1
+        ? `摘要第 ${props.done + 1}/${props.total} 块`
+        : "摘要早先的对话"
+
+  return (
+    <box paddingTop={1}>
+      <box flexDirection="row">
+        <text fg={theme.spinner}>{SPIN_FRAMES[frame()]} </text>
+        <text fg={theme.text}>正在压缩对话…</text>
+      </box>
+      <box flexDirection="row">
+        <text fg={theme.brand}>{"  " + bar()}</text>
+        <text fg={theme.subtle}>{` ${props.percent}%　${where()}（进度为估算）`}</text>
+      </box>
+    </box>
+  )
+}
+
 function CompactedEntry(props: { before: number; after: number; summarized: boolean }) {
   const theme = useTheme()
   const what = () => (props.summarized ? "早先的对话已摘要" : "较早的工具输出已裁剪")

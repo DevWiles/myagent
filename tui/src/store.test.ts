@@ -747,6 +747,54 @@ describe("压缩：摘要和裁剪是两回事", () => {
     expect(compacted[1]).toMatchObject({ before: 9_100, after: 7_300, summarized: false })
   })
 
+  test("进度只占一条，一路原地更新——不然几百根条会把转录刷爆", () => {
+    const store = new SessionStore()
+
+    feed(store,
+      { t: "compacting", phase: "map", done: 0, total: 3, percent: 4 },
+      { t: "compacting", phase: "map", done: 0, total: 3, percent: 19 },
+      { t: "compacting", phase: "map", done: 1, total: 3, percent: 41 },
+      { t: "compacting", phase: "reduce", done: 2, total: 3, percent: 72 })
+
+    const bars = store.getSnapshot().entries.filter(e => e.kind === "compacting")
+    expect(bars.length).toBe(1)
+    expect(bars[0]).toMatchObject({ phase: "reduce", done: 2, total: 3, percent: 72 })
+  })
+
+  test("收尾就把进度条整条移走，不留一根走了一半的", () => {
+    const store = new SessionStore()
+
+    feed(store,
+      { t: "compacting", phase: "map", done: 0, total: 2, percent: 30 },
+      { t: "compacting", phase: "done", done: 2, total: 2, percent: 100 })
+
+    // 留一根凝固在 30% 的条，用户会以为还在跑。压缩被取消或者失败时走的正是这条路
+    expect(store.getSnapshot().entries.filter(e => e.kind === "compacting").length).toBe(0)
+  })
+
+  test("结论落地前先撤条，两样东西不能同框", () => {
+    const store = new SessionStore()
+
+    feed(store,
+      { t: "compacting", phase: "reduce", done: 1, total: 2, percent: 88 },
+      { t: "compacted", tokensBefore: 48_210, tokensAfter: 19_044, summarized: true })
+
+    const entries = store.getSnapshot().entries
+    expect(entries.filter(e => e.kind === "compacting").length).toBe(0)
+    expect(entries.filter(e => e.kind === "compacted").length).toBe(1)
+  })
+
+  test("`compacting done` 丢了也不能让条永远挂着——busy 收尾时兜一道", () => {
+    const store = new SessionStore()
+
+    // 旧后端、断线重连，都可能让收尾那条事件到不了
+    feed(store,
+      { t: "compacting", phase: "map", done: 0, total: 1, percent: 12 },
+      { t: "busy", busy: false })
+
+    expect(store.getSnapshot().entries.filter(e => e.kind === "compacting").length).toBe(0)
+  })
+
   test("压缩不改 token 数——那是 busy 的活，两条路各管各的", () => {
     const store = new SessionStore()
     feed(store, { t: "busy", busy: false, tokens: 48_210, sentTokens: 100_000 })

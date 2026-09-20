@@ -76,6 +76,7 @@ export type Entry =
   | { kind: 'thought'; key: string; text: string }
   | { kind: 'tools'; key: string; calls: ToolCall[] }
   | { kind: 'notice'; key: string; level: 'info' | 'warn' | 'error'; text: string }
+  | { kind: 'compacting'; key: string; phase: 'map' | 'reduce'; done: number; total: number; percent: number }
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
   | { kind: 'memory'; key: string; rows: MemoryRow[] }
   | { kind: 'plan'; key: string; plan: PlanData }
@@ -206,6 +207,55 @@ export class SessionStore {
     const next = this.state.entries.slice(0, -1)
     next.push(entry)
     this.set({ entries: next })
+  }
+
+  /**
+   * 当前那根压缩进度条的 key。
+   *
+   * 不用 replaceTail：压缩发生在 FORCE 档时是**一轮对话中途**的事，
+   * 它后面随时会接上流式文本、工具组，条早就不在队尾了。
+   */
+  private compactingKey: string | null = null
+
+  /**
+   * 建一条进度、或者原地更新它。
+   *
+   * 进度事件一秒能来十几条，每条都 append 的话转录区会被几百根条刷爆——
+   * 所以第一条建，后面的都改同一条。
+   */
+  private upsertCompacting(
+    phase: 'map' | 'reduce',
+    done: number,
+    total: number,
+    percent: number,
+  ): void {
+    const key = this.compactingKey
+    if (key === null) {
+      const fresh = this.nextKey('compacting')
+      this.compactingKey = fresh
+      this.append({ kind: 'compacting', key: fresh, phase, done, total, percent })
+      return
+    }
+    this.set({
+      entries: this.state.entries.map(entry =>
+        entry.kind === 'compacting' && entry.key === key
+          ? { ...entry, phase, done, total, percent }
+          : entry,
+      ),
+    })
+  }
+
+  /**
+   * 把进度条整条移走，不留痕。
+   *
+   * 留一根走完的条在转录里没有意义——结论由紧随其后的 `compacted` 那行给，
+   * 而压缩被取消或者失败时，一根凝固在 62% 的条只会让人以为还在跑。
+   */
+  private clearCompacting(): void {
+    const key = this.compactingKey
+    if (key === null) return
+    this.compactingKey = null
+    this.set({ entries: this.state.entries.filter(entry => entry.key !== key) })
   }
 
   /** 当前计划面板的 key。执行期间流式输出会排在它后面，所以不能用 replaceTail。 */
@@ -411,7 +461,18 @@ export class SessionStore {
         return
       }
 
+      case 'compacting':
+        if (event.phase === 'done') {
+          this.clearCompacting()
+        } else {
+          this.upsertCompacting(event.phase, event.done, event.total, event.percent)
+        }
+        return
+
       case 'compacted':
+        // 进度条先撤掉再落结论。不撤的话，压缩落地那一刻屏幕上会同时留着
+        // 一根走到 99% 的条和一行「已压缩 48210 → 19044」，像是还有一次在跑
+        this.clearCompacting()
         this.append({
           kind: 'compacted',
           key: this.nextKey('compact'),
@@ -470,6 +531,9 @@ export class SessionStore {
         return
 
       case 'busy':
+        // 兜底：正常情况下 `compacting phase=done` 会把条收掉，但那条事件要是丢了
+        // （旧后端、断线重连），一根永远走不完的条会一直挂在转录里
+        if (!event.busy) this.clearCompacting()
         this.set({
           busy: event.busy,
           approval: event.busy ? this.state.approval : null,

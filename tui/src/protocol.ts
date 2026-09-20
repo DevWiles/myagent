@@ -120,6 +120,17 @@ export type ServerEvent =
       sentTokens?: number
       contextLimit?: number
     }
+  /**
+   * 压缩正在进行，画进度条。
+   *
+   * 只有**用户等得到**的压缩才发：`/compact`，以及占用到硬线时那次不得不卡的同步压缩。
+   * 80% 那条线上的后台预压缩**刻意不发**——它的全部价值就是无感。
+   *
+   * `phase` 为 `'done'` 表示收尾，进度条该撤了（压成了、压失败了、按 Esc 取消了，
+   * 三种都会发它）。`percent` 的内层是估的：当前这一步的进度按「摘要吐了多少字 /
+   * 按输入规模估的预期长度」算，所以条可能提前走完或者顶在 99% 等收尾。
+   */
+  | { t: 'compacting'; phase: 'map' | 'reduce' | 'done'; done: number; total: number; percent: number }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
   | { t: 'memory_list'; entries: MemoryRow[] }
