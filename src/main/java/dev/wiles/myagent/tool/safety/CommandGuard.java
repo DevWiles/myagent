@@ -105,6 +105,27 @@ public final class CommandGuard {
             "rm", "rmdir", "mv", "dd", "truncate", "shred", "srm", "tee", "ln",
             "chmod", "chown", "chgrp");
 
+    /**
+     * 这条命令的参数是不是「会被毁掉的东西」。
+     *
+     * <p>给 {@link RuleSuggester} 用，用来决定一条授权规则能不能带「后面还可以跟参数」
+     * 那个通配。区别在于多出来的参数是什么性质：
+     * <pre>
+     *   mvn test -X        多出来的是选项    → 放宽无妨
+     *   rm -rf target src  多出来的是<b>又一个删除目标</b> → 放宽等于多授权了一个目标
+     * </pre>
+     * 用这张现成的表而不是另列一份：它定义的正是「参数指向会被销毁的东西」，
+     * 和这里要问的是同一件事。两份表迟早会分叉，而分叉处就是意外授权。
+     */
+    public static boolean destroysItsArguments(String commandName) {
+        return commandName != null && DESTRUCTIVE_COMMANDS.contains(commandName.toLowerCase(Locale.ROOT));
+    }
+
+    /** 取一段命令里真正的命令名。{@link RuleSuggester} 要和这边认的是同一个。 */
+    public static String commandNameOf(String segment) {
+        return commandName(segment);
+    }
+
     /** find 带这些参数就不再是只读命令了。 */
     private static final List<String> FIND_DESTRUCTIVE_FLAGS =
             List.of("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint");
@@ -299,8 +320,15 @@ public final class CommandGuard {
      * 于是引号里的内容也按命令判一次。这会产生误报，但方向是安全的——
      * 宁可让模型换个写法，也不能放过真的危险命令。
      *
+     * <h3>为什么是 public</h3>
+     * {@link ApprovalRules} 判断「这条命令在不在放行名单里」时，<b>必须用同一个拆段器</b>。
+     * 两边各拆各的，它们之间的差值就是绕过这套系统的入口：
+     * 风险评估拆成两段、看见了危险的那段，放行名单不拆、只看见前缀像 {@code mvn test}，
+     * 于是危险的那段被前缀规则顺手批了。
+     *
+     * <p>共用一份不是为了少写几行，是为了让这个差值<b>恒等于零</b>。
      */
-    private static List<String> splitSegments(String command) {
+    public static List<String> splitSegments(String command) {
         String normalized = command
                 .replace("&&", "\n").replace("||", "\n")
                 .replace("$(", "\n").replace("`", "\n")
