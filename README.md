@@ -128,8 +128,8 @@ docs/protocol.md   前后端契约
 ## 开发
 
 ```bash
-mvn test                       # 后端（796 个测试）
-cd tui && bun test             # 界面（190 个测试）
+mvn test                       # 后端（861 个测试）
+cd tui && bun test             # 界面（222 个测试）
 cd tui && bun run typecheck
 cd tui && bun run cover        # 重新生成上面那张封面图
 ```
@@ -138,6 +138,9 @@ cd tui && bun run cover        # 重新生成上面那张封面图
 `tui/src/` 里的真东西，所以界面改了重跑一次就同步，不会和实际画面对不上。
 图里没有一个 `<text>`，全是矩形和线段：那些 `█ ║ ═ ╔ ╗` 在不同机器上宽高比不一样，
 用文字渲染等于把版式交给看图人装了什么字体。
+
+查出来的东西记在 [`docs/devlog.md`](docs/devlog.md)——只记「当时想不通、后来才弄明白的事」，
+做了什么 `git log` 里有。
 
 界面这边有几个地方踩过坑，注释写在代码里，改之前值得看一眼：
 
