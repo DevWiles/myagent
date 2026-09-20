@@ -424,7 +424,9 @@ public final class Agent {
         ContextManager.Result before = buildWindow(specs);
         ContextManager.Compaction ready = precompute.ready() ? precompute.take()
                 : canAdvance() ? context.compute(conversation(), segments, client) : null;
-        return ready == null ? null : land(ready, before, specs);
+        // 过期货必须在这儿就拦掉，不能交给 land 去默默拒绝：那样 /compact 会一声不吭
+        // 地报成功，用户看不到任何变化，也不知道为什么
+        return ready == null || !advances(ready) ? null : land(ready, before, specs);
     }
 
     /**
@@ -534,10 +536,32 @@ public final class Agent {
         return upTo > coversUpTo || (upTo > 0 && summary == null);
     }
 
+    /**
+     * 这份待用件真能把摘要边界往前推吗。
+     *
+     * <h3>边界只许往前</h3>
+     * 待用件可能是<b>好几轮之前</b>算的：{@link Precompute#start} 在已有任务在途时是
+     * 空操作，那份任务就会一直挂着不更新。中途用户 {@code /compact} 过一次、边界已经
+     * 前推，它再落地就会把 {@code coversUpTo} 推回去——于是摘要和它本该顶替掉的原文
+     * 同时出现在窗口里（内容重复、白花 token），而 {@link #canAdvance()} 随即又判 true，
+     * 下一轮再压一遍。
+     */
+    private boolean advances(ContextManager.Compaction compaction) {
+        if (compaction.coversUpTo() > coversUpTo) {
+            return true;
+        }
+        log.debug("待用件的边界 {} 没超过已落地的 {}，是份过期货，丢掉",
+                compaction.coversUpTo(), coversUpTo);
+        return false;
+    }
+
     /** 把待用件换进窗口。只动派生物，<b>记录一个字都不改</b>。 */
     private ContextManager.Result land(ContextManager.Compaction compaction,
                                        ContextManager.Result before, List<ToolSpec> specs) {
         if (compaction == null || compaction.isEmpty()) {
+            return before;
+        }
+        if (!advances(compaction)) {
             return before;
         }
         segments = compaction.segments();

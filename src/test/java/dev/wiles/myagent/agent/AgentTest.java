@@ -8,6 +8,7 @@ import dev.wiles.myagent.llm.LlmException;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
+import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.HistoryRepair;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
@@ -403,6 +404,43 @@ class AgentTest {
                 .map(e -> (AgentEvent.Compacted) e)
                 .forEach(c -> assertTrue(c.tokensAfter() < c.tokensBefore(),
                         "压完必须真的变小了，实际是 " + c.tokensBefore() + " -> " + c.tokensAfter()));
+    }
+
+    @Test
+    @DisplayName("过期的待用件不许落地——边界只能往前，不能倒退")
+    void staleWorkInHandIsRejected() {
+        FakeLlm llm = new FakeLlm();
+        for (int i = 0; i < 9; i++) {
+            llm.says("好");
+        }
+        ContextManager context = new ContextManager(4_000);
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys", 25, context);
+        for (int i = 0; i < 5; i++) {
+            agent.run("第 " + i + " 个问题");
+        }
+        // 定格一份**当下**的记录，待会儿拿它算一份边界靠前的待用件。
+        // 必须够 5 轮：不够的话算出来是 null，这个用例就成了空跑
+        List<ChatMessage> early = List.copyOf(agent.conversation());
+
+        for (int i = 5; i < 9; i++) {
+            agent.run("第 " + i + " 个问题");
+        }
+        assertNotNull(agent.compactNow(), "前提：先正常压一次，把边界推上去");
+        int landed = agent.compaction().coversUpTo();
+        assertTrue(landed > 0);
+
+        // 现在挂上一份照老边界算的现货。Precompute.start 在有任务在途时是空操作，
+        // 所以这种「好几轮之前算的、一直没人取走」的待用件是真实存在的状态
+        Precompute stale = new Precompute(context, () -> llm);
+        stale.start(early, List.of());
+        while (!stale.settled()) {
+            Thread.onSpinWait();
+        }
+        assertTrue(stale.ready(), "前提：这份过期货真的算出东西了，否则下面全是空跑");
+        agent.withPrecompute(stale);
+
+        assertNull(agent.compactNow(), "过期货落地会让摘要边界倒退，得当没有");
+        assertEquals(landed, agent.compaction().coversUpTo(), "边界被推回去了");
     }
 
     @Test
