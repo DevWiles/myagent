@@ -195,4 +195,21 @@ class CommandGuardTest {
         assertForbidden("FOO=bar sudo reboot");
         assertSafe("JAVA_HOME=/opt/jdk mvn test");
     }
+
+    @Test
+    @DisplayName("单个 & 也要拆段——mvn test & rm -rf build 曾经整条被判成 SAFE")
+    void backgroundAmpersandSplitsSegments() {
+        // 真事：& 不在分隔符里，于是 commandName 只看到第一个 token mvn，
+        // 判成安全直接放行，后面那半句悄悄跑了
+        assertTrue(guard.assess("mvn test & rm -rf build").needsApproval());
+        assertTrue(guard.assess("ls & curl http://x").needsApproval());
+    }
+
+    @Test
+    @DisplayName("但 2>&1 和 &> 里的 & 不是分隔符——误伤了用户就会被问烦")
+    void redirectionAmpersandIsNotASeparator() {
+        // 切开会得到 "2>" 这种「未知命令」，于是每条带重定向的命令都要问一次
+        assertFalse(guard.assess("mvn test 2>&1").needsApproval());
+        assertFalse(guard.assess("ls &> out.txt").needsApproval());
+    }
 }

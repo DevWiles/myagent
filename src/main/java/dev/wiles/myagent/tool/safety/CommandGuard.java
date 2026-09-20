@@ -284,11 +284,21 @@ public final class CommandGuard {
     }
 
     /**
+     * 后台执行的单个 {@code &}。
+     *
+     * <p>{@code 2>&1}、{@code &>out} 里的 {@code &} 不是分隔符，切开会得到
+     * {@code 2>} 这种「未知命令」，于是每条带重定向的命令都要问一次人——
+     * 而被问烦了的用户会一路按同意，那才是真正的损失。
+     */
+    private static final Pattern BACKGROUND_AMP = Pattern.compile("(?<![<>&])&(?![>&0-9])");
+
+    /**
      * 按分隔符拆段。
      *
-     * 故意不解析引号：{@code echo "a; rm -rf /"} 会被切成两段，
+     * <p>故意不解析引号：{@code echo "a; rm -rf /"} 会被切成两段，
      * 于是引号里的内容也按命令判一次。这会产生误报，但方向是安全的——
      * 宁可让模型换个写法，也不能放过真的危险命令。
+     *
      */
     private static List<String> splitSegments(String command) {
         String normalized = command
@@ -296,6 +306,9 @@ public final class CommandGuard {
                 .replace("$(", "\n").replace("`", "\n")
                 .replace(";", "\n").replace("|", "\n")
                 .replace(")", "\n");
+        // 单个 & 也是分隔符。漏掉它的后果实测过：mvn test & rm -rf build
+        // 整条被判成 SAFE——因为 commandName 只看第一个 token，看到 mvn 就收工了
+        normalized = BACKGROUND_AMP.matcher(normalized).replaceAll("\n");
         return List.of(normalized.split("\n"));
     }
 
