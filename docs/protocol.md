@@ -524,12 +524,14 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 ```json
 "roles": [
   {"id": "explorer", "title": "调研", "summary": "查清某件事：读文件、列目录…",
-   "type": "FILE_READ", "mutates": false, "tools": ["read_file", "list_dir"]},
+   "type": "FILE_READ", "mutates": false,
+   "tools": ["read_file", "list_dir", "grep", "glob"]},
   {"id": "reviewer", "title": "审查", "summary": "对着已经存在的代码挑毛病…",
-   "type": "FILE_READ", "mutates": false, "tools": ["read_file", "list_dir"]},
+   "type": "FILE_READ", "mutates": false,
+   "tools": ["read_file", "list_dir", "grep", "glob"]},
   {"id": "coder", "title": "编码", "summary": "新建或修改文件",
    "type": "FILE_WRITE", "mutates": true,
-   "tools": ["read_file", "list_dir", "write_file", "create_project"]}
+   "tools": ["read_file", "list_dir", "grep", "glob", "write_file", "create_project"]}
 ]
 ```
 
