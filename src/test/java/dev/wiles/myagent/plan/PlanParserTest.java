@@ -15,11 +15,11 @@ class PlanParserTest {
                 {
                   "goal": "给 Task 加上重试能力",
                   "tasks": [
-                    {"id": "t1", "type": "FILE_READ", "description": "读 Task.java 弄清状态机", "acceptance": "说清有哪几种状态", "dependsOn": []},
-                    {"id": "t2", "type": "FILE_READ", "description": "读 TaskTest 看现有约定", "acceptance": "列出现有测试覆盖了什么", "dependsOn": []},
-                    {"id": "t3", "type": "FILE_WRITE", "description": "加 retry 方法", "acceptance": "Task 里有 retry() 且状态迁移仍然合法", "dependsOn": ["t1", "t2"]},
-                    {"id": "t4", "type": "FILE_WRITE", "description": "补测试", "acceptance": "重试的正常路径和越界路径都有用例", "dependsOn": ["t3"]},
-                    {"id": "t5", "type": "VERIFICATION", "description": "跑 mvn test", "acceptance": "测试全部通过", "dependsOn": ["t4"]}
+                    {"id": "t1", "role": "explorer", "description": "读 Task.java 弄清状态机", "acceptance": "说清有哪几种状态", "dependsOn": []},
+                    {"id": "t2", "role": "explorer", "description": "读 TaskTest 看现有约定", "acceptance": "列出现有测试覆盖了什么", "dependsOn": []},
+                    {"id": "t3", "role": "coder", "description": "加 retry 方法", "acceptance": "Task 里有 retry() 且状态迁移仍然合法", "dependsOn": ["t1", "t2"]},
+                    {"id": "t4", "role": "coder", "description": "补测试", "acceptance": "重试的正常路径和越界路径都有用例", "dependsOn": ["t3"]},
+                    {"id": "t5", "role": "verifier", "description": "跑 mvn test", "acceptance": "测试全部通过", "dependsOn": ["t4"]}
                   ]
                 }
                 """;
@@ -32,7 +32,7 @@ class PlanParserTest {
     // ── 正常解析 ────────────────────────────────────────────────
 
     @Test
-    @DisplayName("标准 JSON：目标、任务、类型、依赖都解出来")
+    @DisplayName("标准 JSON：目标、任务、角色、依赖都解出来")
     void parsesValidPlan() {
         PlanParser.ParsedPlan parsed = PlanParser.parse(validJson());
 
@@ -41,7 +41,8 @@ class PlanParserTest {
 
         Task t3 = parsed.tasks().get(2);
         assertEquals("t3", t3.id());
-        assertEquals(TaskType.FILE_WRITE, t3.type());
+        assertEquals(AgentRoles.CODER, t3.role());
+        assertEquals(TaskType.FILE_WRITE, t3.type(), "类型是从角色推出来的");
         assertEquals("加 retry 方法", t3.description());
         assertEquals(List.of("t1", "t2"), t3.dependencies());
         assertEquals(0, t3.depth(), "根计划产出的都是根任务");
@@ -57,11 +58,40 @@ class PlanParserTest {
     }
 
     @Test
-    @DisplayName("类型大小写不敏感——模型写小写是常事，不值得为此打回重来")
-    void typeIsCaseInsensitive() {
-        String json = validJson().replace("\"FILE_READ\"", "\"file_read\"");
+    @DisplayName("角色名大小写不敏感——模型写 Explorer 是常事，不值得为此打回重来")
+    void roleIsCaseInsensitive() {
+        String json = validJson().replace("\"explorer\"", "\"Explorer\"");
 
-        assertEquals(TaskType.FILE_READ, PlanParser.parse(json).tasks().get(0).type());
+        assertEquals(AgentRoles.EXPLORER, PlanParser.parse(json).tasks().get(0).role());
+    }
+
+    @Test
+    @DisplayName("模型退回去填 type：意图是清楚的，落到默认角色上，别为这个烧一轮")
+    void fallsBackToDefaultRoleWhenOnlyTypeIsGiven() {
+        String json = validJson().replace("\"role\": \"explorer\"", "\"type\": \"FILE_READ\"");
+
+        assertEquals(AgentRoles.EXPLORER, PlanParser.parse(json).tasks().get(0).role());
+    }
+
+    @Test
+    @DisplayName("两个都填且对不上，以 role 为准——它更具体，也是提示词要的那个")
+    void roleWinsOverType() {
+        String json = validJson().replace("{\"id\": \"t1\", \"role\": \"explorer\"",
+                        "{\"id\": \"t1\", \"type\": \"FILE_WRITE\", \"role\": \"reviewer\"");
+
+        Task t1 = PlanParser.parse(json).tasks().get(0);
+        assertEquals(AgentRoles.REVIEWER, t1.role());
+        assertEquals(TaskType.FILE_READ, t1.type(), "类型跟着角色走，不听 JSON 里那个");
+    }
+
+    @Test
+    @DisplayName("role 和 type 都没有：这才是真的没法派活")
+    void rejectsMissingRoleAndType() {
+        String json = validJson().replace("\"role\": \"verifier\", ", "");
+
+        String msg = parseError(json).getMessage();
+        assertTrue(msg.contains("role"), msg);
+        assertTrue(msg.contains("explorer") && msg.contains("verifier"), msg);
     }
 
     @Test
@@ -127,13 +157,13 @@ class PlanParserTest {
     }
 
     @Test
-    @DisplayName("类型编错了：报错要把合法取值全列出来，模型才知道该改成什么")
-    void rejectsUnknownType() {
-        String json = validJson().replace("\"VERIFICATION\"", "\"RUN_TESTS\"");
+    @DisplayName("角色编错了：报错要把可派的角色全列出来，模型才知道该改成什么")
+    void rejectsUnknownRole() {
+        String json = validJson().replace("\"verifier\"", "\"test_runner\"");
 
         String msg = parseError(json).getMessage();
-        assertTrue(msg.contains("RUN_TESTS"), msg);
-        assertTrue(msg.contains("FILE_READ") && msg.contains("VERIFICATION"), msg);
+        assertTrue(msg.contains("test_runner"), msg);
+        assertTrue(msg.contains("explorer") && msg.contains("verifier"), msg);
     }
 
     @Test
@@ -257,12 +287,12 @@ class PlanParserTest {
     void rejectsNestedPlanningTask() {
         Task parent = new Task("t1", "探路", TaskType.PLANNING, List.of());
         String json = """
-                {"tasks": [{"id": "t1.1", "type": "PLANNING", "description": "再拆一层", "acceptance": "拆出来了", "dependsOn": []}]}
+                {"tasks": [{"id": "t1.1", "role": "scout", "description": "再拆一层", "acceptance": "拆出来了", "dependsOn": []}]}
                 """;
 
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> PlanParser.parseSubTasks(json, parent));
-        assertTrue(e.getMessage().contains("PLANNING"), e.getMessage());
+        assertTrue(e.getMessage().contains("scout"), e.getMessage());
     }
 
     @Test

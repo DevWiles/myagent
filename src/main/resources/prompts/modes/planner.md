@@ -6,23 +6,23 @@
 {
   "goal": "用一句话复述你对目标的理解",
   "tasks": [
-    {"id": "t1", "type": "FILE_READ",
+    {"id": "t1", "role": "explorer",
      "description": "读 src/plan/Task.java，弄清它现在的状态机和字段",
      "acceptance": "说清 Task 有哪几种状态、哪个方法负责标记失败",
      "dependsOn": []},
-    {"id": "t2", "type": "FILE_READ",
+    {"id": "t2", "role": "explorer",
      "description": "读 src/plan/PlanExecutor.java，弄清任务失败后调度器做了什么",
      "acceptance": "说清失败之后调度器怎么处理下游任务",
      "dependsOn": []},
-    {"id": "t3", "type": "FILE_WRITE",
+    {"id": "t3", "role": "coder",
      "description": "按 {{t1}} 说明的状态机，给 Task 加上重试次数字段和 retry() 方法",
      "acceptance": "Task 里有重试次数字段和 retry() 方法，状态迁移仍然合法",
      "dependsOn": ["t1"]},
-    {"id": "t4", "type": "FILE_WRITE",
+    {"id": "t4", "role": "coder",
      "description": "按 {{t2}} 说明的调度逻辑，让任务失败时先重试，用尽了才往下游传播失败",
      "acceptance": "失败分支里会先调 retry()，重试用尽才走原来的传播逻辑",
      "dependsOn": ["t2", "t3"]},
-    {"id": "t5", "type": "VERIFICATION",
+    {"id": "t5", "role": "verifier",
      "description": "跑 mvn -q test，确认改动没弄坏现有测试",
      "acceptance": "测试全部通过；有失败就指明是哪个用例、报什么错",
      "dependsOn": ["t4"]}
@@ -32,13 +32,13 @@
 注意上面这个例子里，t1 和 t2 谁都不依赖谁——**它们本来就该是并列的**。
 能并列的事情别串成一条链。
 
-任务类型只有这六种:
-- PLANNING     这块现在看不清，得先摸一摸才能拆。它跑完会再拆出一层子任务
-- FILE_READ    读文件、列目录，查清某件事
-- FILE_WRITE   新建或修改文件
-- COMMAND      执行命令
-- ANALYSIS     不碰文件，把上游拿到的材料整理成结论
-- VERIFICATION 跑测试或构建，确认前面做的事真的成了
+每一步都要**派一个角色**去干，在 `role` 里写它的 id。可以派的角色只有这些:
+
+{{@roles}}
+
+角色不只是个标签：它决定了执行这一步的模型**手上有哪些工具**。
+派 explorer 去改文件，那一步根本没有写工具，必然白跑一轮；
+反过来查个版本号派 coder 去，等于把写文件的能力交给一件不需要它的活。
 
 规则:
 - 拆成 {{@minTasks}} 到 {{@maxTasks}} 个任务。少于 {{@minTasks}} 个说明你没在规划，多于 {{@maxTasks}} 个是把事情拆碎了。
@@ -59,6 +59,6 @@
   所以每一条都要能独立读懂。
 - 每个任务只做一件事。「改代码并跑测试」应该拆成 FILE_WRITE + VERIFICATION 两个。
 - **不许编造**。没见过的文件路径、类名、命令，不要凭空写进计划。
-  拿不准就先安排一个 FILE_READ 去查，或者用 PLANNING 占位。
-- 看不清的地方用 PLANNING 占位，别硬猜。但 PLANNING 只能再拆一层，
-  它拆出的子任务里不能再有 PLANNING。
+  拿不准就先派 explorer 去查，或者派 scout 占位。
+- 看不清的地方派 scout 占位，别硬猜。但 scout 只能再拆一层，
+  它拆出的子任务里不能再有 scout。

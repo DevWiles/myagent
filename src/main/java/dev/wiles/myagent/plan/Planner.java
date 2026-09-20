@@ -122,7 +122,7 @@ public final class Planner {
 
         return attempt(messages, "规划", reply -> {
             PlanParser.ParsedPlan parsed = PlanParser.parse(reply);
-            requireRunnableTypes(parsed.tasks());
+            requireRunnableRoles(parsed.tasks());
             // 建图这一步同样可能失败（id 重复、悬空依赖、成环），
             // 它的报错一样要回灌——尤其是环的路径，模型看了才知道该断哪条边
             return new Plan(parsed.goal(), TaskGraph.of(parsed.tasks()));
@@ -136,10 +136,14 @@ public final class Planner {
      */
     public List<Task> planSubTasks(Task parent, String findings) {
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(ChatMessage.system(PlanPrompt.subPlanSystem()));
+        messages.add(ChatMessage.system(PlanPrompt.subPlanSystem(readOnly)));
         messages.add(ChatMessage.user(PlanPrompt.subPlanUser(parent, findings)));
 
-        return attempt(messages, "子规划", reply -> PlanParser.parseSubTasks(reply, parent));
+        return attempt(messages, "子规划", reply -> {
+            List<Task> tasks = PlanParser.parseSubTasks(reply, parent);
+            requireRunnableRoles(tasks);
+            return tasks;
+        });
     }
 
     /**
@@ -159,23 +163,29 @@ public final class Planner {
 
         return attempt(messages, "重规划", reply -> {
             List<Task> tasks = PlanParser.parseReplan(reply);
-            requireRunnableTypes(tasks);
+            requireRunnableRoles(tasks);
             return tasks;
         });
     }
 
-    /** 只读模式下，能跑的只有这三种类型；其余的规划出来也是白搭，当场打回。 */
-    private void requireRunnableTypes(List<Task> tasks) {
+    /**
+     * 只读模式下，会动手的角色一个都派不出去；派了也是白搭，当场打回。
+     *
+     * <p>判据是角色自己声明的 {@link AgentRole#mutates()}，不是一张硬编码的类型白名单。
+     * 差别在加角色的时候显出来：名册里多一个会写文件的角色，
+     * 白名单那种写法<b>默认放行</b>——漏改一处就是只读模式下真的改了文件，
+     * 而这条路上没有任何报错。
+     */
+    private void requireRunnableRoles(List<Task> tasks) {
         if (!readOnly) {
             return;
         }
         for (Task task : tasks) {
-            TaskType type = task.type();
-            if (type != TaskType.FILE_READ && type != TaskType.ANALYSIS
-                    && type != TaskType.PLANNING) {
-                throw new IllegalArgumentException("任务 " + task.id() + " 的类型是 " + type
-                        + "，但当前是只读模式，只能用 FILE_READ / ANALYSIS / PLANNING。"
-                        + "请改用这三种类型重新规划。");
+            if (task.role().mutates()) {
+                throw new IllegalArgumentException("任务 " + task.id() + " 派的是 "
+                        + task.role().id() + "，它会改动工作区，但当前是只读模式。"
+                        + "只能派: " + String.join(" / ", AgentRoles.runnableIds(true))
+                        + "。请改派这几个角色重新规划。");
             }
         }
     }

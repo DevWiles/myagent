@@ -7,19 +7,22 @@
 
 {
   "tasks": [
-    {"id": "r1", "type": "FILE_READ",
+    {"id": "r1", "role": "explorer",
      "description": "查清 X 为什么不存在",
      "acceptance": "说清它是没建还是路径写错了",
      "dependsOn": []},
-    {"id": "r2", "type": "FILE_WRITE",
+    {"id": "r2", "role": "coder",
      "description": "按 {{r1}} 查到的实际路径，改 Y",
      "acceptance": "Y 里引用的路径和实际一致",
      "dependsOn": ["r1"]}
   ]
 }
 
-任务类型: FILE_READ / FILE_WRITE / COMMAND / ANALYSIS / VERIFICATION。
-**不能用 PLANNING**——现在是补救，不是重新摸底。
+每一步派一个角色，在 `role` 里写它的 id。可以派的角色:
+
+{{@roles}}
+
+**不能派 scout**——现在是补救，不是重新摸底。
 
 规则:
 - **最多 {{@maxReplanTasks}} 个**。补救是在已有成果上接着走，不是把整件事重做一遍。

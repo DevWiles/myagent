@@ -52,13 +52,45 @@ public final class PlanPrompt {
         return ASSEMBLER.assemble(PromptMode.PLANNER, PromptContext.builder()
                 .variable("minTasks", String.valueOf(PlanLimits.MIN_TASKS))
                 .variable("maxTasks", String.valueOf(PlanLimits.MAX_TASKS))
+                .variable("roles", roleMenu(AgentRoles.runnable(readOnly)))
                 .build())
                 + readOnlyRule(readOnly) + forbiddenRule(context) + situation(context);
     }
 
-    /** 只读模式下，一半的任务类型根本跑不了，规划时就得知道。 */
+    /**
+     * 角色菜单：这份提示词里唯一由代码生成的部分。
+     *
+     * <p>不手写在 md 里，理由和 {@link PlanLimits} 那几个数字一样——
+     * <b>名册多一个角色而提示词忘了改，症状是模型永远不会派它</b>，
+     * 而那个角色在代码里、在测试里、在界面上都好端端的，
+     * 只有对着真实规划输出一条条数才看得出来。生成的东西不会忘。
+     *
+     * <p>连工具一起列出来：模型选角色的依据是「这一步要干的活」，
+     * 而「这个角色够不够得着那件活」最硬的证据就是它手上有什么。
+     */
+    private static String roleMenu(List<AgentRole> roles) {
+        return roles.stream()
+                .map(role -> "- `" + role.id() + "`（" + role.title() + "）"
+                        + role.summary() + "。工具: "
+                        + (role.tools().isEmpty() ? "一个都没有" : String.join(" ", role.tools())))
+                .collect(Collectors.joining("\n"));
+    }
+
+    /** 第二层和补救都不许再摸底，所以菜单里拿掉规划角色。 */
+    private static List<AgentRole> nonPlanningRoles(boolean readOnly) {
+        return AgentRoles.runnable(readOnly).stream()
+                .filter(role -> role.taskType() != TaskType.PLANNING)
+                .toList();
+    }
+
+    /** 只读模式下，一半的角色根本派不出去，规划时就得知道。 */
     private static String readOnlyRule(boolean readOnly) {
-        return readOnly ? "\n" + REPO.loadRequired("policy/plan-readonly.md") + "\n" : "";
+        return readOnly
+                ? "\n" + REPO.loadRequired("policy/plan-readonly.md")
+                        .replace("{{@readOnlyRoles}}",
+                                String.join(" / ", AgentRoles.runnableIds(true)))
+                        + "\n"
+                : "";
     }
 
     /**
@@ -106,11 +138,17 @@ public final class PlanPrompt {
         return "目标: " + goal;
     }
 
-    /** 子规划的系统提示词：同一套格式，但不要 goal、不许再出 PLANNING。 */
+    /** 子规划的系统提示词：同一套格式，但不要 goal、不许再派 scout。 */
     public static String subPlanSystem() {
+        return subPlanSystem(false);
+    }
+
+    public static String subPlanSystem(boolean readOnly) {
         return ASSEMBLER.assemble(PromptMode.PLANNER_SUB, PromptContext.builder()
                 .variable("maxSubTasks", String.valueOf(PlanLimits.MAX_SUB_TASKS))
-                .build());
+                .variable("roles", roleMenu(nonPlanningRoles(readOnly)))
+                .build())
+                + readOnlyRule(readOnly);
     }
 
     // ── 重规划 ──────────────────────────────────────────────────
@@ -134,6 +172,7 @@ public final class PlanPrompt {
     public static String replanSystem(boolean readOnly) {
         return ASSEMBLER.assemble(PromptMode.PLANNER_REPLAN, PromptContext.builder()
                 .variable("maxReplanTasks", String.valueOf(PlanLimits.MAX_REPLAN_TASKS))
+                .variable("roles", roleMenu(nonPlanningRoles(readOnly)))
                 .build())
                 + readOnlyRule(readOnly);
     }

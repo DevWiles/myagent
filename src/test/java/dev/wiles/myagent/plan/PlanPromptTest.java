@@ -92,6 +92,49 @@ class PlanPromptTest {
     }
 
     @Test
+    @DisplayName("角色菜单是从名册生成的：新加一个角色，提示词自动就有了")
+    void roleMenuComesFromTheRegistry() {
+        String prompt = PlanPrompt.system();
+
+        for (AgentRole role : AgentRoles.all()) {
+            assertTrue(prompt.contains(role.id()), "菜单里没有 " + role.id()
+                    + "——模型不会派一个它没见过的角色");
+            assertTrue(prompt.contains(role.summary()), "角色 " + role.id()
+                    + " 的说明没进提示词，模型只能靠 id 猜它是干嘛的");
+        }
+    }
+
+    @Test
+    @DisplayName("菜单里连工具一起报出来——「够不够得着这件活」最硬的证据")
+    void roleMenuListsTools() {
+        String prompt = PlanPrompt.system();
+
+        assertTrue(prompt.contains("write_file"), prompt);
+        assertTrue(prompt.contains("bash"), prompt);
+    }
+
+    @Test
+    @DisplayName("只读模式下，会动手的角色从菜单里整个消失")
+    void readOnlyMenuHidesMutatingRoles() {
+        String prompt = PlanPrompt.system(true, PlanContext.none());
+
+        assertFalse(prompt.contains("`coder`"), "只读模式还把 coder 摆在菜单上，等着它派错");
+        assertFalse(prompt.contains("`verifier`"));
+        assertTrue(prompt.contains("`explorer`"));
+        // 只读那条策略里的角色清单同样是生成的
+        assertTrue(prompt.contains("explorer / reviewer") || prompt.contains("explorer"), prompt);
+    }
+
+    @Test
+    @DisplayName("第二层和补救都不许再摸底，所以菜单里没有 scout")
+    void subAndReplanMenusDropScout() {
+        assertFalse(PlanPrompt.subPlanSystem().contains("`scout`"),
+                "子规划的菜单里还有 scout，等于邀请它再拆一层");
+        assertFalse(PlanPrompt.replanSystem().contains("`scout`"));
+        assertTrue(PlanPrompt.subPlanSystem().contains("`coder`"));
+    }
+
+    @Test
     @DisplayName("数量上下限是从 PlanLimits 插进来的，不是手写的数字")
     void limitsComeFromPlanLimits() {
         String prompt = PlanPrompt.system();

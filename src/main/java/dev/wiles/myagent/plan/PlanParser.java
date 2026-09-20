@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -19,7 +18,7 @@ import java.util.stream.Collectors;
  * <ul>
  *   <li>整段没有 JSON，只有一段商量的话</li>
  *   <li>JSON 裹在 ```json 围栏里，前后还有寒暄</li>
- *   <li>类型写成小写、写成自己编的名字</li>
+ *   <li>角色写成大写、写成自己编的名字，或者退回去填了 type</li>
  *   <li>字段缺失、tasks 不是数组</li>
  *   <li>任务数量离谱</li>
  *   <li>引用了 {@code {{t1}}} 却忘了把 t1 写进 dependsOn（见 {@link TaskRefs}）</li>
@@ -168,19 +167,19 @@ public final class PlanParser {
                     + "执行这一步的模型靠它判断能不能收口——少了它，它只能凭感觉决定什么时候停。");
         }
 
-        TaskType type = parseType(text(node, "type"), where, id);
+        AgentRole role = parseRole(node, where, id);
         // 子任务不许再是 PLANNING：它深度已经是 1，再拆就是孙子任务，模型层直接不给入口。
         // 与其让它跑起来之后拆不动再报错，不如在规划阶段就打回去重写。
-        if (parent != null && type == TaskType.PLANNING) {
-            throw new IllegalArgumentException(where + "（" + id + "）的类型是 PLANNING。"
-                    + "子任务不能再是规划任务，请直接给出具体要做的事。");
+        if (parent != null && role.taskType() == TaskType.PLANNING) {
+            throw new IllegalArgumentException(where + "（" + id + "）派的是 " + role.id()
+                    + "，那是个规划角色。子任务不能再规划，请直接给出具体要做的事。");
         }
 
         List<String> dependsOn = parseDependsOn(node, where, id);
         requireRefsDeclared(where, id, description, acceptance, dependsOn);
         return parent == null
-                ? new Task(id, description, type, dependsOn, acceptance)
-                : parent.subTask(id, description, type, dependsOn, acceptance);
+                ? new Task(id, description, role, dependsOn, acceptance)
+                : parent.subTask(id, description, role, dependsOn, acceptance);
     }
 
     /**
@@ -206,16 +205,40 @@ public final class PlanParser {
         }
     }
 
-    private static TaskType parseType(String raw, String where, String id) {
-        if (raw == null) {
-            throw new IllegalArgumentException(where + "（" + id + "）缺少 type。" + legalTypes());
+    /**
+     * 派谁干这一步。
+     *
+     * <h3>为什么还认 type</h3>
+     * 提示词只让模型填 {@code role}，但它偶尔还是会填回 {@code type}——
+     * 尤其是被回灌打回重写的那几轮，模型很容易退回到更常见的写法。
+     * 这种输出的<b>意图是清楚的</b>（「这一步是读文件」），
+     * 只是没说派谁去；为一个意图清楚的答案再烧一轮调用不划算，
+     * 落到那个类型的默认角色上就是了。
+     *
+     * <p>反过来两个都填且对不上时，<b>以 role 为准</b>：role 是提示词要的那个，
+     * 而且它更具体（{@code reviewer} 和 {@code explorer} 同属 FILE_READ，
+     * 类型表达不出这个区别）。
+     */
+    private static AgentRole parseRole(JsonNode node, String where, String id) {
+        String raw = text(node, "role");
+        if (raw != null) {
+            try {
+                // 大小写不敏感：模型写 Coder、CODER 都是常事，为这个打回重来不划算
+                return AgentRoles.require(raw.toLowerCase());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(where + "（" + id + "）" + e.getMessage());
+            }
+        }
+
+        String type = text(node, "type");
+        if (type == null) {
+            throw new IllegalArgumentException(where + "（" + id + "）缺少 role。" + legalRoles());
         }
         try {
-            // 大小写不敏感：模型写小写是常事，为这个打回重来不划算
-            return TaskType.valueOf(raw.strip().toUpperCase());
+            return AgentRoles.defaultFor(TaskType.valueOf(type.toUpperCase()));
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(where + "（" + id + "）的类型 " + raw
-                    + " 不存在。" + legalTypes());
+            throw new IllegalArgumentException(where + "（" + id + "）的 role 没填，"
+                    + "type 填的 " + type + " 也不是合法类型。" + legalRoles());
         }
     }
 
@@ -238,9 +261,9 @@ public final class PlanParser {
         return result;
     }
 
-    private static String legalTypes() {
-        return "合法的类型只有: " + Arrays.stream(TaskType.values())
-                .map(Enum::name).collect(Collectors.joining(", "));
+    private static String legalRoles() {
+        return "可以派的角色只有: " + AgentRoles.all().stream()
+                .map(AgentRole::id).collect(Collectors.joining(", "));
     }
 
     private static String text(JsonNode node, String field) {

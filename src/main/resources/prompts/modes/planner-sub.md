@@ -4,19 +4,22 @@
 
 {
   "tasks": [
-    {"id": "t1.1", "type": "FILE_WRITE",
+    {"id": "t1.1", "role": "coder",
      "description": "具体做什么",
      "acceptance": "做到什么算完成",
      "dependsOn": []},
-    {"id": "t1.2", "type": "VERIFICATION",
+    {"id": "t1.2", "role": "verifier",
      "description": "按 {{t1.1}} 改动的范围，跑对应的测试",
      "acceptance": "相关测试通过",
      "dependsOn": ["t1.1"]}
   ]
 }
 
-任务类型: FILE_READ / FILE_WRITE / COMMAND / ANALYSIS / VERIFICATION。
-**不能用 PLANNING**——你已经在第二层了，不许再往下拆。
+每一步派一个角色，在 `role` 里写它的 id。可以派的角色:
+
+{{@roles}}
+
+**不能派 scout**——你已经在第二层了，不许再往下拆。
 
 规则:
 - **最多 {{@maxSubTasks}} 个**，够用就行，拆出一两步是正常的。你负责的只是一小块，
