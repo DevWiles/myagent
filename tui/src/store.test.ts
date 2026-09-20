@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import type { ServerEvent } from './protocol.ts'
-import { SessionStore, type Entry } from './store.ts'
+import { modeIsAvailable, nextMode, SessionStore, type Entry } from './store.ts'
 
 function ready(): ServerEvent {
   return {
@@ -986,3 +986,82 @@ describe('圆桌面板', () => {
   })
 })
 
+// ------------------------------------------------------------ 模式（Shift+Tab）
+
+describe('模式切换', () => {
+  const withFeatures = (features: string[]) => {
+    const store = new SessionStore()
+    feed(store, {
+      t: 'ready', protocol: 1, version: '0.2.0', workspace: '/tmp/x', model: 'm',
+      planMode: false, hasApiKey: true, busy: false, features, tools: [],
+    } as ServerEvent)
+    return store
+  }
+
+  test('默认 normal——最常用的那个不该要用户先按一下', () => {
+    expect(new SessionStore().getSnapshot().mode).toBe('normal')
+  })
+
+  test('normal → plan → team → normal，转一圈回到原地', () => {
+    const store = withFeatures(['plan', 'team'])
+
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('plan')
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('team')
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('normal')
+  })
+
+  test('后端没宣告的模式直接跳过——进得去又用不了，比切不进去更让人困惑', () => {
+    const store = withFeatures(['plan'])
+
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('plan')
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('normal')
+  })
+
+  test('两个都没宣告时，按了等于没按，不会卡在跑不了的模式上', () => {
+    const store = withFeatures([])
+
+    store.cycleMode()
+
+    expect(store.getSnapshot().mode).toBe('normal')
+  })
+
+  test('模式跨轮保持——它是用户表过的态，不该跑完一轮就弹回去', () => {
+    const store = withFeatures(['plan', 'team'])
+    store.cycleMode()
+
+    store.submitPrompt('干点活')
+    feed(store, { t: 'done', text: '干完了', steps: 2 })
+
+    expect(store.getSnapshot().mode).toBe('plan')
+  })
+
+  test('还没连上后端时不瞎切——能力清单是空的', () => {
+    const store = new SessionStore()
+
+    store.cycleMode()
+
+    expect(store.getSnapshot().mode).toBe('normal')
+  })
+})
+
+describe('模式可用性（纯函数）', () => {
+  test('normal 永远可用，不挑后端', () => {
+    expect(modeIsAvailable('normal', [])).toBe(true)
+  })
+
+  test('plan / team 各自看自己的 feature', () => {
+    expect(modeIsAvailable('plan', ['team'])).toBe(false)
+    expect(modeIsAvailable('team', ['team'])).toBe(true)
+  })
+
+  test('nextMode 是纯的，不碰 store', () => {
+    expect(nextMode('normal', ['plan', 'team'])).toBe('plan')
+    expect(nextMode('team', ['plan', 'team'])).toBe('normal')
+    expect(nextMode('plan', [])).toBe('normal')
+  })
+})

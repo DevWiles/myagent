@@ -27,7 +27,7 @@ import java.util.Set;
  *
  * <h3>为什么工具名字要从外面传进来</h3>
  * {@code context} 包不该知道有哪些工具、它们叫什么——那是 {@code tool} 包的事，
- * 而且只读模式下工具集还不一样。调用方（{@code Repl} / {@code AgentServer}）
+ * 而且只读模式下工具集还不一样。调用方（{@code AgentServer}）
  * 手上有注册表，让它说了算。和 {@code ContextManager.Harvested} 不引用
  * {@code MemoryEntry} 是同一个处理：低层只认自己的数据形状。
  *

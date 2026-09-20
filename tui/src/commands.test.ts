@@ -15,7 +15,7 @@ import {
 /** 后端啥都支持、存档也都有的情况。 */
 const full: CommandContext = {
   features: ["plan", "team", "replan", "resume", "resume_plan", "auto_mode", "session",
-    "sessions"],
+    "sessions", "compact", "memory"],
   hasContinuable: true,
   hasResumablePlan: true,
 }
@@ -27,7 +27,7 @@ describe("看起来是不是命令", () => {
   test("/ 开头的单个词算", () => {
     expect(looksLikeCommand("/help")).toBe(true)
     expect(looksLikeCommand("  /cont")).toBe(true)
-    expect(looksLikeCommand("/plan 把 README 补全")).toBe(true)
+    expect(looksLikeCommand("/memory undo")).toBe(true)
   })
 
   test("绝对路径不算——贴个路径进来问问题是常事", () => {
@@ -45,8 +45,6 @@ describe("边打边筛", () => {
   test("空的 / 列出全部", () => {
     expect(filterCommands("/", full).map((c) => c.name)).toEqual([
       "/help",
-      "/plan",
-      "/team",
       "/continue",
       "/resume",
       "/resume-plan",
@@ -73,7 +71,7 @@ describe("边打边筛", () => {
   })
 
   test("开始打参数之后菜单只剩那一条，不再挡视线", () => {
-    expect(filterCommands("/plan 把 README 补全", full).map((c) => c.name)).toEqual(["/plan"])
+    expect(filterCommands("/memory undo", full).map((c) => c.name)).toEqual(["/memory"])
   })
 
   test("对不上就什么都不显示", () => {
@@ -96,7 +94,7 @@ describe("高亮用的匹配", () => {
   })
 
   test("带参数时看首词", () => {
-    expect(matchCommand("/plan 把 README 补全", full)?.id).toBe("plan")
+    expect(matchCommand("/memory undo", full)?.id).toBe("memory")
   })
 })
 
@@ -111,11 +109,11 @@ describe("按回车怎么处置", () => {
   })
 
   test("认出来的命令带上参数", () => {
-    const r = resolve("/plan 把 README 补全", full)
+    const r = resolve("/memory undo", full)
     expect(r.kind).toBe("command")
     if (r.kind === "command") {
-      expect(r.entry.id).toBe("plan")
-      expect(r.args).toBe("把 README 补全")
+      expect(r.entry.id).toBe("memory")
+      expect(r.args).toBe("undo")
     }
   })
 
@@ -140,10 +138,9 @@ describe("按回车怎么处置", () => {
     expect(matchCommand("/res", full)).toBeNull()
   })
 
-  test("要参数却没给", () => {
-    const r = resolve("/plan", full)
-    expect(r.kind).toBe("needs-args")
-  })
+  // 「要参数却没给」这条分支暂时测不了：/plan 和 /team 改成模式（Shift+Tab）之后，
+  // **没有任何内置命令再声明 args**。分支本身留着（见 commands.ts 里那段说明），
+  // 下一条带参数的命令加进来时，这个用例跟着一起补回来。
 
   test("没存档时 /continue 用不了，而且要说清为什么", () => {
     const r = resolve("/continue", fresh)
@@ -153,9 +150,9 @@ describe("按回车怎么处置", () => {
     }
   })
 
-  test("后端没宣告 plan 能力时 /plan 用不了", () => {
-    const noPlan: CommandContext = { ...full, features: ["session"] }
-    const r = resolve("/plan 干活", noPlan)
+  test("后端没宣告 compact 能力时 /compact 用不了", () => {
+    const noCompact: CommandContext = { ...full, features: ["session"] }
+    const r = resolve("/compact", noCompact)
     expect(r.kind).toBe("unavailable")
   })
 
@@ -168,7 +165,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(9)
+    expect(entries).toHaveLength(7)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -176,25 +173,27 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(9)
-    expect(lines.some((l) => l.includes("/plan <目标>"))).toBe(true)
+    expect(lines).toHaveLength(7)
+    expect(lines.some((l) => l.includes("/compact"))).toBe(true)
+    expect(lines.every((l) => !l.includes("/plan ") && !l.includes("/team")),
+    ).toBe(true)
     expect(lines.some((l) => l.includes("现在不行"))).toBe(true)
   })
 })
 
 describe("参数部分", () => {
   test("首词之后的都是参数", () => {
-    expect(argsOf("/plan 把 README 补全")).toBe("把 README 补全")
-    expect(argsOf("  /plan   把 README 补全  ")).toBe("把 README 补全")
+    expect(argsOf("/memory clear-auto")).toBe("clear-auto")
+    expect(argsOf("  /memory   clear-auto  ")).toBe("clear-auto")
   })
 
   test("没有参数就是空串", () => {
-    expect(argsOf("/plan")).toBe("")
+    expect(argsOf("/memory")).toBe("")
     expect(argsOf("")).toBe("")
   })
 
-  test("打了一半的命令也能取出参数——高亮的是 /plan，参数是后面那句", () => {
-    expect(argsOf("/pl 把 README 补全")).toBe("把 README 补全")
+  test("打了一半的命令也能取出参数——高亮的是 /memory，参数是后面那句", () => {
+    expect(argsOf("/mem undo")).toBe("undo")
   })
 })
 
@@ -210,17 +209,17 @@ describe("菜单开着时按回车", () => {
   })
 
   test("参数从用户实际敲的字里取，不是从高亮那条里取", () => {
-    const r = acceptSelected(menu("/pl 把 README 补全"), 0, "/pl 把 README 补全")
+    const r = acceptSelected(menu("/mem undo"), 0, "/mem undo")
     expect(r.kind).toBe("run")
     if (r.kind === "run") {
-      expect(r.entry.id).toBe("plan")
-      expect(r.args).toBe("把 README 补全")
+      expect(r.entry.id).toBe("memory")
+      expect(r.args).toBe("undo")
     }
   })
 
-  test("要参数却还没打：补名字，别报错——他本来就在打", () => {
-    const r = acceptSelected(menu("/pl"), 0, "/pl")
-    expect(r).toEqual({ kind: "complete", text: "/plan " })
+  test("命令还没打全：补完整，别报错——他本来就在打", () => {
+    const r = acceptSelected(menu("/mem"), 0, "/mem")
+    expect(r).toEqual({ kind: "run", entry: menu("/mem")[0], args: "" })
   })
 
   test("用不了的那条按回车只是说一句，不执行", () => {

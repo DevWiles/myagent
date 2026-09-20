@@ -31,10 +31,10 @@ async function frameOf(selected: number, columns = 80): Promise<string> {
 describe("命令菜单", () => {
   test("每条命令都画出来，带说明", async () => {
     const frame = await frameOf(0)
-    for (const name of ["/help", "/plan", "/continue", "/resume", "/resume-plan", "/clear"]) {
+    for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/compact", "/clear"]) {
       expect(frame).toContain(name)
     }
-    expect(frame).toContain("先规划后执行")
+    expect(frame).toContain("从会话历史里挑一段接着聊")
   })
 
   test("选中的那一行有指针，别的行没有", async () => {
@@ -42,7 +42,7 @@ describe("命令菜单", () => {
     const lines = frame.split("\n").filter((l) => l.includes("/"))
     const marked = lines.filter((l) => l.includes("❯"))
     expect(marked).toHaveLength(1)
-    expect(marked[0]).toContain("/plan")
+    expect(marked[0]).toContain("/continue")
   })
 
   test("用不了的命令写明原因，不是悄悄消失", async () => {
@@ -62,7 +62,7 @@ describe("命令菜单", () => {
 
   test("名字和说明之间一定有空格——最长那条曾经正好顶满列宽，挤成一团", async () => {
     const frame = await frameOf(0, 120)
-    for (const name of ["/resume-plan", "/plan <目标>", "/help", "/clear"]) {
+    for (const name of ["/resume-plan", "/compact", "/help", "/clear"]) {
       const row = frame.split("\n").find((l) => l.includes(name))!
       const after = row.slice(row.indexOf(name) + name.length)
       expect(after.startsWith("  ")).toBe(true)
@@ -75,11 +75,11 @@ describe("命令菜单", () => {
 
     // 每条命令都得在**同一行**上完整出现。折行的表现是 /resume-plan 被劈成
     // 「/resume-」和「plan」两行，而按列数断言是抓不到的——折行之后每行反而更短了
-    for (const name of ["/help", "/plan", "/continue", "/resume", "/resume-plan", "/clear"]) {
+    for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/memory", "/clear"]) {
       expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
     // 七条命令 + 一行键位提示 = 八行，多出来的行就是折行折出来的
-    expect(rows).toHaveLength(10)
+    expect(rows).toHaveLength(8)
     expect(frame).toContain("…")
   })
 

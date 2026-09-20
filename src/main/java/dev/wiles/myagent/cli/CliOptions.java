@@ -5,34 +5,27 @@ import java.nio.file.Path;
 /**
  * 命令行参数。
  *
- * @param workspace     工作区目录，默认当前目录
- * @param model         覆盖配置里的模型名
- * @param readOnly      只读模式：不注册写文件和执行命令的工具。
- *                      注意别和「先规划后执行」（/plan 命令）搞混，那是两回事
- * @param unsafe        跳过工作区安全检查
- * @param color         是否输出颜色
- * @param spinner       是否显示转圈的状态行
- * @param mouse         是否开启鼠标点击。默认关闭：开启后终端的滚动和拖拽选中
- *                      都会被程序接管，得不偿失
- * @param clearScreen   启动时是否清屏，让招牌置顶
- * @param fullscreen    是否占用整个终端（备用屏幕）。滚动由程序自己实现
- * @param initialPrompt 一次性执行的提示词；非空时跑完就退出，不进交互
- * @param help          打印用法
- * @param version       打印版本
- * @param serve         无头模式：不画界面，起一个只听本机的 WebSocket，由外部界面驱动
- * @param port          无头模式监听的端口。0 表示让系统随便挑一个（推荐，端口号会打在 stdout）
+ * <p>这里<b>只剩无头模式用得上的那几个</b>。颜色、转圈、鼠标、全屏、一次性提示词
+ * 那批是自带终端界面的旋钮，界面删掉之后它们一个都不再有任何效果——
+ * 留着比删掉危险：用户敲了 {@code --no-color} 以为关掉了什么，其实什么也没发生。
+ * <b>不起作用的开关比没有这个开关更糟</b>，它骗人。
+ *
+ * @param workspace 工作区目录，默认当前目录
+ * @param model     覆盖配置里的模型名
+ * @param readOnly  只读模式：不注册写文件和执行命令的工具
+ * @param unsafe    跳过工作区安全检查
+ * @param help      打印用法
+ * @param version   打印版本
+ * @param serve     无头模式。<b>现在是唯一的运行方式</b>，留着这个开关是因为
+ *                  「显式说明自己要什么」比「什么都不写就默认起服务」安全——
+ *                  手滑敲一下 {@code java -jar myagent.jar} 不该在你的家目录上起一个服务
+ * @param port      监听端口。0 表示让系统随便挑一个（推荐，端口号会打在 stdout）
  */
 public record CliOptions(
         Path workspace,
         String model,
         boolean readOnly,
         boolean unsafe,
-        boolean color,
-        boolean spinner,
-        boolean mouse,
-        boolean clearScreen,
-        boolean fullscreen,
-        String initialPrompt,
         boolean help,
         boolean version,
         boolean serve,

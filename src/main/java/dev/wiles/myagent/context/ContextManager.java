@@ -239,7 +239,7 @@ public final class ContextManager {
      *
      * <p>字段和 {@code MemoryEntry} 对得上，但<b>这里不引用那个类</b>：
      * 上下文压缩不该知道记忆是怎么存的，它只负责把候选递出去，
-     * 由 {@code Repl} / {@code AgentServer} 决定收不收、怎么收。
+     * 由调用方（{@code AgentServer}）决定收不收、怎么收。
      */
     public record Harvested(String name, String description, String content,
                             String topicKey, String turnId) {

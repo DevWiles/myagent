@@ -35,6 +35,7 @@ import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
 import { TeamPanel } from "./TeamPanel.tsx"
+import { ModeLine } from "./ModeLine.tsx"
 import { PromptInput } from "./PromptInput.tsx"
 import { SessionPicker } from "./SessionPicker.tsx"
 import { StatusLine } from "./StatusLine.tsx"
@@ -193,12 +194,39 @@ export function App(props: AppProps) {
    * 在这之前，认不出来的命令会被当提示词发给模型——打错一个字的代价是
    * 一次真实的模型调用，加上一个可能开始改文件的 agent。
    */
+  /**
+   * 一句话按当前模式发出去。
+   *
+   * <p>模式在**提交这一刻**才起作用，不是打字时。所以用户可以先写完一长段，
+   * 再想起来「这该走规划」，Shift+Tab 一下再回车——不用重打。
+   */
+  const sendByMode = (text: string): void => {
+    switch (state().mode) {
+      case "plan":
+        session.plan(text)
+        return
+      case "team": {
+        // 开头连着的角色名仍然算点名。斜杠命令没了，但「我想让审查和验证来看」
+        // 这个需求还在——这是它唯一的入口了
+        const { roles, goal } = splitTeamArgs(text, (state().ready?.roles ?? []).map(r => r.id))
+        if (goal.length === 0) {
+          session.notice("info", "只点了人还没说议题。把要议的事写在角色名后面。")
+          return
+        }
+        session.team(goal, roles)
+        return
+      }
+      default:
+        session.prompt(text)
+    }
+  }
+
   const submit = (value: string): void => {
     if (state().busy) return
     const decision = resolve(value, commandContext())
     switch (decision.kind) {
       case "prompt":
-        session.prompt(decision.text)
+        sendByMode(decision.text)
         return
       case "unknown":
         session.notice("warn", `没有 ${decision.typed} 这个命令。敲一个 / 看有哪些，或者 /help。`)
@@ -249,19 +277,6 @@ export function App(props: AppProps) {
       case "help":
         session.notice("info", ["可以用的命令：", ...helpLines(commandContext())].join("\n"))
         return
-      case "plan":
-        session.plan(args)
-        return
-      case "team": {
-        const { roles, goal } = splitTeamArgs(args, (state().ready?.roles ?? []).map(r => r.id))
-        if (goal.length === 0) {
-          session.notice("info", "用法：/team <议题>，比如 /team 这个包有没有问题\n"
-            + "也可以自己点人：/team reviewer verifier <议题>")
-          return
-        }
-        session.team(goal, roles)
-        return
-      }
       case "continue":
         session.continueSession()
         return
@@ -506,6 +521,21 @@ export function App(props: AppProps) {
       }
     }
 
+    /**
+     * Shift+Tab 切模式。
+     *
+     * <p>放在菜单那一段**后面**：命令菜单开着时 Tab 是补全，那是更近的上下文。
+     * 两者不冲突——补全那条分支只认不带 shift 的 Tab。
+     *
+     * <p>OpenTUI 把 `ESC[Z`（CSI Z）解析成 `{name:"tab", shift:true}`，所以这里认得到。
+     * 必须 consume：不消费的话输入框会收到同一个 Tab，在文本里插一个制表符。
+     */
+    if (key.name === "tab" && key.shift) {
+      consume()
+      session.cycleMode()
+      return
+    }
+
     // 没有确认框时，Esc 中断当前这一轮
     if (key.name === "escape" && state().busy) {
       consume()
@@ -692,6 +722,11 @@ export function App(props: AppProps) {
           tokens={state().tokens}
           contextLimit={state().contextLimit}
         />
+
+        {/* 模式行贴在状态栏下面，和模型名同一列起头。
+            在最下面而不是输入框上面：它描述的是「下一句话怎么跑」，
+            眼睛从输入框往下扫的第一站就该是它 */}
+        <ModeLine mode={state().mode} columns={dimensions().width} />
       </box>
     </ThemeProvider>
   )

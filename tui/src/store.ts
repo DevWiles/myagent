@@ -123,6 +123,51 @@ export type Entry =
 
 export type Approval = { id: number; action: string; detail: string; reason: string }
 
+/**
+ * 下一句话按什么方式跑。
+ *
+ * <p>这是 `/plan`、`/team` 两条斜杠命令的替代品：**同一句话，模式决定它怎么被处理**，
+ * 而不是让用户在每句话前面手打一个命令名。好处不只是少敲几个字——
+ * 模式是**看得见的状态**（左下角常驻一行），敲命令是转瞬即逝的动作，
+ * 用户不必记住「我刚才有没有加 /plan」。
+ */
+export type Mode = 'normal' | 'plan' | 'team'
+
+/** 切换顺序。normal 打头：最常用的排第一，Shift+Tab 一圈回到它。 */
+export const MODE_CYCLE: readonly Mode[] = ['normal', 'plan', 'team']
+
+/**
+ * 这个模式要后端宣告哪个能力。normal 谁都能跑，所以是 null。
+ *
+ * <p>没宣告的模式<b>在切换时直接跳过</b>，不是切进去再报错：
+ * 一个进得去、一用就说「后端不支持」的模式，比压根切不进去更让人困惑。
+ */
+const MODE_FEATURE: Record<Mode, string | null> = {
+  normal: null,
+  plan: 'plan',
+  team: 'team',
+}
+
+export function modeIsAvailable(mode: Mode, features: readonly string[]): boolean {
+  const needed = MODE_FEATURE[mode]
+  return needed === null || features.includes(needed)
+}
+
+/**
+ * 下一个可用的模式。
+ *
+ * <p>一圈都不可用时返回原地——后端只认基础协议时，Shift+Tab 就是个空操作，
+ * 而不是把用户卡在一个跑不了的模式上。
+ */
+export function nextMode(current: Mode, features: readonly string[]): Mode {
+  const start = MODE_CYCLE.indexOf(current)
+  for (let step = 1; step <= MODE_CYCLE.length; step++) {
+    const candidate = MODE_CYCLE[(start + step) % MODE_CYCLE.length]
+    if (modeIsAvailable(candidate, features)) return candidate
+  }
+  return current
+}
+
 export type ReadyInfo = {
   version: string
   workspace: string
@@ -132,7 +177,7 @@ export type ReadyInfo = {
   tools: ToolInfo[]
   /** 后端的角色名册。老后端不发，那就是空数组。 */
   roles: RoleInfo[]
-  /** 后端宣告的可选能力。'plan' 在里面才放出 /plan 入口。 */
+  /** 后端宣告的可选能力。没宣告的模式 Shift+Tab 会跳过（见 {@link nextMode}）。 */
   features: string[]
   workspaceWarning?: string
   /** 审计日志的位置。退出时的收尾信息要用它。 */
@@ -176,6 +221,11 @@ export type SessionState = {
    * 生命周期：plan_created 时指上，**用户发下一句话时清掉**。
    * 所以跑完的计划会一直留在屏幕底下，不会刚看完就消失。
    */
+  /**
+   * 下一句话按什么方式跑。**跨轮保持**——模式是用户表过的态，
+   * 不该因为跑完一轮就自己弹回去；那样他每说一句话都得重按一次。
+   */
+  mode: Mode
   activePlanKey: string | null
   /** 当前圆桌面板的 key。和计划一样，用户说下一句话时让位 */
   activeTeamKey: string | null
@@ -206,6 +256,7 @@ const EMPTY_STATE: SessionState = {
   step: 0,
   approval: null,
   planConfirm: null,
+  mode: 'normal',
   activePlanKey: null,
   activeTeamKey: null,
   tokens: 0,
@@ -349,6 +400,16 @@ export class SessionStore {
   }
 
   // ------------------------------------------------------------ 用户动作
+
+  /**
+   * 切到下一个模式（Shift+Tab）。
+   *
+   * <p><b>正忙时也允许切</b>：模式在<b>提交那一刻</b>才起作用，提前切好是很自然的用法
+   * ——这一轮还在跑，我已经想好下一句要走规划。拦住它只会让人以为按键失灵。
+   */
+  cycleMode(): void {
+    this.set({ mode: nextMode(this.state.mode, this.state.ready?.features ?? []) })
+  }
 
   submitPrompt(text: string): void {
     this.set({

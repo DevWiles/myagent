@@ -4,11 +4,15 @@ import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.server.AgentServer;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
-/** 程序入口：解析参数，然后交给 Repl（自带界面）或 AgentServer（外部界面）。 */
+/**
+ * 程序入口。
+ *
+ * <p><b>这个 jar 只有无头模式。</b>自带的终端界面（{@code Repl} 和 {@code cli/} 里
+ * 那一套渲染）已经删掉了——一个项目维护两套界面，代价不只是多写一遍：
+ * 同一个键位在两边行为不一致，比任何一种行为本身都更糟（那条教训记在 docs/devlog.md）。
+ * 界面现在只有一个，用 {@code myagent-tui} 启动。
+ */
 public final class Main {
 
     public static void main(String[] args) {
@@ -28,38 +32,24 @@ public final class Main {
             System.out.println("myagent " + Cli.VERSION);
             return;
         }
-        if (options.serve()) {
-            serve(options);      // 无头模式的日志继续走 stderr，由外部界面自己收
+        if (!options.serve()) {
+            // 不默认起服务：手滑敲一下 java -jar 不该在当前目录上悄悄开一个能读写文件、
+            // 能跑命令的服务。要什么就说什么
+            System.err.println("这个 jar 只有无头模式，不带界面。");
+            System.err.println("  起界面:  ./myagent-tui");
+            System.err.println("  起后端:  java -jar myagent.jar --serve");
+            System.err.println("用 --help 看全部参数。");
+            System.exit(2);
             return;
         }
-        redirectLogsToFile();
-        new Repl(options).run();
-    }
-
-    /**
-     * 交互模式下把 slf4j 的输出从 stderr 挪到文件。
-     *
-     * <p>不挪的话，任何一条 info 日志都会直接打进终端界面——全屏模式下更是直接把画面搅乱。
-     * 必须在<b>第一次拿 Logger 之前</b>设置，slf4j-simple 是在首次初始化时读这个属性的，
-     * 之后再改没用。所以这件事只能在 main 里、Repl 构造之前做。
-     */
-    private static void redirectLogsToFile() {
-        try {
-            Path dir = Path.of(System.getProperty("user.home"), ".myagent", "logs");
-            Files.createDirectories(dir);
-            System.setProperty("org.slf4j.simpleLogger.logFile",
-                    dir.resolve("myagent.log").toString());
-        } catch (IOException | RuntimeException e) {
-            // 建不了目录就还走 stderr。日志去向不值得为它挡住启动
-            System.err.println("警告: 日志文件建不了，继续输出到终端: " + e.getMessage());
-        }
+        serve(options);          // 日志走 stderr，由外部界面自己收
     }
 
     /** 无头模式。前台挂住，收到 SIGINT/SIGTERM 时把服务停干净。 */
     private static void serve(CliOptions options) {
         AgentServer server = new AgentServer(options, options.port());
 
-        // 安全检查和交互式模式同一套标准：不该在家目录/根目录上跑 agent
+        // 不该在家目录/根目录上跑 agent
         String rejection = server.workspaceRejection();
         if (rejection != null) {
             System.err.println("拒绝在此目录启动: " + options.workspace().toAbsolutePath());

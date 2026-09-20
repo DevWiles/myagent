@@ -27,6 +27,8 @@ export type Session = {
    * 后端没宣告 team 能力时不要调。`roles` 空数组表示让模型挑人。
    */
   team: (goal: string, roles: string[]) => void
+  /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */
+  cycleMode: () => void
   /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
   resumePlan: () => void
   /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
@@ -178,12 +180,18 @@ export function createSession(options: BackendOptions): Session {
       backend?.send({ t: "prompt", text })
     },
     plan(goal) {
-      store.submitPrompt(`/plan ${goal}`)
+      // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
+      // 常驻模式标识回答，而转录里紧跟着就是计划面板。
+      // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
+      store.submitPrompt(goal)
       backend?.send({ t: "plan", goal })
     },
     team(goal, roles) {
-      store.submitPrompt(roles.length === 0 ? `/team ${goal}` : `/team ${roles.join(" ")} ${goal}`)
+      store.submitPrompt(roles.length === 0 ? goal : `${roles.join(" ")} ${goal}`)
       backend?.send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
+    },
+    cycleMode() {
+      store.cycleMode()
     },
     resumePlan() {
       // 和 prompt 一样先记一条：从按回车到后端把计划捞回来有肉眼可见的停顿，

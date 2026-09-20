@@ -24,6 +24,7 @@ function stateOf(partial: {
         }
       : null,
     entries: partial.entries ?? [],
+    mode: 'normal' as const,
     activePlanKey: null,
     activeTeamKey: null,
     expanded: new Set(),

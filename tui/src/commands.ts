@@ -8,6 +8,12 @@
  * 而且 agent 可能当场动手改仓库——`/resume` 打上去，它会一本正经地
  * 去读仓库、翻提交记录，试图搞懂你要它「恢复」什么。
  *
+ * <h3>规划和圆桌为什么不在这张表里</h3>
+ * 它们不是命令，是<b>模式</b>（Shift+Tab 切，左下角常驻显示）。
+ * 同一句话在哪个模式下跑，是一个**看得见的状态**；而命令是转瞬即逝的动作——
+ * 敲完就没了，用户事后只能靠回忆确认「我刚才有没有加 /plan」。
+ * 两套入口并存的话还有个更糟的：屏幕左下角写着 normal，实际却跑了一份计划。
+ *
  * <h3>纯函数，不碰渲染</h3>
  * 和 `plan-layout`、`markdown-blocks` 同一个路子：命令能不能用取决于
  * 后端宣告了什么能力、有没有存档，这些组合用断言测比手动敲一遍可靠得多。
@@ -25,8 +31,6 @@ export type CommandContext = {
 
 export type CommandId =
   | "help"
-  | "plan"
-  | "team"
   | "continue"
   | "resume"
   | "resume-plan"
@@ -37,7 +41,14 @@ export type CommandId =
 type CommandSpec = {
   id: CommandId
   name: string
-  /** 参数占位符，菜单里显示；有这个的命令不带参数提交会被拦住。 */
+  /**
+   * 参数占位符，菜单里显示；有这个的命令不带参数提交会被拦住。
+   *
+   * <p><b>眼下没有任何内置命令声明它</b>——`/plan`、`/team` 改成模式之后，
+   * 剩下的命令要么不吃参数，要么参数是可选的（`/memory undo`、`/resume 2`，
+   * 它们不带参数也成立，所以不该声明）。这套判断留着不删：它是
+   * 「必须带参数」这条语义唯一的表达方式，下一条要参数的命令直接就能用。
+   */
   args?: string
   description: string
   /**
@@ -68,20 +79,6 @@ const SPECS: CommandSpec[] = [
     name: "/help",
     description: "看全部命令",
     anyFeature: [],
-  },
-  {
-    id: "plan",
-    name: "/plan",
-    args: "<目标>",
-    description: "先规划后执行：拆成任务依赖图，确认后逐个跑",
-    anyFeature: ["plan"],
-  },
-  {
-    id: "team",
-    name: "/team",
-    args: "<议题>",
-    description: "开一场圆桌：几个角色各把同一件事看一遍，最后合议（可先点人）",
-    anyFeature: ["team"],
   },
   {
     id: "continue",
@@ -194,7 +191,7 @@ function firstWord(text: string): string {
  * 首词之后剩下的部分，也就是参数。
  *
  * <p>菜单开着时按回车要执行**高亮那条**，但参数得从用户实际敲的字里取——
- * 他可能打的是 `/pl 把 README 补全`，高亮的是 `/plan`，参数是后面那句。
+ * 他可能打的是 `/mem undo`，高亮的是 `/memory`，参数是后面那句。
  */
 export function argsOf(text: string): string {
   const trimmed = text.trim()
@@ -210,7 +207,7 @@ export function looksLikeCommand(text: string): boolean {
  * 边打边筛：给当前这行输入该显示哪些候选。
  *
  * <p>一律按<b>前缀</b>筛，打到参数了也一样。第一版在「已经打到参数」时只留精确
- * 匹配，理由是「用户正在写 `/plan 把 README 补全`，摆五条候选是噪音」——
+ * 匹配，理由是「用户正在写 `/memory undo`，摆五条候选是噪音」——
  * 但那样 `/pl 把 README 补全` 的菜单会<b>整个消失</b>，而回车执行的是「高亮那条」，
  * 菜单一没，这条路就断了。名字打全了自然只剩一条，不用特殊照顾。
  */
@@ -311,7 +308,7 @@ export type Acceptance =
  * 让他为了执行一条看得见的命令而先去按 Tab 补全，是白加的一步。
  *
  * <p>参数从<b>用户实际敲的字</b>里取，不是从高亮那条里取——他可能打的是
- * `/pl 把 README 补全`，高亮的是 `/plan`，参数得是后面那句。
+ * `/mem undo`，高亮的是 `/memory`，参数得是后面那句。
  */
 export function acceptSelected(
   entries: readonly CommandEntry[],
@@ -334,9 +331,10 @@ export function acceptSelected(
 }
 
 /**
- * 把 `/team` 后面那串东西拆成「点了谁」和「议题」。
+ * team 模式下，把输入拆成「点了谁」和「议题」。
  *
- * <p>只认**开头连续**的角色名，遇到第一个不是角色的词就停——
+ * <p>斜杠命令没了，这是「我想让审查和验证来看」唯一的入口：team 模式下
+ * 开头连着的角色名就算点名。只认**开头连续**的，遇到第一个不是角色的词就停——
  * 不然「reviewer 看看 explorer 这个类写得怎么样」里的第二个词也会被当成点名，
  * 而它其实是议题的一部分。
  *

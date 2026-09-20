@@ -114,15 +114,14 @@ public final class AgentServer extends WebSocketServer {
     /**
      * 当前往哪一份会话存档里写，以及这段对话是什么时候开始的。
      *
-     * <p>和 {@link dev.wiles.myagent.Repl} 里那两个字段是同一回事，理由也一样。
-     * {@code volatile}：存盘发生在 worker 线程，换 id 发生在连接线程。
+     * <p>{@code volatile}：存盘发生在 worker 线程，换 id 发生在连接线程。
      */
     private volatile String sessionId = SessionId.create(System.currentTimeMillis());
     private volatile long sessionStartedAt = System.currentTimeMillis();
     /**
      * 审计轨迹。
      *
-     * 以前只有内置 CLI（{@link dev.wiles.myagent.Repl}）建审计，无头模式一条记录都不留——
+     * 早先只有那套（已经删掉的）自带终端界面会建审计，无头模式一条记录都不留——
      * 也就是说用外部界面时，agent 改了什么文件、跑了什么命令、你批准过什么，全都查无对证。
      * 那是个缺口，不是有意的设计。
      */
@@ -177,15 +176,15 @@ public final class AgentServer extends WebSocketServer {
         this.approval = new RemoteApproval(this::publish, () -> !getConnections().isEmpty());
         this.planConfirm = new PlanConfirmation(this::publish, () -> !getConnections().isEmpty());
 
-        // 工具拿到的是**包了审计的**审批策略，和 Repl 的做法一致：
-        // 每次批准/拒绝都留一条记录，否则事后没法回答「这个文件是谁同意改的」
+        // 工具拿到的是**包了审计的**审批策略：每次批准/拒绝都留一条记录，
+        // 否则事后没法回答「这个文件是谁同意改的」
         this.memory = MemoryStore.inUserHome();
         this.sessions = SessionStore.inUserHome();
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace, memory)
                 : BuiltinTools.createDefault(workspace, audit.audited(approval), memory);
 
-        // 索引扫一次就定，理由同 Repl：它是 history 的第 0 条，不能中途换
+        // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
         this.agent = config.hasApiKey()
                 ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
@@ -535,9 +534,9 @@ public final class AgentServer extends WebSocketServer {
     }
 
     /**
-     * 先规划后执行，无头版。和终端版 {@code Repl.runPlan} 是同一套三幕流程：
-     * 规划 → 让界面确认 → 逐个任务跑，只是「给用户看」换成了「发事件」，
-     * 「读一行 y/n」换成了 {@link PlanConfirmation}。
+     * 先规划后执行。三幕：规划 → 让界面确认 → 逐个任务跑。
+     * 编排本身归 {@link PlanExecuteAgent}，这儿只负责把过程翻译成事件发出去，
+     * 以及用 {@link PlanConfirmation} 等界面回一句「跑不跑」。
      */
     private void handlePlan(WebSocket conn, String goal) {
         if (planner == null) {
@@ -561,8 +560,9 @@ public final class AgentServer extends WebSocketServer {
      * <p>和 {@code plan} 一样先占 busy 再丢后台：几席加合议是好几次完整的子循环，
      * 期间再来一条 prompt 会把两段历史搅在一起。
      *
-     * <p><b>没有确认那一幕</b>。计划要确认的是「怎么拆」，圆桌要确认的只是「派谁」，
-     * 而名单在 {@code team_started} 那一帧就画出去了，用户不满意按 Esc 就是了。
+     * <p><b>没有确认那一幕</b>。理由和终端那边一样：计划要确认的是「怎么拆」，
+     * 圆桌要确认的只是「派谁」，而名单在 {@code team_started} 那一帧就画出去了，
+     * 用户不满意按 Esc 就是了。
      */
     private void handleTeam(WebSocket conn, String goal, List<String> roleIds) {
         if (roundtable == null) {
@@ -719,8 +719,8 @@ public final class AgentServer extends WebSocketServer {
     /**
      * 把一段存档立成当前会话，并广播回执。
      *
-     * <p>{@code continue} 和 {@code session_resume} 都落到这儿。抽出来的理由和终端
-     * 那边的 {@code Repl.adopt} 一样：「换 sessionId 和 sessionStartedAt」漏了不会报错，
+     * <p>{@code continue} 和 {@code session_resume} 都落到这儿。抽出来是因为
+     * 「换 sessionId 和 sessionStartedAt」漏了不会报错，
      * 只会让接着聊的内容另起一份新档，而原来那段永远停在被接回来的那一刻。
      *
      * <p>这条是<b>广播</b>而不是定向回执：连着的每个界面都得知道当前会话被换掉了，
@@ -729,7 +729,7 @@ public final class AgentServer extends WebSocketServer {
     private void adopt(SessionSnapshot snapshot) {
         // 段一起带回来，续聊时不用重新 map 一遍
         int restored = agent.restore(snapshot.restorable(), snapshot.usableCompaction());
-        // 账本也接回来，理由同 Repl：对话是接着的，账就不该归零
+        // 账本也接回来：对话是接着的，账就不该归零
         meter.reset();
         meter.seed(snapshot.ledger());
         sessionId = snapshot.id();
@@ -934,7 +934,7 @@ public final class AgentServer extends WebSocketServer {
      * 把工具调用记进审计。
      *
      * 参数只在 ToolStarted 上有、结果只在 ToolFinished 上有，所以得把参数暂存一手
-     * 等结果到了再一起落盘（和 {@link dev.wiles.myagent.Repl} 的做法一致）。
+     * 等结果到了再一起落盘。
      * 工具调用是严格串行的，所以一个字段就够，不需要按流水号建表。
      */
     private void recordToAudit(AgentEvent event) {

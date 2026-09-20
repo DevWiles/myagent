@@ -58,10 +58,12 @@ cd 你要让它干活的目录
 MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 ```
 
-想看它到底怎么转的，再把日志打开——交互模式下日志在 `~/.myagent/logs/myagent.log`：
+想看它到底怎么转的，再把日志打开。后端日志走 stderr，而界面把 stderr 收进一个
+只在启动失败时才露面的内存环——所以要看得自己指一个文件：
 
 ```bash
-MYAGENT_JAVA_OPTS="-Dorg.slf4j.simpleLogger.defaultLogLevel=debug" \
+MYAGENT_JAVA_OPTS="-Dorg.slf4j.simpleLogger.logFile=/tmp/myagent.log \
+                   -Dorg.slf4j.simpleLogger.defaultLogLevel=debug" \
 MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 ```
 
@@ -75,12 +77,23 @@ MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 把 src/ 下所有的 TODO 注释找出来，整理成一张表
 ```
 
-| 输入 | 作用 |
+怎么跑这句话，由**模式**决定——`Shift+Tab` 循环切换，当前模式常驻在左下角、模型名下方：
+
+| 模式 | 这一句话会怎么跑 |
 |---|---|
-| `/plan <目标>` | 先出计划、确认之后再执行（后端宣告了 `plan` 能力才生效） |
-| `/team <议题>` | 开一场**圆桌**：几个角色各把同一件事看一遍，最后合议。<br>`/team reviewer verifier <议题>` 可以自己点人，不点就让模型挑 |
-| `/resume` | 接着上次没跑完的计划继续 |
+| `normal` | 直接对话，一轮 ReAct（看着像好几步的活，后端仍可能提议先拆个计划） |
+| `plan` | 先出计划、确认之后逐个跑 |
+| `team` | 开一场**圆桌**：几个角色各把同一件事看一遍，最后合议。<br>开头连着写角色名就是点人：`reviewer verifier 这个包有没有问题`；不写就让模型挑 |
+
+模式是**状态**不是命令——它写在屏幕上，不用每句话都重敲一遍，也不会出现「我刚才到底加没加
+`/plan`」这种事。后端没宣告的模式会被跳过，切不进去。
+
+| 按键 / 输入 | 作用 |
+|---|---|
+| `Shift+Tab` | 切换模式 |
+| `/resume` | 从会话历史里挑一段接着聊（`/resume-plan` 接着跑没跑完的计划） |
 | `Esc` | 中断当前这一轮 |
+| `Ctrl-O` | 展开工具调用详情 |
 | `Ctrl-C` | 退出，并在终端留下一行会话摘要 |
 
 常用启动参数：
@@ -92,8 +105,13 @@ MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 ./myagent-tui --rebuild          # 强制重新 build 后端
 ```
 
-后端也能单独用。`java -jar target/myagent.jar` 进自带的命令行界面（不需要 Bun），
-`--serve` 则是给外部界面用的无头模式。
+后端自己不画任何界面：`java -jar target/myagent.jar --serve` 起一个只听本机的
+WebSocket 服务，握手信息（端口 + 一次性 token）打在 stdout。照着
+[`docs/protocol.md`](docs/protocol.md) 可以自己写一个界面接上去。
+
+> 早先还有一套自带的终端界面（`java -jar` 直接进），已经删了。一个项目维护两套界面，
+> 代价不只是多写一遍——同一个键位在两边行为不一致，比任何一种行为本身都更糟，
+> devlog 里有一条就是这么踩出来的。
 
 ## 安全边界
 
@@ -120,21 +138,21 @@ src/main/java/dev/wiles/myagent/
   context/    上下文窗口管理、token 估算
   audit/      审计日志
   server/     --serve 的 WebSocket 服务端
-  cli/        自带的命令行界面（不走前端那套）
+  cli/        命令行参数解析（界面在 tui/，这里只剩 Cli / CliOptions）
 tui/src/
   main.tsx    入口：renderer、信号、退出收尾
   session.ts  Solid 适配层（33ms 尾沿节流）
   store.ts    与框架无关的会话状态机
   backend.ts  拉起 java 子进程、连 WebSocket
-  components/ 界面组件
+  components/ 界面组件（ModeLine 是左下角那行模式标识）
 docs/protocol.md   前后端契约
 ```
 
 ## 开发
 
 ```bash
-mvn test                       # 后端（925 个测试）
-cd tui && bun test             # 界面（243 个测试）
+mvn test                       # 后端（789 个测试）
+cd tui && bun test             # 界面（255 个测试）
 cd tui && bun run typecheck
 cd tui && bun run cover        # 重新生成上面那张封面图
 ```

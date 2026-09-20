@@ -1,14 +1,15 @@
 package dev.wiles.myagent.cli;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * 命令行参数解析。
  *
- * 手写而不是引第三方库（picocli 之类）：参数就这么几个，
+ * <p>手写而不是引第三方库（picocli 之类）：参数就这么几个，
  * 自己写一个 switch 比引一个几百 KB 的依赖划算。
+ *
+ * <p>自带的终端界面删掉之后，这里只剩无头模式的参数。那些只影响终端渲染的开关
+ * （颜色、转圈、全屏、鼠标）一并去掉了——见 {@link CliOptions} 的类注释。
  */
 public final class Cli {
 
@@ -22,31 +23,20 @@ public final class Cli {
         String model = null;
         boolean readOnly = false;
         boolean unsafe = "1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"));
-        boolean color = true;
-        boolean spinner = true;
-        boolean mouse = false;
-        boolean clearScreen = true;
-        boolean fullscreen = false;
         boolean help = false;
         boolean version = false;
         boolean serve = false;
         int port = 0;
-        List<String> rest = new ArrayList<>();
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
                 case "-h", "--help" -> help = true;
                 case "-v", "--version" -> version = true;
-                // -p/--plan 是老名字，留着不打断肌肉记忆；帮助里只写 --readonly，
-                // 免得和「先规划后执行」的 /plan 命令混淆
+                // -p/--plan 是只读模式的老名字。界面还在传它（tui/src/backend.ts），
+                // 而且老脚本里也可能有——改掉它得两边同时改，不值当
                 case "-r", "--readonly", "-p", "--plan" -> readOnly = true;
                 case "--unsafe" -> unsafe = true;
-                case "--no-color" -> color = false;
-                case "--no-spinner" -> spinner = false;
-                case "--mouse" -> mouse = true;
-                case "--no-clear" -> clearScreen = false;
-                case "--fullscreen", "-f" -> fullscreen = true;
                 case "--serve" -> serve = true;
                 case "--port" -> {
                     requireValue(args, i, arg);
@@ -60,17 +50,15 @@ public final class Cli {
                     requireValue(args, i, arg);
                     model = args[++i];
                 }
-                default -> {
-                    if (arg.startsWith("-")) {
-                        throw new IllegalArgumentException("未知参数: " + arg + "（用 --help 查看用法）");
-                    }
-                    rest.add(arg);        // 位置参数拼成一次性提示词
-                }
+                default -> throw new IllegalArgumentException(arg.startsWith("-")
+                        ? "未知参数: " + arg + "（用 --help 查看用法）"
+                        // 位置参数以前是「一次性提示词」，跑完就退。自带界面删掉之后
+                        // 没有任何东西会读它——静默忽略等于让人对着一个不干活的命令发呆
+                        : "多余的参数: " + arg + "（这个版本不接受位置参数，"
+                                + "要对话请用 myagent-tui 起界面）");
             }
         }
-        return new CliOptions(workspace, model, readOnly, unsafe, color, spinner, mouse,
-                clearScreen, fullscreen,
-                rest.isEmpty() ? null : String.join(" ", rest), help, version, serve, port);
+        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port);
     }
 
     private static int parsePort(String value) {
@@ -96,38 +84,28 @@ public final class Cli {
         return """
                 myagent %s —— 一个从零手写的编码 agent
 
+                这个 jar 是后端，自己不画任何界面。界面用 myagent-tui 启动，
+                它会按需 build 这个 jar 再把界面拉起来。
+
                 用法:
-                  myagent [选项]              进入交互模式
-                  myagent [选项] "任务描述"    执行一次就退出
+                  java -jar myagent.jar --serve [选项]
 
                 选项:
+                      --serve          起一个只监听 127.0.0.1 的 WebSocket 服务。
+                                       握手信息（端口 + 一次性 token）以一行 JSON 打在 stdout
+                      --port <端口>    监听端口，默认 0（系统分配，推荐）
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
-                  -r, --readonly       只读模式，只给它查看类工具，不能改文件和执行命令
+                  -r, --readonly       只读模式：写文件和执行命令的工具压根不注册
                       --unsafe         跳过工作区安全检查（危险）
-                      --no-color       关闭彩色输出
-                      --no-spinner     关闭转圈状态行（排查终端渲染问题用）
-                  -f, --fullscreen     占用整个终端（退出后恢复原样）。方向键/滚轮滚动内容，
-                                       翻输入历史改用 Ctrl-P / Ctrl-N
-                      --no-clear       启动时不清屏，保留上文
-                      --mouse          开启鼠标点击展开（代价：终端的滚动和拖拽选中
-                                       都会被程序接管，基本不可用，不建议开）
                   -h, --help           显示本帮助
                   -v, --version        显示版本
-
-                无头模式（供外部界面驱动，自己不画任何东西）:
-                      --serve          只监听 127.0.0.1 的 WebSocket，不进终端交互。
-                                       握手信息（端口 + 一次性 token）以一行 JSON 打在 stdout
-                      --port <端口>    无头模式监听端口，默认 0（系统分配，推荐）
 
                 配置:
                   ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-flash"}
                   环境变量 DEEPSEEK_API_KEY 优先级高于配置文件
 
-                示例:
-                  myagent                          在当前目录进入交互模式
-                  myagent -p "这个项目怎么组织的"    只读模式问一个问题就退出
-                  myagent -d ~/code/demo           指定工作区
+                协议见 docs/protocol.md——照着它可以自己写一个界面。
                 """.formatted(VERSION);
     }
 }
