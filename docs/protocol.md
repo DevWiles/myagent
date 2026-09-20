@@ -140,10 +140,55 @@ token 随进程生灭，每次启动都不一样。
 
 | `t` | 字段 |
 |---|---|
-| `approval_request` | `id` `action` `detail` `reason` |
+| `approval_request` | `id` `kind` `action` `detail` `reason` `preview` `origin` `suggestions[]` `preferred` |
 
 界面必须回 `approval_reply`。**不回就卡着**——后端的 agent 线程同步阻塞在这儿，
 等待上限 600 秒，超时按拒绝。最后一个连接断开时后端会自行按拒绝放行。
+
+```json
+{
+  "t": "approval_request",
+  "id": 1,
+  "kind": "bash",
+  "action": "执行命令",
+  "detail": "myfaketool --check",
+  "reason": "未知命令 myfaketool，无法判断其影响",
+  "preview": "",
+  "origin": "",
+  "suggestions": [
+    { "label": "myfaketool --check", "patterns": ["myfaketool --check"] },
+    { "label": "myfaketool *",       "patterns": ["myfaketool *"] }
+  ],
+  "preferred": 0
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `kind` | `bash` \| `write`。机器键，决定 `detail` 是命令还是路径，也决定 `preview` 怎么画 |
+| `action` | 给人看的动作名。**会改措辞，别拿它当标识** |
+| `detail` | 命令原文，或工作区相对路径 |
+| `reason` | 为什么要问。同时给用户和模型看 |
+| `preview` | 写文件时是 unified diff 正文，没有就是空串 |
+| `origin` | 计划/圆桌里是「编码者 · t3」，单轮对话里是空串 |
+| `suggestions` | 「以后都同意」可以存成哪几条规则，**从紧到松**。空数组表示这次记不成规则 |
+| `preferred` | 默认选中第几档 |
+
+**`patterns` 才是回给后端的东西，`label` 只用来显示。** 多段命令（`a && b`）一档里会有
+多条 pattern，一段一条——少回一条的话，用户按了「以后都同意」，下次还会被问。
+
+**后端只接受它自己提议过的 pattern。** 回一条没在 `suggestions` 里出现过的
+（比如 `*`），后端当它没回：这次照批，但不存规则。所以界面不必、也不该
+自己拼规则字符串。
+
+存下来的规则落在 `~/.myagent/policy.json`，跨会话有效，`reset` 不会清掉它——
+那是用户挑定并存过盘的东西，不是这一场会话的临时授权。撤销靠手改那个文件，
+改完立刻生效，不用重启。
+
+> **没有「本会话都同意」这档了。** 老版本的 `always` 是一个全局开关：按一次，
+> 这个会话里所有危险动作全部静默放行。它治的是「被问烦了」，代价是把整道防线
+> 关掉——为了批一条 `mvn test`，顺手授权了 `curl` 和 `rm`。
+> 现在 `always` 回的是一条**有范围的规则**，治的还是同一个病，但不靠少看东西来治。
 
 ### 3.4 先规划后执行（feature: `plan`）
 
@@ -613,7 +658,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `plan` | `goal` | 先规划后执行 |
 | `team` | `goal` `roles[]`（可选） | 开一场圆桌（feature: `team`），见 3.14。`roles` 不传就让模型挑 |
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
-| `approval_reply` | `id` `decision`: `yes` \| `no` \| `always` | 回应 `approval_request` |
+| `approval_reply` | `id` `decision`: `yes` \| `no` \| `always`，`rules[]`（可选），`feedback`（可选） | 回应 `approval_request`。见 3.3 |
 | `cancel` | — | 中断当前这一轮 |
 | `resume_plan` | — | 接着跑上次没跑完的计划，见 3.7。没有存档时回 `error` |
 | `resume` | — | `resume_plan` 的老名字，仍然接受。那会儿只有计划能续，现在 `/resume` 在终端里指的是挑会话，所以协议这边改叫 `resume_plan`；改名不该让还没更新的界面连不上 |
@@ -709,3 +754,10 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
    这是用户最该注意的一刻；`plan_tasks_added` 只是计划照常展开。
 9. **「接着跑」要常驻，不是只在启动时提一句**。`cancel` 之后存档还在，
    用户随时可能回来接着跑；只在首帧提示的话，他中断一次就再也找不到入口了。
+10. **确认框的交互态别放在组件里**。矮终端上那个框可能压根不渲染，而后端还等着。
+    状态跟着组件走的话，那种终端上按 `a` 会没有任何反应，用户不知道为什么。
+    按键处理也是同一条纪律——这两件事从 Ink 版起就吃过亏。
+11. **`preview` 有多长就画多长是不行的**，它会把上面的对话顶出屏幕。
+    裁了要说「还有 N 行没显示」：悄悄少给的时候，人以为自己看到了全部，然后按了同意。
+12. **`suggestions` 为空时别画「以后都同意」那个键**。空数组是后端在说
+    「这次记不成规则」，画出来只会让用户按一个没有反应的键。
