@@ -22,6 +22,11 @@ export type Session = {
   prompt: (text: string) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string) => void
+  /**
+   * 开一场圆桌：几个角色各把同一件事看一遍，最后合议。
+   * 后端没宣告 team 能力时不要调。`roles` 空数组表示让模型挑人。
+   */
+  team: (goal: string, roles: string[]) => void
   /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
   resumePlan: () => void
   /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
@@ -175,6 +180,10 @@ export function createSession(options: BackendOptions): Session {
     plan(goal) {
       store.submitPrompt(`/plan ${goal}`)
       backend?.send({ t: "plan", goal })
+    },
+    team(goal, roles) {
+      store.submitPrompt(roles.length === 0 ? `/team ${goal}` : `/team ${roles.join(" ")} ${goal}`)
+      backend?.send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
     },
     resumePlan() {
       // 和 prompt 一样先记一条：从按回车到后端把计划捞回来有肉眼可见的停顿，

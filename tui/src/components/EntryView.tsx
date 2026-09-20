@@ -71,6 +71,16 @@ export function EntryView(props: EntryViewProps) {
       <Match when={props.entry.kind === "plan" ? props.entry : null}>
         {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
       </Match>
+      <Match when={props.entry.kind === "team" ? props.entry : null}>
+        {(entry) => (
+          <TeamEntry
+            goal={entry().team.goal}
+            status={entry().team.status}
+            seats={entry().team.seats.length}
+            silent={entry().team.silent ?? 0}
+          />
+        )}
+      </Match>
     </Switch>
   )
 }
@@ -471,6 +481,27 @@ function CompactedEntry(props: { before: number; after: number; summarized: bool
     <box paddingTop={1}>
       <text fg={theme.subtle}>
         — {what()} {props.before} → {props.after} tokens（原文都在存档里） —
+      </text>
+    </box>
+  )
+}
+
+/**
+ * 转录里的圆桌痕迹。
+ *
+ * <p>和面板是分工：面板是当下那场的活状态，这条是往回滚还能找到的历史。
+ * <b>缺席几席要写在这儿</b>——往回翻的时候，这行是判断那份合议靠不靠谱的唯一线索。
+ */
+function TeamEntry(props: { goal: string; status: string; seats: number; silent: number }) {
+  const theme = useTheme()
+  return (
+    <box flexDirection="column" paddingTop={1} border={["left"]} borderColor={theme.border} paddingLeft={1}>
+      <text fg={theme.heading} attributes={TextAttributes.BOLD}>
+        圆桌：{props.goal}
+      </text>
+      <text fg={props.silent > 0 ? theme.warning : theme.subtle}>
+        状态 {props.status} · {props.seats} 位
+        {props.silent > 0 ? ` · 缺席 ${props.silent}（合议少了那个视角）` : ""}
       </text>
     </box>
   )

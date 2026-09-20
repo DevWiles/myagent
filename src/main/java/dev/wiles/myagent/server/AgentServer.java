@@ -39,6 +39,13 @@ import dev.wiles.myagent.plan.PlanListener;
 import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.PlanStore;
+import dev.wiles.myagent.plan.AgentRole;
+import dev.wiles.myagent.plan.AgentRoles;
+import dev.wiles.myagent.team.Cast;
+import dev.wiles.myagent.team.ModelCastPicker;
+import dev.wiles.myagent.team.Roundtable;
+import dev.wiles.myagent.team.TeamListener;
+import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.Workspace;
@@ -53,6 +60,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -133,6 +141,9 @@ public final class AgentServer extends WebSocketServer {
      */
     private final PlanExecuteAgent planAgent;
 
+    /** 圆桌。没 API key 时是 null，和 planAgent 一样。 */
+    private final Roundtable roundtable;
+
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
 
@@ -199,6 +210,13 @@ public final class AgentServer extends WebSocketServer {
                         workspace.root(), PlanStore.inUserHome())
                         .approval(plan -> planConfirm.confirm())
                         .listener(new ProtocolPlanView());
+        // 席位和挑人各用一个客户端：和规划器另起一个是同一个理由，
+        // 共用的话取消其中一个会把另一个也掐了
+        this.roundtable = config.hasApiKey()
+                ? new Roundtable(newClient(), tools, workspace.root(),
+                        new ModelCastPicker(newClient()))
+                        .listener(new ProtocolTeamView())
+                : null;
     }
 
 /**
@@ -306,6 +324,46 @@ public final class AgentServer extends WebSocketServer {
         }
     }
 
+    /** 圆桌怎么发到线上。 */
+    private final class ProtocolTeamView implements TeamListener {
+
+        @Override
+        public void onCastChosen(String goal, Cast cast) {
+            audit.note("team_cast", "goal", goal + " · " + String.join("+", cast.ids()));
+            publish(Protocol.encodeTeamStarted(goal, cast));
+        }
+
+        @Override
+        public void onSeatStarted(Task seat) {
+            audit.taskStarted(seat);
+            publish(Protocol.encodeSeatStarted(seat));
+        }
+
+        @Override
+        public void onSeatFinished(Task seat) {
+            audit.taskFinished(seat);
+            publish(Protocol.encodeSeatFinished(seat));
+        }
+
+        @Override
+        public void onSynthesisStarted(Task synthesis) {
+            publish(Protocol.encodeSynthesisStarted());
+        }
+
+        @Override
+        public void onAgentEvent(Task seat, AgentEvent event) {
+            // 同 ProtocolPlanView：不写全限定会解析到本类那个同名方法，自己递归调自己
+            AgentServer.this.onAgentEvent(event);
+        }
+
+        @Override
+        public void onFinished(TeamResult result) {
+            audit.note("team_finished", "status",
+                    result.status() + " · " + result.spoke() + "/" + result.seats().size());
+            publish(Protocol.encodeTeamFinished(result));
+        }
+    }
+
     private static String newToken() {
         byte[] bytes = new byte[16];
         new SecureRandom().nextBytes(bytes);
@@ -410,6 +468,8 @@ public final class AgentServer extends WebSocketServer {
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
             case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
+            case "team" -> handleTeam(conn, Protocol.str(cmd, "goal", "").trim(),
+                    Protocol.strings(cmd, "roles"));
             // resume 是老名字（那会儿只有计划能续）。终端那边已经改叫 /resume-plan，
             // 协议这边两个都认：改名不该让还没更新的界面连不上
             case "resume", "resume_plan" -> handleResume(conn);
@@ -493,6 +553,54 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.event("busy").put("busy", true));
         worker.submit(() -> runPlan(goal));
+    }
+
+    /**
+     * 开一场圆桌。
+     *
+     * <p>和 {@code plan} 一样先占 busy 再丢后台：几席加合议是好几次完整的子循环，
+     * 期间再来一条 prompt 会把两段历史搅在一起。
+     *
+     * <p><b>没有确认那一幕</b>。计划要确认的是「怎么拆」，圆桌要确认的只是「派谁」，
+     * 而名单在 {@code team_started} 那一帧就画出去了，用户不满意按 Esc 就是了。
+     */
+    private void handleTeam(WebSocket conn, String goal, List<String> roleIds) {
+        if (roundtable == null) {
+            send(conn, error("没有配置 API key，无法开圆桌"));
+            return;
+        }
+        if (goal.isEmpty()) {
+            return;
+        }
+        List<AgentRole> named = new ArrayList<>();
+        for (String id : roleIds) {
+            AgentRole role = AgentRoles.find(id).orElse(null);
+            if (role == null) {
+                // 界面传了个不认识的 id：定向回给它一条错误，而不是默默当成没点人——
+                // 不然用户看到的是「我明明点了人，圆桌上却是别人」
+                send(conn, error("没有名为 " + id + " 的角色"));
+                return;
+            }
+            named.add(role);
+        }
+        if (!busy.compareAndSet(false, true)) {
+            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            return;
+        }
+        publish(Protocol.event("busy").put("busy", true));
+        worker.submit(() -> runTeam(goal, named));
+    }
+
+    private void runTeam(String goal, List<AgentRole> named) {
+        long startedAt = System.currentTimeMillis();
+        try {
+            roundtable.hold(goal, named, options.readOnly());
+        } catch (RuntimeException e) {
+            log.error("圆桌跑挂了", e);
+            publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
+        } finally {
+            settleBusy(startedAt);
+        }
     }
 
     /**
@@ -687,6 +795,9 @@ public final class AgentServer extends WebSocketServer {
         // 计划模式下要叫停的那三处（调度器、执行体、规划器）归编排层管了
         if (planAgent != null) {
             planAgent.cancel();
+        }
+        if (roundtable != null) {
+            roundtable.cancel();                // 圆桌那三处（不再开席、掐当前席、掐挑人）归它管
         }
         planConfirm.cancelPending();            // 卡在计划确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行

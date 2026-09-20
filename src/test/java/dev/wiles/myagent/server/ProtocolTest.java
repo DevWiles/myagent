@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.plan.AgentRoles;
+import dev.wiles.myagent.team.Cast;
+import dev.wiles.myagent.team.TeamResult;
+import dev.wiles.myagent.team.TeamStatus;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.TaskGraph;
@@ -208,6 +211,17 @@ class ProtocolTest {
     }
 
     @Test
+    @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
+    void announcesFeatures() {
+        assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("team"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
+    }
+
+    @Test
     @DisplayName("每个任务都带上派了谁——type 也留着，老界面照样看得懂")
     void encodesRoleAlongsideType() {
         Plan plan = new Plan("挑毛病", TaskGraph.of(List.of(
@@ -232,6 +246,89 @@ class ProtocolTest {
         assertEquals("VERIFICATION", started.get("taskType").asText());
     }
 
+    // ── 圆桌 ────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("开场那帧带名单和理由——这是花钱之前用户唯一一眼")
+    void teamStartedCarriesTheCast() {
+        ObjectNode n = Protocol.encodeTeamStarted("这个包有没有问题",
+                Cast.of(List.of(AgentRoles.REVIEWER, AgentRoles.VERIFIER), "一个挑毛病一个核事实"));
+
+        assertEquals("team_started", n.get("t").asText());
+        assertEquals("这个包有没有问题", n.get("goal").asText());
+        assertEquals("一个挑毛病一个核事实", n.get("reason").asText());
+        assertEquals(2, n.get("seats").size());
+        assertEquals("reviewer", n.get("seats").get(0).get("role").asText());
+        assertEquals("审查", n.get("seats").get(0).get("roleTitle").asText());
+        assertEquals("s1", n.get("seats").get(0).get("id").asText());
+    }
+
+    @Test
+    @DisplayName("一席了结带上正文和状态，界面才能把它和合议并排显示")
+    void seatFinishedCarriesTheOpinion() {
+        Task seat = new Task("s1", "以审查的视角看", AgentRoles.REVIEWER, List.of(), "给出清单");
+        seat.start();
+        seat.succeed("发现 3 处问题");
+
+        ObjectNode n = Protocol.encodeSeatFinished(seat);
+
+        assertEquals("team_seat_finished", n.get("t").asText());
+        assertEquals("s1", n.get("seatId").asText());
+        assertEquals("SUCCEEDED", n.get("status").asText());
+        assertEquals("发现 3 处问题", n.get("opinion").asText());
+        assertTrue(n.get("error").isNull());
+    }
+
+    @Test
+    @DisplayName("哑火那席也发结束帧，带上原因——不然界面上它永远转圈")
+    void silentSeatStillReportsWhy() {
+        Task seat = new Task("s2", "以验证的视角看", AgentRoles.VERIFIER, List.of(), "跑测试");
+        seat.start();
+        seat.fail("命令被拒绝");
+
+        ObjectNode n = Protocol.encodeSeatFinished(seat);
+
+        assertEquals("FAILED", n.get("status").asText());
+        assertEquals("命令被拒绝", n.get("error").asText());
+        assertTrue(n.get("opinion").isNull());
+    }
+
+    @Test
+    @DisplayName("收工帧要能区分「全员到齐」和「缺了一席」——两者的合议长得一模一样")
+    void teamFinishedDistinguishesPartial() {
+        Task seat = new Task("s1", "以审查的视角看", AgentRoles.REVIEWER, List.of(), "清单");
+        seat.start();
+        seat.succeed("说了点什么");
+        Task silent = new Task("s2", "以验证的视角看", AgentRoles.VERIFIER, List.of(), "跑测试");
+        silent.start();
+        silent.fail("挂了");
+        Task verdict = new Task("verdict", "合议", AgentRoles.ANALYST, List.of(), "三段");
+        verdict.start();
+        verdict.succeed("一致: …");
+
+        ObjectNode n = Protocol.encodeTeamFinished(new TeamResult("议题",
+                Cast.of(List.of(AgentRoles.REVIEWER, AgentRoles.VERIFIER), "x"),
+                List.of(seat, silent), verdict, TeamStatus.PARTIAL));
+
+        assertEquals("PARTIAL", n.get("status").asText());
+        assertEquals(1, n.get("spoke").asInt());
+        assertEquals(1, n.get("silent").asInt());
+        assertEquals("一致: …", n.get("verdict").asText());
+    }
+
+    @Test
+    @DisplayName("界面传来的角色数组：缺了、类型不对、混了空串，都不能让服务端崩")
+    void roleArrayIsParsedDefensively() {
+        ObjectNode cmd = Protocol.mapper().createObjectNode();
+        assertEquals(List.of(), Protocol.strings(cmd, "roles"), "没这个字段就是没点人");
+
+        cmd.put("roles", "reviewer");
+        assertEquals(List.of(), Protocol.strings(cmd, "roles"), "不是数组也不该崩");
+
+        cmd.putArray("roles").add("reviewer").add("").add(" verifier ");
+        assertEquals(List.of("reviewer", "verifier"), Protocol.strings(cmd, "roles"));
+    }
+
     @Test
     @DisplayName("首帧把整份名册发过去，界面不用自己维护一张角色表")
     void readyCarriesTheRoster() {
@@ -244,15 +341,5 @@ class ProtocolTest {
         }
         // 界面要靠 mutates 之类的字段做区分，不能全靠 id 硬编码
         assertTrue(roles.findValuesAsText("id").contains("reviewer"), roles.toString());
-    }
-
-    @Test
-    @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
-    void announcesFeatures() {
-        assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
     }
 }

@@ -883,3 +883,106 @@ describe("长期记忆清单", () => {
     expect(notice.text).toBe("没有自动记录可清。")
   })
 })
+
+// ------------------------------------------------------------ 圆桌
+
+function teamOf(store: SessionStore) {
+  const entry = store.getSnapshot().entries.find(e => e.kind === 'team')
+  if (!entry || entry.kind !== 'team') throw new Error('没有圆桌面板')
+  return entry.team
+}
+
+function teamStarted(): ServerEvent {
+  return {
+    t: 'team_started',
+    goal: '这个包有没有问题',
+    reason: '一个挑毛病，一个核事实',
+    seats: [
+      { id: 's1', role: 'reviewer', roleTitle: '审查', summary: '挑毛病', status: 'PENDING' },
+      { id: 's2', role: 'verifier', roleTitle: '验证', summary: '核事实', status: 'PENDING' },
+    ],
+  }
+}
+
+describe('圆桌面板', () => {
+  test('开场帧落成一条 team entry，名单和理由都留着', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+
+    const team = teamOf(store)
+    expect(team.goal).toBe('这个包有没有问题')
+    expect(team.reason).toBe('一个挑毛病，一个核事实')
+    expect(team.seats.map(s => s.roleTitle)).toEqual(['审查', '验证'])
+    expect(team.status).toBe('CREATED')
+  })
+
+  test('席位状态就地更新，不会互相串', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    feed(store, { t: 'team_seat_started', seatId: 's1', role: 'reviewer', roleTitle: '审查' })
+
+    expect(teamOf(store).seats[0].status).toBe('RUNNING')
+    expect(teamOf(store).seats[1].status).toBe('PENDING')
+    expect(teamOf(store).status).toBe('RUNNING')
+  })
+
+  test('一席的定稿归到它名下——流式那份是混在一起的，回看要靠这个', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    feed(store, {
+      t: 'team_seat_finished', seatId: 's1', role: 'reviewer', status: 'SUCCEEDED',
+      durationMs: 28000, opinion: '发现 3 处问题', error: null,
+    })
+
+    expect(teamOf(store).seats[0].opinion).toBe('发现 3 处问题')
+    expect(teamOf(store).seats[0].durationMs).toBe(28000)
+    expect(teamOf(store).seats[0].error).toBeUndefined()
+  })
+
+  test('哑火那席记下原因，不能留在转圈状态', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    feed(store, {
+      t: 'team_seat_finished', seatId: 's2', role: 'verifier', status: 'FAILED',
+      durationMs: 3000, opinion: null, error: '命令被拒绝',
+    })
+
+    expect(teamOf(store).seats[1].status).toBe('FAILED')
+    expect(teamOf(store).seats[1].error).toBe('命令被拒绝')
+  })
+
+  test('缺席数留在面板上——两个人的共识不能显示成三个人的', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    feed(store, { t: 'team_synthesis_started' })
+    feed(store, {
+      t: 'team_finished', status: 'PARTIAL', spoke: 1, silent: 1, verdict: '一致: …',
+    })
+
+    const team = teamOf(store)
+    expect(team.status).toBe('PARTIAL')
+    expect(team.silent).toBe(1)
+    expect(team.verdict).toBe('一致: …')
+    expect(team.synthesizing).toBe(false)
+  })
+
+  test('取消之后没有合议，别画一份结论出来', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    feed(store, { t: 'team_finished', status: 'CANCELLED', spoke: 1, silent: 1, verdict: null })
+
+    expect(teamOf(store).verdict).toBeUndefined()
+  })
+
+  test('圆桌面板也在用户说下一句时让位', () => {
+    const store = new SessionStore()
+    feed(store, teamStarted())
+    expect(store.getSnapshot().activeTeamKey).not.toBeNull()
+
+    store.submitPrompt('再说点别的')
+
+    expect(store.getSnapshot().activeTeamKey).toBeNull()
+    expect(teamOf(store).goal).toBe('这个包有没有问题')  // 痕迹还在转录里
+  })
+})
+

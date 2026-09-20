@@ -18,6 +18,15 @@ export type ToolInfo = { name: string; description: string }
  * `mutates` 是「它会不会动手改东西」——界面拿它分色比按 id 硬编码可靠：
  * 名册是会长的，硬编码的那张表只会停在写它的那天。
  */
+/** 圆桌上的一席，线上形态。开场那帧里 status 一律是 PENDING。 */
+export type TeamSeatWire = {
+  id: string
+  role: string
+  roleTitle: string
+  summary: string
+  status: string
+}
+
 export type RoleInfo = {
   id: string
   title: string
@@ -241,6 +250,35 @@ export type ServerEvent =
    */
   | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
   /**
+   * 圆桌开场：名单定了，还没开跑。
+   *
+   * 这一帧是**花钱之前用户唯一一眼**——后面每一席都是一次完整的子循环，
+   * `reason` 那句话要显眼地画出来，用户靠它判断值不值得。
+   */
+  | { t: 'team_started'; goal: string; reason: string; seats: TeamSeatWire[] }
+  | { t: 'team_seat_started'; seatId: string; role: string; roleTitle: string }
+  | {
+      t: 'team_seat_finished'
+      seatId: string
+      role: string
+      /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
+      status: string
+      durationMs: number
+      /** 这一席的定稿。哑火时是 null——流式那份是混在一起的，这份是归到它名下的 */
+      opinion: string | null
+      error: string | null
+    }
+  | { t: 'team_synthesis_started' }
+  | {
+      t: 'team_finished'
+      /** COMPLETED | PARTIAL | FAILED | CANCELLED */
+      status: string
+      spoke: number
+      silent: number
+      /** 合议正文。取消和失败时是 null——没有结论就别画一个出来 */
+      verdict: string | null
+    }
+  /**
    * 一条 prompt 被自动改走规划了，reason 是后端给的判断依据。
    *
    * 不显示它的话，用户发的是普通一句话、屏幕上却冒出个计划面板——
@@ -266,6 +304,13 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 export type ClientCommand =
   | { t: 'prompt'; text: string }
   | { t: 'plan'; goal: string }
+  /**
+   * 开一场圆桌（feature: `team`）：几个角色各把同一件事看一遍，最后合议。
+   *
+   * `roles` 不传就让模型挑。会写文件的角色坐不上桌（几个人各改一遍同一处，
+   * 后写的会盖掉先写的），传了会被服务端静默跳过；传个不存在的 id 会收到 error。
+   */
+  | { t: 'team'; goal: string; roles?: string[] }
   /**
    * 接着跑上次没跑完的计划。没有存档时后端回 error。
    *

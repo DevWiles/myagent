@@ -49,6 +49,41 @@ export type PlanTask = {
   error?: string
 }
 
+/** 圆桌上的一席 + 它的进度。 */
+export type TeamSeat = {
+  id: string
+  role: string
+  roleTitle: string
+  summary: string
+  /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
+  status: string
+  /** 这一席的定稿。流式那份是混在一起的，这份是归到它名下的 */
+  opinion?: string
+  error?: string
+  durationMs?: number
+}
+
+/**
+ * 一场圆桌的完整状态，和计划一样作为一条 entry 活在 transcript 里。
+ *
+ * <p>`status` 里 **PARTIAL 必须画出来**：少了一席的合议，和全员到齐的合议
+ * 长得一模一样——不标出来，用户会把两个人的共识当成三个人的共识。
+ */
+export type TeamData = {
+  goal: string
+  /** 为什么是这几位。花钱之前用户唯一一眼，要显眼 */
+  reason: string
+  seats: TeamSeat[]
+  /** CREATED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED */
+  status: string
+  /** 正在合议。合议没有自己的席位，它是收口那一步 */
+  synthesizing?: boolean
+  /** 合议正文。取消和失败时没有——没有结论就别画一个出来 */
+  verdict?: string
+  spoke?: number
+  silent?: number
+}
+
 export type PlanSummary = {
   succeeded: number
   failed: number
@@ -84,6 +119,7 @@ export type Entry =
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
   | { kind: 'memory'; key: string; rows: MemoryRow[] }
   | { kind: 'plan'; key: string; plan: PlanData }
+  | { kind: 'team'; key: string; team: TeamData }
 
 export type Approval = { id: number; action: string; detail: string; reason: string }
 
@@ -141,6 +177,8 @@ export type SessionState = {
    * 所以跑完的计划会一直留在屏幕底下，不会刚看完就消失。
    */
   activePlanKey: string | null
+  /** 当前圆桌面板的 key。和计划一样，用户说下一句话时让位 */
+  activeTeamKey: string | null
   tokens: number
   /** 累计真正发出去的提示词。只增不减，压缩不会让它变小。 */
   sentTokens: number
@@ -169,6 +207,7 @@ const EMPTY_STATE: SessionState = {
   approval: null,
   planConfirm: null,
   activePlanKey: null,
+  activeTeamKey: null,
   tokens: 0,
   sentTokens: 0,
   contextLimit: 0,
@@ -280,6 +319,28 @@ export class SessionStore {
     })
   }
 
+  /** 当前圆桌面板的 key。和 planKey 一个道理：面板多半不在队尾。 */
+  private teamKey: string | null = null
+
+  private updateTeam(update: (team: TeamData) => TeamData): void {
+    const key = this.teamKey
+    if (!key) return
+    this.set({
+      entries: this.state.entries.map(entry =>
+        entry.kind === 'team' && entry.key === key
+          ? { ...entry, team: update(entry.team) }
+          : entry,
+      ),
+    })
+  }
+
+  private patchSeat(seatId: string, patch: Partial<TeamSeat>): void {
+    this.updateTeam(team => ({
+      ...team,
+      seats: team.seats.map(seat => (seat.id === seatId ? { ...seat, ...patch } : seat)),
+    }))
+  }
+
   private patchTask(taskId: string, patch: Partial<PlanTask>): void {
     this.updatePlan(plan => ({
       ...plan,
@@ -294,8 +355,9 @@ export class SessionStore {
       entries: [...this.state.entries, { kind: 'user', key: this.nextKey('user'), text }],
       step: 0,
       startedAt: Date.now(),
-      // 说下一句了，底部那块计划面板该让位——上一份计划的痕迹在 transcript 里还留着
+      // 说下一句了，底部那块面板该让位——上一份的痕迹在 transcript 里还留着
       activePlanKey: null,
+      activeTeamKey: null,
     })
   }
 
@@ -617,6 +679,58 @@ export class SessionStore {
         })
         return
       }
+
+      case 'team_started': {
+        const key = this.nextKey('team')
+        this.teamKey = key
+        this.set({ activeTeamKey: key })
+        this.append({
+          kind: 'team',
+          key,
+          team: {
+            goal: event.goal,
+            reason: event.reason,
+            seats: event.seats.map(seat => ({
+              id: seat.id,
+              role: seat.role,
+              roleTitle: seat.roleTitle,
+              summary: seat.summary,
+              status: seat.status,
+            })),
+            status: 'CREATED',
+          },
+        })
+        return
+      }
+
+      case 'team_seat_started':
+        this.updateTeam(team => ({ ...team, status: 'RUNNING' }))
+        this.patchSeat(event.seatId, { status: 'RUNNING' })
+        return
+
+      case 'team_seat_finished':
+        this.patchSeat(event.seatId, {
+          status: event.status,
+          opinion: event.opinion ?? undefined,
+          error: event.error ?? undefined,
+          durationMs: event.durationMs,
+        })
+        return
+
+      case 'team_synthesis_started':
+        this.updateTeam(team => ({ ...team, synthesizing: true }))
+        return
+
+      case 'team_finished':
+        this.updateTeam(team => ({
+          ...team,
+          status: event.status,
+          synthesizing: false,
+          verdict: event.verdict ?? undefined,
+          spoke: event.spoke,
+          silent: event.silent,
+        }))
+        return
 
       case 'plan_confirm_request':
         this.set({ planConfirm: { id: event.id } })

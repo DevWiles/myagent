@@ -13,6 +13,9 @@
 一个能读写文件、跑命令、先规划后执行的命令行 coding agent。ReAct 循环、工具调用、
 流式渲染、权限审批、审计落盘这些东西全部自己实现，为的是把 agent 到底是怎么转起来的搞清楚。
 
+多 agent 有两种形状：**计划**是一件事拆成五步（`/plan`），**圆桌**是一件事看五遍
+（`/team`）——同一个议题派给调研、审查、验证几个角色各自独立看一遍，最后合成一份带分歧的报告。
+
 所以它有两条自我约束：
 
 - **不用 LangChain4j / Spring AI 之类的框架。** 第三方库只有 Jackson（JSON）、OkHttp（HTTP）、
@@ -75,6 +78,7 @@ MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 | 输入 | 作用 |
 |---|---|
 | `/plan <目标>` | 先出计划、确认之后再执行（后端宣告了 `plan` 能力才生效） |
+| `/team <议题>` | 开一场**圆桌**：几个角色各把同一件事看一遍，最后合议。<br>`/team reviewer verifier <议题>` 可以自己点人，不点就让模型挑 |
 | `/resume` | 接着上次没跑完的计划继续 |
 | `Esc` | 中断当前这一轮 |
 | `Ctrl-C` | 退出，并在终端留下一行会话摘要 |
@@ -112,6 +116,7 @@ src/main/java/dev/wiles/myagent/
   tool/       工具注册表 + 内置工具（读/写/列目录/跑命令/建项目）
     safety/   工作区、命令、写文件三道守卫
   plan/       规划 → 任务图 → 执行 → 重规划；角色名册（谁拿什么工具、按什么规矩干）
+  team/       圆桌：同一件事派给几个角色各看一遍，最后合议
   context/    上下文窗口管理、token 估算
   audit/      审计日志
   server/     --serve 的 WebSocket 服务端
@@ -128,8 +133,8 @@ docs/protocol.md   前后端契约
 ## 开发
 
 ```bash
-mvn test                       # 后端（882 个测试）
-cd tui && bun test             # 界面（230 个测试）
+mvn test                       # 后端（925 个测试）
+cd tui && bun test             # 界面（243 个测试）
 cd tui && bun run typecheck
 cd tui && bun run cover        # 重新生成上面那张封面图
 ```

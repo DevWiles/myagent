@@ -24,6 +24,7 @@ import {
   helpLines,
   matchCommand,
   resolve,
+  splitTeamArgs,
   type CommandContext,
   type CommandEntry,
 } from "../commands.ts"
@@ -33,6 +34,7 @@ import { CommandMenu } from "./CommandMenu.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
+import { TeamPanel } from "./TeamPanel.tsx"
 import { PromptInput } from "./PromptInput.tsx"
 import { SessionPicker } from "./SessionPicker.tsx"
 import { StatusLine } from "./StatusLine.tsx"
@@ -91,6 +93,14 @@ export function App(props: AppProps) {
     if (!key) return null
     const entry = state().entries.find(item => item.key === key)
     return entry && entry.kind === "plan" ? entry.plan : null
+  }
+
+  /** 当前那场圆桌。和计划面板一样从 transcript 里按 key 取，不另存一份。 */
+  const activeTeam = () => {
+    const key = state().activeTeamKey
+    if (!key) return null
+    const entry = state().entries.find(item => item.key === key)
+    return entry && entry.kind === "team" ? entry.team : null
   }
 
   /**
@@ -242,6 +252,16 @@ export function App(props: AppProps) {
       case "plan":
         session.plan(args)
         return
+      case "team": {
+        const { roles, goal } = splitTeamArgs(args, (state().ready?.roles ?? []).map(r => r.id))
+        if (goal.length === 0) {
+          session.notice("info", "用法：/team <议题>，比如 /team 这个包有没有问题\n"
+            + "也可以自己点人：/team reviewer verifier <议题>")
+          return
+        }
+        session.team(goal, roles)
+        return
+      }
       case "continue":
         session.continueSession()
         return
@@ -650,6 +670,15 @@ export function App(props: AppProps) {
                 columns={dimensions().width - 2}
                 maxRows={planRows()}
               />
+            </box>
+          )}
+        </Show>
+
+        {/* 圆桌面板，和计划面板同一个位置——两者不会同时出现（后端一次只跑一件事） */}
+        <Show when={activeTeam()}>
+          {(team) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <TeamPanel team={team()} columns={dimensions().width - 2} />
             </box>
           )}
         </Show>

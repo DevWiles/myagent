@@ -48,7 +48,7 @@ token 随进程生灭，每次启动都不一样。
 
 ```json
 "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
-             "compact", "memory", "roles"]
+             "compact", "memory", "roles", "team"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -551,6 +551,56 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ---
 
+### 3.14 圆桌（feature: `team`）
+
+计划是**一件事拆成五步**，圆桌是**一件事看五遍**：同一个议题派给几个角色，
+各自独立看一遍，最后由 `analyst` 合成一份带分歧的报告。几席之间没有依赖，
+也看不到彼此的意见——那正是它的价值，几个视角独立撞到同一处，比一个人说三遍硬得多。
+
+| `t` | 字段 | 说明 |
+|---|---|---|
+| `team_started` | `goal` `reason` `seats[]` | 名单定了，还没开跑 |
+| `team_seat_started` | `seatId` `role` `roleTitle` | 轮到这一席 |
+| `team_seat_finished` | `seatId` `role` `status` `durationMs` `opinion` `error` | 哑火的也发 |
+| `team_synthesis_started` | — | 开始合议 |
+| `team_finished` | `status` `spoke` `silent` `verdict` | 收工 |
+
+```json
+{"t":"team_started","goal":"这个包有没有问题",
+ "reason":"一个挑毛病，一个核事实",
+ "seats":[{"id":"s1","role":"reviewer","roleTitle":"审查","summary":"…","status":"PENDING"},
+          {"id":"s2","role":"verifier","roleTitle":"验证","summary":"…","status":"PENDING"}]}
+```
+
+`team_finished.status` 四种：`COMPLETED` `PARTIAL` `FAILED` `CANCELLED`。
+
+给界面实现者的四条：
+
+1. **`PARTIAL` 一定要画出来。** 少了一席的合议，和全员到齐的合议长得一模一样——
+   不标出来，用户会把两个人的共识当成三个人的共识。这是圆桌最容易被误读的地方。
+2. **`opinion` 和流式文本是两份东西。** 执行期间各席的话是混在一条 `text_delta` 流里发的
+   （和计划里一样）；`team_seat_finished.opinion` 给的是归到这一席名下的**定稿**，
+   要折叠、要回看、要和合议并排显示，靠的是它。
+3. **哑火的席位也有终态帧**，`status` 是 `FAILED`／`SKIPPED`，`opinion` 是 `null`、
+   `error` 有原因。收不到就画一个永远转圈的席位。
+4. **取消后没有合议。** `CANCELLED` 时 `verdict` 是 `null`——那是又一次完整的模型调用，
+   而用户刚说了不要。已经说过话的那几席原样留着。
+
+界面 → 服务端：
+
+```json
+{"t":"team","goal":"这个包有没有问题","roles":["reviewer","verifier"]}
+```
+
+`roles` 可以不传（让模型挑），传了就是点名。**两类角色坐不上圆桌**，传了会被服务端静默跳过：
+
+- **会写文件的**（`coder`）——几个人各改一遍同一处，后写的会盖掉先写的，而它根本不知道自己盖掉了什么
+- **一个工具都没有的**（`analyst`）——圆桌上几席互不通气，它既看不到代码也拿不到别人的意见，
+  只能回一句「我什么都没看到」。它真正的位置是**合议**那一步，那里材料是齐的
+
+传一个不存在的 id 会收到 `error`。真正坐了谁以 `team_started.seats` 为准——
+界面别自己判，那条规矩归后端。
+
 ---
 
 ## 4. 界面 → 服务端
@@ -559,6 +609,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 |---|---|---|
 | `prompt` | `text` | 普通一轮对话 |
 | `plan` | `goal` | 先规划后执行 |
+| `team` | `goal` `roles[]`（可选） | 开一场圆桌（feature: `team`），见 3.14。`roles` 不传就让模型挑 |
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always` | 回应 `approval_request` |
 | `cancel` | — | 中断当前这一轮 |

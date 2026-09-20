@@ -9,7 +9,10 @@ import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
+import dev.wiles.myagent.team.Cast;
+import dev.wiles.myagent.team.TeamResult;
 
+import java.util.ArrayList;
 import java.util.List;
 import dev.wiles.myagent.agent.AgentEvent;
 
@@ -66,7 +69,7 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact", "memory", "roles");
+                    "session", "sessions", "compact", "memory", "roles", "team");
 
     /**
      * 角色名册，进首帧。
@@ -268,6 +271,72 @@ public final class Protocol {
         return n;
     }
 
+    // ── 圆桌 ────────────────────────────────────────────────────
+
+    /**
+     * 名单定了。<b>这一帧要在第一次子循环开跑之前发出去</b>——
+     * 后面每一席都是一次完整的子循环，用户得先看见这笔钱花在哪几个视角上。
+     */
+    public static ObjectNode encodeTeamStarted(String goal, Cast cast) {
+        ObjectNode n = event("team_started");
+        n.put("goal", goal);
+        n.put("reason", cast.reason());
+        ArrayNode seats = n.putArray("seats");
+        for (int i = 0; i < cast.size(); i++) {
+            AgentRole role = cast.members().get(i);
+            seats.addObject()
+                    .put("id", "s" + (i + 1))
+                    .put("role", role.id())
+                    .put("roleTitle", role.title())
+                    .put("summary", role.summary())
+                    .put("status", "PENDING");
+        }
+        return n;
+    }
+
+    public static ObjectNode encodeSeatStarted(Task seat) {
+        return event("team_seat_started")
+                .put("seatId", seat.id())
+                .put("role", seat.role().id())
+                .put("roleTitle", seat.role().title());
+    }
+
+    /**
+     * 一席了结。<b>哑火的也走这条</b>——界面上那一席要是没有终态，它会一直转圈。
+     *
+     * <p>{@code opinion} 是这一席的正文。界面其实已经通过流式文本收到过一遍了，
+     * 但那是<b>混在一起的流</b>；这里给的是归到这一席名下的定稿，
+     * 界面要折叠、要回看、要在合议旁边并排显示，靠的都是它。
+     */
+    public static ObjectNode encodeSeatFinished(Task seat) {
+        return event("team_seat_finished")
+                .put("seatId", seat.id())
+                .put("role", seat.role().id())
+                .put("status", seat.status().name())
+                .put("durationMs", seat.durationMillis())
+                .put("opinion", seat.result())
+                .put("error", seat.error());
+    }
+
+    public static ObjectNode encodeSynthesisStarted() {
+        return event("team_synthesis_started");
+    }
+
+    /**
+     * 收工。
+     *
+     * <p>{@code status} 里 {@code PARTIAL} 那一档界面<b>必须画出来</b>：
+     * 少了一席的合议，和全员到齐的合议长得一模一样，而它其实缺了一个视角。
+     */
+    public static ObjectNode encodeTeamFinished(TeamResult result) {
+        ObjectNode n = event("team_finished");
+        n.put("status", result.status().name());
+        n.put("spoke", result.spoke());
+        n.put("silent", result.silent());
+        n.put("verdict", result.verdict());
+        return n;
+    }
+
     private static ObjectNode encodeTask(Task task) {
         ObjectNode item = MAPPER.createObjectNode();
         item.put("id", task.id());
@@ -298,6 +367,22 @@ public final class Protocol {
     public static String str(JsonNode node, String field, String fallback) {
         JsonNode v = node.get(field);
         return v == null || v.isNull() ? fallback : v.asText();
+    }
+
+    /** 取字符串数组。缺了、类型不对、里面混了别的，一律当没有——前端传什么都不该让服务端崩。 */
+    public static List<String> strings(JsonNode node, String field) {
+        JsonNode v = node.get(field);
+        if (v == null || !v.isArray()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>(v.size());
+        for (JsonNode item : v) {
+            String text = item.asText("").strip();
+            if (!text.isEmpty()) {
+                out.add(text);
+            }
+        }
+        return out;
     }
 
     public static int num(JsonNode node, String field, int fallback) {

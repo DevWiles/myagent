@@ -26,6 +26,7 @@ export type CommandContext = {
 export type CommandId =
   | "help"
   | "plan"
+  | "team"
   | "continue"
   | "resume"
   | "resume-plan"
@@ -74,6 +75,13 @@ const SPECS: CommandSpec[] = [
     args: "<目标>",
     description: "先规划后执行：拆成任务依赖图，确认后逐个跑",
     anyFeature: ["plan"],
+  },
+  {
+    id: "team",
+    name: "/team",
+    args: "<议题>",
+    description: "开一场圆桌：几个角色各把同一件事看一遍，最后合议（可先点人）",
+    anyFeature: ["team"],
   },
   {
     id: "continue",
@@ -323,4 +331,30 @@ export function acceptSelected(
     return { kind: "complete", text: entry.name + " " }
   }
   return { kind: "run", entry, args }
+}
+
+/**
+ * 把 `/team` 后面那串东西拆成「点了谁」和「议题」。
+ *
+ * <p>只认**开头连续**的角色名，遇到第一个不是角色的词就停——
+ * 不然「reviewer 看看 explorer 这个类写得怎么样」里的第二个词也会被当成点名，
+ * 而它其实是议题的一部分。
+ *
+ * <p>界面<b>不判断这个角色能不能坐上桌</b>（会写文件的坐不上）：那条规矩归后端，
+ * 它会静默跳过，而真正坐了谁在 `team_started` 那帧里写着。
+ * 界面再判一遍就是把同一条规矩写进两种语言，迟早有一边过期。
+ */
+export function splitTeamArgs(
+  args: string,
+  roleIds: readonly string[],
+): { roles: string[]; goal: string } {
+  const words = args.trim().split(/\s+/).filter(word => word.length > 0)
+  const roles: string[] = []
+  let i = 0
+  for (; i < words.length; i++) {
+    const id = words[i].toLowerCase()
+    if (!roleIds.includes(id)) break
+    if (!roles.includes(id)) roles.push(id)
+  }
+  return { roles, goal: words.slice(i).join(" ") }
 }

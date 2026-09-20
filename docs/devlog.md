@@ -8,6 +8,79 @@
 
 ---
 
+## 2026-09-20 · 「后端收了命令，一个帧都不回」的两个假象
+
+给圆桌接协议那天，写了个探针：起 `--serve`、连上去、发一条 `team`、把收到的帧打出来。
+结果只打出一行 `features 里有 team: true`，然后**十分钟一个字都没有**。
+
+**第一个假象：是我自己把后端卡住的。** 探针用 `Bun.spawn` 起的 java，
+`stdout: "pipe"`、`stderr: "pipe"`，读到 `listening` 那行之后就再也没读过。
+管道缓冲区（64KB）一满，JVM 就阻塞在一次 `write` 上——**从外面看，后端就是收了命令不回话**。
+补一句「把 stdout 一直抽干」之后，现象没变，但至少这条排除了。
+
+**第二个假象：`mvn compile` 通过，不等于我改的那个类被编译了。**
+真相要打开 debug 日志才看得见：
+
+```
+Caused by: java.lang.Error: Unresolved compilation problem:
+	ArrayList cannot be resolved to a type
+	at dev.wiles.myagent.server.AgentServer.handleTeam(AgentServer.java:575)
+```
+
+`handleTeam` 里用了 `new ArrayList<>()` 而 `AgentServer` 没有那个 import。
+javac 本该当场报错，而我跑了好几次 `mvn -o -q compile` 全是绿的——
+**增量编译认为这个类没必要重编**，jar 里打进去的是一份更早的、带着「未解决的编译错误」的
+class（那句错误是 Eclipse 编译器的口吻，来自 IDE 那次编译）。
+错误被<b>烧进了 class 文件</b>，只在真正调到那个方法时才抛。
+
+同一天早些时候还撞过一次同型的：测试里凭空冒出
+`The import dev.wiles.myagent.llm.LlmException cannot be resolved`，
+而那个类好端端在那儿——`mvn clean` 之后就没了。
+
+### 三条
+
+1. **子进程的 stdout/stderr 要么不接，要么一直抽干。** 接了不读，等于给它设了个定时死锁，
+   而症状会伪装成「对方不响应」。
+2. **排查「没反应」时，先让对方把话说出来。** 这次真正解决问题的一步是
+   `-Dorg.slf4j.simpleLogger.defaultLogLevel=debug` 加上把 stderr 落到文件——
+   在那之前的所有推断都建立在「我猜它卡在哪儿」上。
+3. **`mvn compile` 绿 ≠ 你改的那个类被编译了。** 改完动不了的时候，
+   在怀疑自己的逻辑之前先 `mvn clean`。判据很好认：**报错指向的那行代码和你看到的对不上**，
+   或者错误信息的口吻不是 javac 的。
+
+---
+
+## 2026-09-20 · 提示词变量的值里带占位符，既不会被替换，也不会报错
+
+做角色化的时候，本来想把验证角色那两行结论（`结论: 通过` / `结论: 不通过`）
+从 `TaskPrompt` 的常量插值进 `roles/verifier.md`，写成 `{{@verdictPass}}`。
+差一点就这么写了。
+
+**`PromptAssembler` 有两道不变量，这条路恰好从两道中间穿过去。**
+它查「关键段缺没缺」，也查「有没有没填的占位符」——后者正是为这种事准备的。
+但它的替换是**对模板扫一遍**：`Matcher.appendReplacement` 把变量值写进输出缓冲，
+matcher 自己继续在原模板上走。于是**填进去的那段文字根本不在扫描范围内**——
+里面的 `{{@verdictPass}}` 不会被替换，也不算「没填的占位符」，
+一路原样送到模型面前。
+
+实测过了：
+
+```
+装配没抛异常
+结果里还留着字面占位符: true
+```
+
+角色正文是当变量填进 `modes/task.md` 的，所以它属于「被填进去的那段」。
+结论是**角色的 md 里不许出现 `{{@}}`**，那两行结论写成字面量，
+两处对不上的风险改由单测钉住（`AgentRolesTest.verifierPromptDeclaresTheVerdictLines`）。
+
+留给下次的一条：**校验发生在哪一层，决定了它管得着什么**。
+装配器查的是「模板」，不是「最终文本」；一份查过的提示词里仍然可能有字面占位符。
+要真的兜住，得在拼完之后再扫一遍成品——不过那样又会把记忆正文里用户自己写的
+`{{...}}` 卡住（那个坑代码注释里已经记着了）。所以这里选的是约定加测试，不是加一道检查。
+
+---
+
 ## 2026-09-20 · 退出 myagent 会盖掉终端里原有的内容
 
 **现象**：退出之后，跑 myagent 之前敲的那几条命令不见了，看起来像触发了 `clear`。

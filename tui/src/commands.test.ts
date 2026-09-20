@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  splitTeamArgs,
   acceptSelected,
   argsOf,
   filterCommands,
@@ -13,7 +14,8 @@ import {
 
 /** 后端啥都支持、存档也都有的情况。 */
 const full: CommandContext = {
-  features: ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions"],
+  features: ["plan", "team", "replan", "resume", "resume_plan", "auto_mode", "session",
+    "sessions"],
   hasContinuable: true,
   hasResumablePlan: true,
 }
@@ -44,6 +46,7 @@ describe("边打边筛", () => {
     expect(filterCommands("/", full).map((c) => c.name)).toEqual([
       "/help",
       "/plan",
+      "/team",
       "/continue",
       "/resume",
       "/resume-plan",
@@ -165,7 +168,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(8)
+    expect(entries).toHaveLength(9)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -173,7 +176,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(8)
+    expect(lines).toHaveLength(9)
     expect(lines.some((l) => l.includes("/plan <目标>"))).toBe(true)
     expect(lines.some((l) => l.includes("现在不行"))).toBe(true)
   })
@@ -229,5 +232,45 @@ describe("菜单开着时按回车", () => {
   test("列表空的时候按回车什么都不做", () => {
     expect(acceptSelected([], 0, "/zzz")).toEqual({ kind: "none" })
     expect(acceptSelected(menu("/c"), 9, "/c")).toEqual({ kind: "none" })
+  })
+})
+
+describe("/team 的参数：点名和议题", () => {
+  const roles = ["scout", "explorer", "reviewer", "coder", "operator", "analyst", "verifier"]
+
+  test("不点名时整串都是议题", () => {
+    expect(splitTeamArgs("这个包有没有问题", roles)).toEqual({
+      roles: [],
+      goal: "这个包有没有问题",
+    })
+  })
+
+  test("开头连着的角色名算点名，后面是议题", () => {
+    expect(splitTeamArgs("reviewer verifier 这个包有没有问题", roles)).toEqual({
+      roles: ["reviewer", "verifier"],
+      goal: "这个包有没有问题",
+    })
+  })
+
+  test("遇到第一个不是角色的词就停——议题里再提角色名也不算点名", () => {
+    expect(splitTeamArgs("reviewer 看看 explorer 这个类", roles)).toEqual({
+      roles: ["reviewer"],
+      goal: "看看 explorer 这个类",
+    })
+  })
+
+  test("大小写不敏感，重复的点名只算一次", () => {
+    expect(splitTeamArgs("Reviewer reviewer 议题", roles).roles).toEqual(["reviewer"])
+  })
+
+  test("只点了人没给议题：议题是空的，调用方该拦住", () => {
+    expect(splitTeamArgs("reviewer verifier", roles).goal).toBe("")
+  })
+
+  test("后端没宣告任何角色时，一个词都不当点名", () => {
+    expect(splitTeamArgs("reviewer 这个包", [])).toEqual({
+      roles: [],
+      goal: "reviewer 这个包",
+    })
   })
 })
