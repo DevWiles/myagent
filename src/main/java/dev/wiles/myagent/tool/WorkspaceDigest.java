@@ -40,7 +40,7 @@ public final class WorkspaceDigest {
      *
      * <p>用黑名单而不是白名单，因为源码目录的名字千奇百怪（src/lib/app/cmd/internal…），
      * 白名单必然漏掉真正该看的东西；而该跳过的产物目录就那么几个，且相当稳定。
-     * 这和 {@link TaskTools} 用白名单的取舍正好相反——那边漏一个是安全缺口，
+     * 这和角色（{@code AgentRole}）用白名单的取舍正好相反——那边漏一个是安全缺口，
      * 这边漏一个只是多几行噪音。
      */
     private static final Set<String> SKIP_DIRS = Set.of(

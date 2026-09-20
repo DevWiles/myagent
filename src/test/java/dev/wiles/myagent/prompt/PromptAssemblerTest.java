@@ -122,14 +122,14 @@ class PromptAssemblerTest {
         String agent = assembler().assemble(PromptMode.AGENT, ctx());
         String task = assembler().assemble(PromptMode.TASK, PromptContext.builder()
                 .variable("workspace", "/tmp/proj")
-                .variable("taskType", "写文件")
+                .variable("role", "编码")
                 .variable("taskRules", "你有写工具。")
                 .build());
 
         assertTrue(agent.contains("ReAct"));
         assertFalse(task.contains("ReAct"),
                 "模式是用来选的不是用来叠的——两段同时在场，模型会收到相反的指令");
-        assertTrue(task.contains("写文件"));
+        assertTrue(task.contains("编码"));
     }
 
     @Test
@@ -140,6 +140,7 @@ class PromptAssemblerTest {
         String planner = assembler().assemble(PromptMode.PLANNER, PromptContext.builder()
                 .variable("minTasks", "3")
                 .variable("maxTasks", "12")
+                .variable("roles", "- `explorer`（调研）查清某件事")
                 .build());
 
         assertTrue(planner.contains("{{t1}}"), "任务引用要原样留给模型看");
@@ -152,7 +153,8 @@ class PromptAssemblerTest {
     @DisplayName("规划器不拼 base：它不动手，「改完用 bash 跑测试」对它是噪音")
     void plannerDoesNotCarryAgentBase() {
         String planner = assembler().assemble(PromptMode.PLANNER, PromptContext.builder()
-                .variable("minTasks", "3").variable("maxTasks", "12").build());
+                .variable("minTasks", "3").variable("maxTasks", "12")
+                .variable("roles", "- `explorer`（调研）查清某件事").build());
 
         assertFalse(planner.contains("## 工作方式"),
                 "带上主循环的工作方式会勾着规划器自己动手");
@@ -178,8 +180,10 @@ class PromptAssemblerTest {
         for (Case c : List.of(
                 new Case(PromptMode.PLANNER_SUB, "maxSubTasks", "6"),
                 new Case(PromptMode.PLANNER_REPLAN, "maxReplanTasks", "4"))) {
-            String p = assembler().assemble(c.mode(),
-                    PromptContext.builder().variable(c.var(), c.value()).build());
+            String p = assembler().assemble(c.mode(), PromptContext.builder()
+                    .variable(c.var(), c.value())
+                    .variable("roles", "- `coder`（编码）改文件")
+                    .build());
             assertTrue(p.contains("只输出一个 JSON 对象"), c.mode() + " 缺了输出格式");
             assertTrue(p.contains(c.value()), c.mode() + " 的上限没填进去");
         }

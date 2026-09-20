@@ -3,6 +3,7 @@ package dev.wiles.myagent.plan;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.llm.LlmClient;
+import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,24 +27,31 @@ import java.util.function.BiConsumer;
  * 代价是每个子任务看不到全局对话——所以 {@link TaskPrompt} 必须把上游产出拼进去，
  * 那条边才不只是个先后顺序。
  *
- * <p>另一件它顺手做掉的事：按 {@link TaskType} 收窄工具菜单（见 {@link TaskTools}）。
+ * <p>另一件它顺手做掉的事：<b>按任务的角色装配子循环</b>——工具菜单、步数上限、
+ * 系统提示词，三样都从 {@link AgentRole} 上取。所以「派谁去」这个决定在这里
+ * 才真正变成三处具体差别，而不是一个显示在界面上的标签。
  */
 public final class AgentTaskRunner implements TaskRunner {
 
     private static final Logger log = LoggerFactory.getLogger(AgentTaskRunner.class);
 
     /**
-     * 单个任务最多跑几轮 ReAct。
+     * 单个任务最多跑几轮 ReAct 的<b>天花板</b>。
      *
      * <p>比整段对话的上限（{@link Agent#DEFAULT_MAX_STEPS}）小得多，因为这里是<b>子任务</b>：
      * 一个拆好的步骤要是 12 轮还收不了口，多半是计划拆得太粗，
      * 让它撞上限收敛，比放任它跑 25 轮烧掉额度强。
+     *
+     * <p><b>角色可以比它更省，但不能比它更奢</b>（见 {@link #stepsFor}）。
+     * 分析角色一个工具都没有，给它 12 轮纯属摆设；而反过来让某个角色
+     * 突破调用方设的总闸，那这个总闸就不是闸了。
      */
     public static final int DEFAULT_MAX_STEPS = 12;
 
     private final LlmClient client;
     private final ToolRegistry allTools;
     private final Path workspaceRoot;
+    /** 天花板，不是定值。真正用几步由角色和它一起决定，见 {@link #stepsFor}。 */
     private final int maxSteps;
 
     private BiConsumer<Task, AgentEvent> listener = (task, event) -> {
@@ -94,11 +102,12 @@ public final class AgentTaskRunner implements TaskRunner {
 
     @Override
     public TaskOutcome run(Task task, List<Task> upstream) {
+        AgentRole role = task.role();
         Agent agent = new Agent(
                 client,
-                TaskTools.forType(allTools, task.type()),
+                toolsFor(role),
                 TaskPrompt.system(task, workspaceRoot),
-                maxSteps);
+                stepsFor(role));
 
         // 子循环失败（模型调用挂了、被取消、撞上最大步数）只通过事件暴露，
         // run() 的返回值是一段人话，靠字符串去猜成败太脆了
@@ -122,7 +131,7 @@ public final class AgentTaskRunner implements TaskRunner {
             log.info("任务 {} 的子循环没能收口: {}", task.id(), failure[0]);
             return TaskOutcome.failed(compose(failure[0], text));
         }
-        if (task.type() == TaskType.VERIFICATION && !passed(text)) {
+        if (role.requiresVerdict() && !passed(text)) {
             // 验证不通过必须落成失败，才能顺着 dependents 把下游跳过。
             // 记成「成功但其实没过」是最糟的——后面每一步都建立在一个假前提上。
             return TaskOutcome.failed(text);
@@ -131,6 +140,34 @@ public final class AgentTaskRunner implements TaskRunner {
             return expand(task, text);
         }
         return TaskOutcome.ok(text);
+    }
+
+    /**
+     * 按角色收窄工具菜单。
+     *
+     * <p><b>模型看不到菜单上没有的工具，就根本不会去调</b>——比「注册了再在执行时拦住」
+     * 可靠得多，后者要靠审批逻辑不出漏，前者压根没有那扇门。
+     * 这个思路现成就有，{@code BuiltinTools.createReadOnly} 用的是同一套道理。
+     *
+     * <p>注册表里没有的名字直接跳过：全量注册表长什么样由上层决定
+     * （只读模式、审批策略不同，工具实例就不同），这里不该假设它一定齐全。
+     */
+    private ToolRegistry toolsFor(AgentRole role) {
+        ToolRegistry narrowed = new ToolRegistry();
+        for (String name : role.tools()) {
+            for (Tool tool : allTools.all()) {
+                if (tool.name().equals(name)) {
+                    narrowed.register(tool);
+                    break;
+                }
+            }
+        }
+        return narrowed;
+    }
+
+    /** 角色想省就让它省，但越不过调用方设的天花板。 */
+    private int stepsFor(AgentRole role) {
+        return Math.min(maxSteps, role.maxSteps());
     }
 
     /**

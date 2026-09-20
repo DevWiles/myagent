@@ -28,7 +28,7 @@ public final class SystemPrompt {
     /**
      * 不带记忆功能的版本——<b>一个字都不提记忆</b>。
      *
-     * <p>走这条路的是计划任务（{@code TaskPrompt}），而 {@code TaskTools} 的白名单里
+     * <p>走这条路的是计划任务（{@code TaskPrompt}），而角色（{@code AgentRole}）的白名单里
      * 没有 {@code recall}：工具不在菜单上，还要交代「你没有记忆」纯属噪音，
      * 甚至会勾着模型去找一个它根本调不到的工具。
      *

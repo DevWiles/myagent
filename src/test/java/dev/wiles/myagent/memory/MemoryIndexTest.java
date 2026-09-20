@@ -40,7 +40,7 @@ class MemoryIndexTest {
 
         assertEquals(SystemPrompt.forWorkspace(ws), SystemPrompt.forWorkspace(ws, null));
         assertFalse(SystemPrompt.forWorkspace(ws).contains("recall"),
-                "TaskTools 白名单里没有 recall，提它只会让模型去找一个调不到的工具");
+                "角色的工具白名单里没有 recall，提它只会让模型去找一个调不到的工具");
     }
 
     @Test

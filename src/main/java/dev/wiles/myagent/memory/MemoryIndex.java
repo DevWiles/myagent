@@ -132,7 +132,7 @@ public record MemoryIndex(List<MemoryEntry> entries) {
      * <p>空索引<b>也要出声</b>，说明见 {@link #EMPTY_NOTICE}——
      * 原先返回空串，真跑下来那点省出的 token 远不够付一次瞎猜的 recall。
      *
-     * <p>完全不接记忆功能的场合（比如计划任务，{@code TaskTools} 不给 recall）
+     * <p>完全不接记忆功能的场合（比如计划任务，{@code AgentRole} 的白名单里没有 recall）
      * 压根不该走到这里，见 {@code SystemPrompt#forWorkspace(Path)}。
      */
     public String render() {

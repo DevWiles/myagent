@@ -22,7 +22,15 @@ import java.util.Set;
  */
 public final class TaskPrompt {
 
-    /** 验证任务必须以这一行收尾，执行器靠它判定成败。 */
+    /**
+     * 验证角色必须以这一行收尾，{@link AgentTaskRunner} 靠它判定成败。
+     *
+     * <p>要求这一行的那段话在 {@code prompts/roles/verifier.md} 里<b>写成字面量</b>，
+     * 而不是从这两个常量插值进去：角色正文是通过变量填进模板的，
+     * 而装配器的占位符替换只扫一遍模板（见 {@code PromptAssembler}），
+     * 填进去的内容里再有 <code>{{@…}}</code> 不会被替换，也不会报错——
+     * 模型收到的就是字面的占位符。两处对不上的风险改由单测钉住。
+     */
     public static final String VERDICT_PASS = "结论: 通过";
     public static final String VERDICT_FAIL = "结论: 不通过";
 
@@ -34,11 +42,15 @@ public final class TaskPrompt {
     /**
      * 子任务执行体的 system。
      *
-     * <p>正文在 {@code prompts/modes/task.md}，这里只负责把这一步的类型和纪律填进去。
+     * <p>正文在 {@code prompts/modes/task.md}，这里只负责把这一步的角色和纪律填进去。
      * 搬出去的理由见 {@code PromptRepository}——这段文字会被反复调，
      * 而「调一次要重新编译」等于没人会去调。
      *
-     * <p><b>不带记忆索引</b>：{@code TaskTools} 的白名单里没有 {@code recall}，
+     * <p><b>纪律那几句来自角色，不再是这里的一个 switch</b>（见 {@link AgentRole#rules()}）。
+     * 写成 switch 的时候，「同一种工具、两种干法」根本表达不出来——
+     * {@code explorer} 和 {@code reviewer} 会被迫共用一段和稀泥的话。
+     *
+     * <p><b>不带记忆索引</b>：角色的工具白名单里没有 {@code recall}，
      * 交代「你没有记忆」纯属噪音，甚至会勾着模型去找一个它调不到的工具。
      */
     public static String system(Task task, Path workspaceRoot) {
@@ -46,10 +58,11 @@ public final class TaskPrompt {
         // 模式段，再拼一次 assemble(TASK) 会把 base 装两遍，还让模型同时收到
         // 「按用户目标自己决定要不要用工具」和「只做这一步别越界」两条相反的指令。
         // 模式本来就是用来选的，不是用来叠的
+        AgentRole role = task.role();
         return ASSEMBLER.assemble(PromptMode.TASK, PromptContext.builder()
                 .variable("workspace", String.valueOf(workspaceRoot))
-                .variable("taskType", typeName(task.type()))
-                .variable("taskRules", rules(task.type()))
+                .variable("role", role.title())
+                .variable("taskRules", role.rules())
                 .build());
     }
 
@@ -87,47 +100,5 @@ public final class TaskPrompt {
             }
         }
         return sb.toString();
-    }
-
-    private static String typeName(TaskType type) {
-        return switch (type) {
-            case PLANNING -> "规划";
-            case FILE_READ -> "读取文件";
-            case FILE_WRITE -> "写入文件";
-            case COMMAND -> "执行命令";
-            case ANALYSIS -> "分析";
-            case VERIFICATION -> "验证";
-        };
-    }
-
-    /**
-     * 类型专属的规矩。
-     *
-     * <p>这些话和 {@link TaskTools} 给的工具菜单是一套说辞的两面：菜单决定它<b>能</b>做什么，
-     * 这几句决定它<b>该</b>做什么。两边必须对得上，不然模型会去够一个根本不存在的工具，
-     * 白白浪费一轮。
-     */
-    private static String rules(TaskType type) {
-        return switch (type) {
-            case PLANNING -> """
-                    你只有只读工具。先摸清情况，然后说明这件事该怎么拆成几个更小的步骤。
-                    不要动手改任何东西。""";
-            case FILE_READ -> """
-                    你只有只读工具。把要查的东西查清楚，用事实回答，绝不要猜测文件内容。""";
-            case FILE_WRITE -> """
-                    修改任何文件之前**必须先读它**，避免覆盖掉不该动的内容。
-                    改完说清楚改了哪个文件的哪一处。""";
-            case COMMAND -> """
-                    你可以执行命令。命令失败时先看清错误信息再调整，不要用同样的参数反复重试。""";
-            case ANALYSIS -> """
-                    你**没有任何工具**，只能基于上游任务交过来的材料分析，缺什么就直说缺什么，
-                    不要编造没见过的内容。""";
-            case VERIFICATION -> ("""
-                    跑测试或命令来验证，看清楚真实输出，不要因为「改过了」就认为一定通过。
-
-                    **回答的最后一行必须是** `%s` 或 `%s`，前面可以先说过程。
-                    这一行是程序判定成败的唯一依据，少了它这一步会被当成失败。""")
-                    .formatted(VERDICT_PASS, VERDICT_FAIL);
-        };
     }
 }

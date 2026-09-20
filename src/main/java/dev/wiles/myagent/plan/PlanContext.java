@@ -59,7 +59,7 @@ public record PlanContext(
      *
      * <p>工具清单取自<b>实际注册的那一份</b>，不是写死的名字——
      * 只读模式下注册表里本来就没有写工具，规划器于是连菜单都看不到它们。
-     * 这比在提示词里多写一句「现在不能写文件」更硬：{@link TaskTools} 用的是同一套道理。
+     * 这比在提示词里多写一句「现在不能写文件」更硬：{@link AgentRole} 的工具白名单用的是同一套道理。
      */
     public static PlanContext of(Path workspaceRoot, ToolRegistry tools) {
         List<ToolBrief> briefs = new ArrayList<>();

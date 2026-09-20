@@ -52,11 +52,21 @@ class AgentTaskRunnerTest {
             return tools == null ? List.of() : tools.stream().map(ToolSpec::name).toList();
         }
 
+        String lastSystemMessage() {
+            List<ChatMessage> messages = receivedMessages.get(receivedMessages.size() - 1);
+            return messages.stream().filter(m -> "system".equals(m.role()))
+                    .findFirst().orElseThrow().content();
+        }
+
         String lastUserMessage() {
             List<ChatMessage> messages = receivedMessages.get(receivedMessages.size() - 1);
             return messages.stream().filter(m -> "user".equals(m.role()))
                     .reduce((a, b) -> b).orElseThrow().content();
         }
+    }
+
+    private static String systemOf(FakeLlm llm) {
+        return llm.lastSystemMessage();
     }
 
     private static Tool named(String name) {
@@ -105,8 +115,8 @@ class AgentTaskRunnerTest {
     }
 
     @Test
-    @DisplayName("工具按任务类型收窄：读取任务看不到 write_file 和 bash")
-    void narrowsToolsByType() {
+    @DisplayName("工具按角色收窄：调研角色看不到 write_file 和 bash")
+    void narrowsToolsByRole() {
         FakeLlm llm = new FakeLlm();
 
         new AgentTaskRunner(llm, fullSet(), ROOT).run(task("n1", TaskType.FILE_READ), List.of());
@@ -122,6 +132,37 @@ class AgentTaskRunnerTest {
         new AgentTaskRunner(llm, fullSet(), ROOT).run(task("n1", TaskType.ANALYSIS), List.of());
 
         assertTrue(llm.lastToolNames().isEmpty());
+    }
+
+    @Test
+    @DisplayName("审查和调研工具一样，但系统提示词不一样——角色不是标签")
+    void sameToolsButDifferentSystemPrompt() {
+        FakeLlm explorerRun = new FakeLlm();
+        FakeLlm reviewerRun = new FakeLlm();
+
+        new AgentTaskRunner(explorerRun, fullSet(), ROOT)
+                .run(new Task("n1", "看看 X", AgentRoles.EXPLORER, List.of(), "看完"), List.of());
+        new AgentTaskRunner(reviewerRun, fullSet(), ROOT)
+                .run(new Task("n1", "看看 X", AgentRoles.REVIEWER, List.of(), "看完"), List.of());
+
+        assertEquals(explorerRun.lastToolNames(), reviewerRun.lastToolNames(),
+                "工具白名单本来就一样");
+        assertNotEquals(systemOf(explorerRun), systemOf(reviewerRun),
+                "工具一样的两个角色，全部区别都在这段话里——它俩一样就等于没分角色");
+        assertTrue(systemOf(reviewerRun).contains("边界和空值"), systemOf(reviewerRun));
+    }
+
+    @Test
+    @DisplayName("角色能比天花板更省：分析角色三步就封顶")
+    void roleCanLowerTheStepCeiling() {
+        FakeLlm llm = new FakeLlm();
+        // 一直要工具就一直不收口，撞上限为止；分析角色的上限是 3，不是默认的 12
+        llm.reply = messages -> "再想想";
+
+        new AgentTaskRunner(llm, fullSet(), ROOT).run(task("n1", TaskType.ANALYSIS), List.of());
+
+        assertTrue(llm.receivedMessages.size() <= AgentRoles.ANALYST.maxSteps(),
+                "分析角色跑了 " + llm.receivedMessages.size() + " 轮，比它自己声明的上限还多");
     }
 
     @Test
