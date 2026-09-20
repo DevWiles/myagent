@@ -5,6 +5,9 @@ import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalRequest;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
+import dev.wiles.myagent.tool.safety.TextDiff;
 import dev.wiles.myagent.tool.safety.CommandRisk;
 import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import java.nio.file.Path;
@@ -85,9 +88,15 @@ public final class WriteFileTool implements Tool {
         if (risk.isForbidden()) {
             return ToolResult.error(risk.reason());
         }
-        if (risk.needsApproval() && !approval.approve("写入文件", pathArg, risk.reason())) {
-            return ToolResult.error("用户拒绝覆盖 " + pathArg + "。"
-                    + "请先确认该文件当前内容，或改写到别的路径。");
+        if (risk.needsApproval()) {
+            // 带上 diff。只说「原 30 行 → 新 45 行」的话，用户能做的判断只有
+            // 「文件变长了」，而他要决定的是「这个改动对不对」
+            ApprovalVerdict verdict = approval.decide(ApprovalRequest.write(
+                    "写入文件", pathArg, risk.reason(), diffAgainst(file, content)));
+            if (!verdict.approved()) {
+                return ToolResult.error(verdict.deniedMessage("用户拒绝覆盖 " + pathArg + "。"
+                        + "请先确认该文件当前内容，或改写到别的路径。"));
+            }
         }
 
         try {
@@ -103,5 +112,17 @@ public final class WriteFileTool implements Tool {
         int bytes = content.getBytes(StandardCharsets.UTF_8).length;
         int lines = content.isEmpty() ? 0 : content.split("\n", -1).length;
         return ToolResult.ok("已写入 " + pathArg + " (" + bytes + " 字节, " + lines + " 行)");
+    }
+
+    /**
+     * 即将发生的改动。读不动就退回空串——<b>diff 生不成不该挡住审批</b>，
+     * 那只是少了一份参考，而卡住的是用户正在做的事。
+     */
+    private static String diffAgainst(Path existing, String content) {
+        try {
+            return TextDiff.unified(Files.readString(existing, StandardCharsets.UTF_8), content);
+        } catch (IOException | RuntimeException e) {
+            return "";                         // 二进制文件、编码不对、权限不够，都归这儿
+        }
     }
 }

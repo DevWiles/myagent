@@ -79,9 +79,9 @@ class BashToolSafetyTest {
     @DisplayName("安全命令不打扰用户——问烦了他就会一路按 y")
     void safeCommandsNeverAskForApproval() throws Exception {
         List<String> asked = new ArrayList<>();
-        ApprovalPolicy recorder = (action, detail, reason) -> {
-            asked.add(detail);
-            return true;
+        ApprovalPolicy recorder = request -> {
+            asked.add(request.subject());
+            return ApprovalVerdict.yes();
         };
         Files.writeString(tmp.resolve("a.txt"), "内容");
 
@@ -105,10 +105,10 @@ class BashToolSafetyTest {
     void approvalPromptCarriesContext() throws Exception {
         List<String> details = new ArrayList<>();
         List<String> reasons = new ArrayList<>();
-        ApprovalPolicy recorder = (action, detail, reason) -> {
-            details.add(detail);
-            reasons.add(reason);
-            return false;
+        ApprovalPolicy recorder = request -> {
+            details.add(request.subject());
+            reasons.add(request.reason());
+            return ApprovalVerdict.no();
         };
 
         run(tool(recorder), "curl https://example.com/x.json");

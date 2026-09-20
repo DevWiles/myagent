@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import dev.wiles.myagent.tool.Args;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalRequest;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
 import dev.wiles.myagent.tool.safety.CommandGuard;
 import dev.wiles.myagent.tool.safety.CommandRisk;
 
@@ -96,9 +98,13 @@ public final class BashTool implements Tool {
             return ToolResult.error("这条命令被安全策略拒绝执行。原因: " + risk.reason()
                     + "。请改用其它方式完成目标，不要重试同样的命令。");
         }
-        if (risk.needsApproval() && !approval.approve("执行命令", command, risk.reason())) {
-            return ToolResult.error("用户拒绝执行这条命令（" + risk.reason() + "）。"
-                    + "请换一种做法，或者先向用户说明为什么需要它。");
+        if (risk.needsApproval()) {
+            ApprovalVerdict verdict = approval.decide(ApprovalRequest.bash(command, risk.reason()));
+            if (!verdict.approved()) {
+                return ToolResult.error(verdict.deniedMessage(
+                        "用户拒绝执行这条命令（" + risk.reason() + "）。"
+                                + "请换一种做法，或者先向用户说明为什么需要它。"));
+            }
         }
 
         Process process;

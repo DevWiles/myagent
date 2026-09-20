@@ -49,6 +49,9 @@ import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.safety.ApprovalOrigin;
+import dev.wiles.myagent.tool.safety.PolicyGate;
+import dev.wiles.myagent.tool.safety.PolicyStore;
 import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
@@ -110,6 +113,8 @@ public final class AgentServer extends WebSocketServer {
     private final TokenMeter meter = new TokenMeter();
     private final Agent agent;
     private final RemoteApproval approval;
+    /** 审批的总入口。{@link #approval} 只是它问不出答案时才走的那一层。 */
+    private final PolicyGate policy;
 
     /**
      * 当前往哪一份会话存档里写，以及这段对话是什么时候开始的。
@@ -176,13 +181,18 @@ public final class AgentServer extends WebSocketServer {
         this.approval = new RemoteApproval(this::publish, () -> !getConnections().isEmpty());
         this.planConfirm = new PlanConfirmation(this::publish, () -> !getConnections().isEmpty());
 
-        // 工具拿到的是**包了审计的**审批策略：每次批准/拒绝都留一条记录，
-        // 否则事后没法回答「这个文件是谁同意改的」
+        // 审批策略是三层套起来的，从外到里：
+        //   PolicyGate        先算规则——命中就不打扰人，这是治「被问烦」的那一层
+        //   audit.audited     问到人的那些留一条记录，否则事后没法回答「谁同意改的」
+        //   RemoteApproval    真的去问界面，阻塞等答案
+        // 顺序要紧：审计包在闸门里面，被规则直接放行的不产生审批记录——
+        // 那条规则本身在存下来的那一刻已经记过一次了，再记一遍只会淹掉真正的决策
+        this.policy = new PolicyGate(audit.audited(approval), PolicyStore.inUserHome());
         this.memory = MemoryStore.inUserHome();
         this.sessions = SessionStore.inUserHome();
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace, memory)
-                : BuiltinTools.createDefault(workspace, audit.audited(approval), memory);
+                : BuiltinTools.createDefault(workspace, policy, memory);
 
         // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
         this.agent = config.hasApiKey()
@@ -291,12 +301,16 @@ public final class AgentServer extends WebSocketServer {
         @Override
         public void onTaskStarted(Task task) {
             audit.taskStarted(task);
+            // 接下来弹出的确认框要说清是谁要干这事。屏幕上七八个任务依次跑过时，
+            // 一个没有出处的「执行命令: rm -rf target」，用户想不清楚就只会点同意
+            approval.origin(originOf(task));
             publish(Protocol.encodeTaskStarted(task));
         }
 
         @Override
         public void onTaskFinished(Task task) {
             audit.taskFinished(task);
+            approval.origin(null);
             publish(Protocol.encodeTaskFinished(task));
         }
 
@@ -324,6 +338,11 @@ public final class AgentServer extends WebSocketServer {
     }
 
     /** 圆桌怎么发到线上。 */
+    /** 任务 → 审批框上那行「谁在问」。 */
+    private static ApprovalOrigin originOf(Task task) {
+        return new ApprovalOrigin(task.id(), task.role().id(), task.role().title());
+    }
+
     private final class ProtocolTeamView implements TeamListener {
 
         @Override
@@ -335,12 +354,14 @@ public final class AgentServer extends WebSocketServer {
         @Override
         public void onSeatStarted(Task seat) {
             audit.taskStarted(seat);
+            approval.origin(originOf(seat));     // 理由同计划任务
             publish(Protocol.encodeSeatStarted(seat));
         }
 
         @Override
         public void onSeatFinished(Task seat) {
             audit.taskFinished(seat);
+            approval.origin(null);
             publish(Protocol.encodeSeatFinished(seat));
         }
 
@@ -465,7 +486,8 @@ public final class AgentServer extends WebSocketServer {
             case "prompt" -> handlePrompt(conn, Protocol.str(cmd, "text", "").trim());
             case "cancel" -> handleCancel();
             case "approval_reply" -> approval.reply(
-                    Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"));
+                    Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"),
+                    Protocol.strings(cmd, "rules"), Protocol.str(cmd, "feedback", ""));
             case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
             case "team" -> handleTeam(conn, Protocol.str(cmd, "goal", "").trim(),
                     Protocol.strings(cmd, "roles"));
@@ -916,7 +938,10 @@ public final class AgentServer extends WebSocketServer {
         sessionId = SessionId.create(System.currentTimeMillis());
         sessionStartedAt = System.currentTimeMillis();
         meter.reset();      // 新会话新账本，和终端的 /clear 是同一条语义
-        approval.reset();
+        // 授权规则**不清**。以前这里有一句 approval.reset()，清的是那个
+        // 「本会话都同意」的全局开关——它本来就该跟着会话走。
+        // 现在的授权是用户一条条挑定、并且存进了 ~/.myagent/policy.json 的东西，
+        // 清空对话没有理由把它撤销；要撤销就去改那个文件
         publish(Protocol.event("reset_done"));
     }
 

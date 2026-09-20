@@ -5,6 +5,9 @@ import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalRequest;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
+import dev.wiles.myagent.tool.safety.TextDiff;
 import dev.wiles.myagent.tool.safety.CommandRisk;
 import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import java.util.List;
@@ -137,9 +140,13 @@ public final class CreateProjectTool implements Tool {
                 }
                 // 批量创建时逐个弹框会烦死人，所以只对真正要覆盖的那些问，
                 // 且把每个文件的变化幅度写进提示里
-                if (risk.needsApproval() && !approval.approve("覆盖文件", pathArg, risk.reason())) {
-                    failed.add(pathArg + " (用户拒绝覆盖)");
-                    continue;
+                if (risk.needsApproval()) {
+                    ApprovalVerdict verdict = approval.decide(ApprovalRequest.write(
+                            "覆盖文件", pathArg, risk.reason(), diffAgainst(target, content)));
+                    if (!verdict.approved()) {
+                        failed.add(pathArg + " (" + verdict.deniedMessage("用户拒绝覆盖") + ")");
+                        continue;
+                    }
                 }
                 try {
                     Path parent = target.getParent();
@@ -173,5 +180,14 @@ public final class CreateProjectTool implements Tool {
             return ToolResult.error(sb.toString().trim());
         }
         return ToolResult.ok(sb.toString().trim());
+    }
+
+    /** 同 {@code WriteFileTool.diffAgainst}：读不动就不给 diff，但绝不因此挡住审批。 */
+    private static String diffAgainst(Path existing, String content) {
+        try {
+            return TextDiff.unified(Files.readString(existing, StandardCharsets.UTF_8), content);
+        } catch (java.io.IOException | RuntimeException e) {
+            return "";
+        }
     }
 }

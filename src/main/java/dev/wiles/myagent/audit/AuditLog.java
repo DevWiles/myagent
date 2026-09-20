@@ -7,6 +7,8 @@ import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalRequest;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -157,13 +159,29 @@ public final class AuditLog implements AutoCloseable {
         write(node);
     }
 
-    /** 一次审批决策。批准和拒绝都要记——这是审计第一关心的事。 */
-    public void approval(String tool, String detail, String risk, boolean approved) {
+    /**
+     * 一次审批决策。批准和拒绝都要记——这是审计第一关心的事。
+     *
+     * <p>{@code remembered} 尤其要记：一条规则存下去之后，后面所有被它放行的动作
+     * 都<b>不会再产生审批记录</b>。事后查账的人看到一段时间内危险动作突然没人批了，
+     * 得能找到那一刻——否则那段日志看起来就像审批被绕过了。
+     */
+    public void approval(ApprovalRequest request, ApprovalVerdict verdict) {
         ObjectNode node = event("approval");
-        node.put("tool", tool);
-        node.put("detail", clip(detail));
-        node.put("risk", risk);
-        node.put("approved", approved);
+        node.put("tool", request.kind().id());
+        node.put("action", request.action());
+        node.put("detail", clip(request.subject()));
+        node.put("risk", request.reason());
+        node.put("approved", verdict.approved());
+        if (verdict.hasNote()) {
+            node.put("note", clip(verdict.note()));
+        }
+        if (!verdict.remember().isEmpty()) {
+            node.put("remembered", String.join(" + ", verdict.remember()));
+        }
+        if (request.origin() != null && !request.origin().isBlank()) {
+            node.put("origin", request.origin().label());
+        }
         write(node);
     }
 
@@ -173,12 +191,15 @@ public final class AuditLog implements AutoCloseable {
      * <p>用装饰器而不是去三个工具里各埋一行：审批点以后还会增加，
      * 埋点式的做法总有一天会漏掉一个，而漏掉的那个恰好就是出事的那个。
      * 包在这里，任何经过这条策略的决策都跑不掉。
+     *
+     * <p>包的位置在 {@code PolicyGate} <b>里面</b>：被规则直接放行的那些不产生记录，
+     * 只有真正问到人的才记。规则本身在它被存下来的那一刻已经记过一次了。
      */
     public ApprovalPolicy audited(ApprovalPolicy delegate) {
-        return (action, detail, reason) -> {
-            boolean approved = delegate.approve(action, detail, reason);
-            approval(action, detail, reason, approved);
-            return approved;
+        return request -> {
+            ApprovalVerdict verdict = delegate.decide(request);
+            approval(request, verdict);
+            return verdict;
         };
     }
 

@@ -7,6 +7,8 @@ import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.TaskGraph;
 import dev.wiles.myagent.plan.TaskType;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalRequest;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -148,7 +150,7 @@ class AuditLogTest {
         Path file = dir.resolve("run.jsonl");
 
         try (AuditLog audit = new AuditLog(file)) {
-            audit.approval("bash", "rm -rf build", "HIGH", false);
+            audit.approval(ApprovalRequest.bash("rm -rf build", "HIGH"), ApprovalVerdict.no());
         }
 
         JsonNode line = read(file).get(0);
@@ -194,7 +196,7 @@ class AuditLogTest {
         try (AuditLog audit = new AuditLog(file)) {
             ApprovalPolicy policy = audit.audited(ApprovalPolicy.denyAll());
 
-            assertFalse(policy.approve("执行命令", "rm -rf /", "删除整个目录"));
+            assertFalse(policy.decide(ApprovalRequest.bash("rm -rf /", "删除整个目录")).approved());
         }
 
         JsonNode line = read(file).get(0);
@@ -207,7 +209,8 @@ class AuditLogTest {
     @DisplayName("装饰器不能改变审批结果本身")
     void decoratorKeepsTheDecision(@TempDir Path dir) {
         try (AuditLog audit = new AuditLog(dir.resolve("run.jsonl"))) {
-            assertTrue(audit.audited(ApprovalPolicy.approveAll()).approve("写入文件", "a", "b"));
+            assertTrue(audit.audited(ApprovalPolicy.approveAll())
+                    .decide(ApprovalRequest.write("写入文件", "a", "b", "")).approved());
         }
     }
 }

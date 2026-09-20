@@ -27,9 +27,9 @@ class FileWriteApprovalTest {
     private final List<String> asked = new ArrayList<>();
 
     private ApprovalPolicy recording(boolean answer) {
-        return (action, detail, reason) -> {
-            asked.add(detail + " | " + reason);
-            return answer;
+        return request -> {
+            asked.add(request.subject() + " | " + request.reason());
+            return answer ? ApprovalVerdict.yes() : ApprovalVerdict.no();
         };
     }
 
