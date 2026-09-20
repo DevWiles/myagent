@@ -252,6 +252,146 @@ describe('状态栏数据', () => {
     feed(store, { t: 'busy', busy: false })
     expect(store.getSnapshot().approval).toBeNull()
   })
+
+  test('老后端不发新字段时给默认值，界面不该显示 undefined', () => {
+    const store = new SessionStore()
+    feed(store,
+      { t: 'approval_request', id: 1, action: '执行命令', detail: 'rm x', reason: '会删' })
+
+    const approval = store.getSnapshot().approval!
+    expect(approval.kind).toBe('bash')
+    expect(approval.preview).toBe('')
+    expect(approval.origin).toBe('')
+    expect(approval.suggestions).toEqual([])
+  })
+
+  test('新字段照原样收下', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    const approval = store.getSnapshot().approval!
+    expect(approval.kind).toBe('bash')
+    expect(approval.origin).toBe('编码者 · t3')
+    expect(approval.suggestions.length).toBe(3)
+    expect(approval.preferred).toBe(1)
+  })
+})
+
+/** 一条带全套新字段的审批请求。 */
+function askWithRules(): ServerEvent {
+  return {
+    t: 'approval_request',
+    id: 7,
+    kind: 'bash',
+    action: '执行命令',
+    detail: 'mvn -o test -Dtest=Foo',
+    reason: '未知命令 mvn',
+    preview: '',
+    origin: '编码者 · t3',
+    suggestions: [
+      { label: 'mvn -o test -Dtest=Foo', patterns: ['mvn -o test -Dtest=Foo'] },
+      { label: 'mvn -o test *', patterns: ['mvn -o test *'] },
+      { label: 'mvn *', patterns: ['mvn *'] },
+    ],
+    preferred: 1,
+  } as ServerEvent
+}
+
+describe('确认框的三个交互态', () => {
+  test('按 a 进挑规则那一步，默认停在后端推荐的那一档', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    store.beginRulePick()
+
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 1 })
+  })
+
+  test('后端一条规则都没提议时，按 a 留在原地', () => {
+    // 跳进一个空的选择态，用户只会更糊涂——而且此刻后端还等着
+    const store = new SessionStore()
+    feed(store,
+      { t: 'approval_request', id: 1, action: '执行命令', detail: 'x', reason: 'y' })
+
+    store.beginRulePick()
+
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+  })
+
+  test('←/→ 调松紧，撞到两头就停住', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+    store.beginRulePick()
+
+    store.moveRulePick(-1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 0 })
+    store.moveRulePick(-1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 0 })
+    store.moveRulePick(1)
+    store.moveRulePick(1)
+    store.moveRulePick(1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 2 })
+  })
+
+  test('按 n 进补话那一步，敲字进得去、退格删得掉', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    store.beginFeedback()
+    expect(store.typeFeedback({ sequence: 'a' })).toBe(true)
+    expect(store.typeFeedback({ sequence: 'b' })).toBe(true)
+    expect(store.typeFeedback({ name: 'backspace' })).toBe(true)
+
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'feedback', text: 'a' })
+  })
+
+  test('方向键在补话那一步退回 false，交给上层处理', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+    store.beginFeedback()
+
+    expect(store.typeFeedback({ name: 'left', sequence: '\x1b[D' })).toBe(false)
+  })
+
+  test('不在补话那一步时敲键什么也不发生', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    expect(store.typeFeedback({ sequence: 'a' })).toBe(false)
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+  })
+
+  test('答完之后交互态要跟着框一起清掉，不能带到下一个框上', () => {
+    // 不清的话，下一次弹框会直接停在上一次的 rule 态，
+    // 而那一档对应的是上一条命令
+    const store = new SessionStore()
+    feed(store, askWithRules())
+    store.beginRulePick()
+
+    store.clearApproval()
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+
+    feed(store, askWithRules())
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+  })
+
+  test('busy 结束也要把交互态清掉', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+    store.beginFeedback()
+
+    feed(store, { t: 'busy', busy: false })
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+  })
+
+  test('esc 退回表态那一步', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+    store.beginFeedback()
+
+    store.resetApprovalStage()
+    expect(store.getSnapshot().approvalStage.step).toBe('ask')
+  })
 })
 
 describe('其它', () => {

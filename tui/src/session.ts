@@ -40,8 +40,29 @@ export type Session = {
   /** 收起选择器面板。 */
   closeSessionPicker: () => void
   /** 回应审批请求。 */
-  approve: (id: number, decision: "yes" | "no" | "always") => void
+  /**
+   * 回答审批。
+   *
+   * `rules` 只在 `always` 时有意义——那是用户挑定的授权范围，后端会存进
+   * `~/.myagent/policy.json`；`feedback` 只在 `no` 时有意义，那句话会原样交给模型。
+   */
+  approve: (
+    id: number,
+    decision: "yes" | "no" | "always",
+    rules?: string[],
+    feedback?: string,
+  ) => void
   /** 回应计划确认。 */
+  /** 按了 a：进「挑授权范围」那一步。后端没提议规则时什么也不做 */
+  pickRule: () => void
+  /** ←/→ 调松紧 */
+  moveRule: (delta: number) => void
+  /** 按了 n：进「补一句话」那一步 */
+  askFeedback: () => void
+  /** 在补话那一步敲了个键。返回 true 表示这个键被吃掉了 */
+  typeFeedback: (key: { name?: string; sequence?: string }) => boolean
+  /** 退回表态那一步 */
+  resetApprovalStage: () => void
   confirmPlan: (id: number, approved: boolean) => void
   /** 现在就压一次上下文。原文留在存档里，压的只是发给模型的那份窗口。 */
   compact: () => void
@@ -216,11 +237,26 @@ export function createSession(options: BackendOptions): Session {
     closeSessionPicker() {
       store.closeSessionPicker()
     },
-    approve(id, decision) {
+    approve(id, decision, rules, feedback) {
       // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，
       // 这期间框不收掉，用户会对着一个已经答过的框发呆
       store.clearApproval()
-      backend?.send({ t: "approval_reply", id, decision })
+      backend?.send({ t: "approval_reply", id, decision, rules, feedback })
+    },
+    pickRule() {
+      store.beginRulePick()
+    },
+    moveRule(delta) {
+      store.moveRulePick(delta)
+    },
+    askFeedback() {
+      store.beginFeedback()
+    },
+    typeFeedback(key) {
+      return store.typeFeedback(key)
+    },
+    resetApprovalStage() {
+      store.resetApprovalStage()
     },
     confirmPlan(id, approved) {
       store.clearPlanConfirm()

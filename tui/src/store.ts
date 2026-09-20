@@ -16,6 +16,8 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
+import { ASK_STAGE, editFeedback, nextRuleIndex } from './approval.ts'
+import type { ApprovalStage, ApprovalSuggestion } from './approval.ts'
 import type { MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
@@ -121,7 +123,22 @@ export type Entry =
   | { kind: 'plan'; key: string; plan: PlanData }
   | { kind: 'team'; key: string; team: TeamData }
 
-export type Approval = { id: number; action: string; detail: string; reason: string }
+export type Approval = {
+  id: number
+  /** `bash` | `write`。老后端不发这个字段，当成 bash 处理 */
+  kind: string
+  action: string
+  detail: string
+  reason: string
+  /** 写文件时的 diff 正文。空串表示没有 */
+  preview: string
+  /** 「编码者 · t3」。空串表示就是用户刚说的那句话 */
+  origin: string
+  /** 「以后都同意」可选的几档松紧，从紧到松。空数组表示这次记不成规则 */
+  suggestions: ApprovalSuggestion[]
+  /** 默认选中第几档 */
+  preferred: number
+}
 
 /**
  * 下一句话按什么方式跑。
@@ -209,6 +226,13 @@ export type SessionState = {
   /** 当前跑到第几轮（ReAct step）。 */
   step: number
   approval: Approval | null
+  /**
+   * 确认框停在哪一步（表态 / 挑规则 / 补一句话）。
+   *
+   * **放在 store 而不是组件里**：按键处理在 App，而组件在矮终端上可能压根不渲染。
+   * 状态跟着组件走的话，那种终端上按 a 会没有任何反应——后端还等着，用户不知道为什么。
+   */
+  approvalStage: ApprovalStage
   /** 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。 */
   planConfirm: { id: number } | null
   /**
@@ -255,6 +279,7 @@ const EMPTY_STATE: SessionState = {
   busy: false,
   step: 0,
   approval: null,
+  approvalStage: ASK_STAGE,
   planConfirm: null,
   mode: 'normal',
   activePlanKey: null,
@@ -485,7 +510,59 @@ export class SessionStore {
    * 用户会对着一个已经答过的框发呆，再按一次 y 还会给一个后端早已不等的 id 补发回复。
    */
   clearApproval(): void {
-    this.set({ approval: null })
+    this.set({ approval: null, approvalStage: ASK_STAGE })
+  }
+
+  /**
+   * 按了 a：进「挑松紧」这一步。
+   *
+   * 后端一条都没提议时**留在原地**——多段命令里有段推不出规则，
+   * 或者根本没有 subject。这时候让框跳进一个空的选择态，用户只会更糊涂。
+   */
+  beginRulePick(): void {
+    const approval = this.state.approval
+    if (!approval || approval.suggestions.length === 0) return
+    this.set({ approvalStage: { step: 'rule', index: approval.preferred } })
+  }
+
+  /** ←/→ 调松紧。 */
+  moveRulePick(delta: number): void {
+    const stage = this.state.approvalStage
+    const approval = this.state.approval
+    if (stage.step !== 'rule' || !approval) return
+    this.set({
+      approvalStage: {
+        step: 'rule',
+        index: nextRuleIndex(stage.index, delta, approval.suggestions.length),
+      },
+    })
+  }
+
+  /** 按了 n：进「补一句话」这一步。 */
+  beginFeedback(): void {
+    if (!this.state.approval) return
+    this.set({ approvalStage: { step: 'feedback', text: '' } })
+  }
+
+  /**
+   * 在「补一句话」那一步敲了个键。
+   *
+   * @returns 这个键有没有被用掉。false 表示它不是可打印字符也不是退格
+   *          （方向键、回车、Esc），交给上层去处理
+   */
+  typeFeedback(key: { name?: string; sequence?: string }): boolean {
+    const stage = this.state.approvalStage
+    if (stage.step !== 'feedback') return false
+    const next = editFeedback(stage.text, key)
+    if (next === null) return false
+    this.set({ approvalStage: { step: 'feedback', text: next } })
+    return true
+  }
+
+  /** 退回表态那一步。 */
+  resetApprovalStage(): void {
+    if (this.state.approvalStage.step === 'ask') return
+    this.set({ approvalStage: ASK_STAGE })
   }
 
   clearTranscript(): void {
@@ -493,7 +570,7 @@ export class SessionStore {
   }
 
   markClosed(reason: string): void {
-    this.set({ closed: reason, busy: false, approval: null })
+    this.set({ closed: reason, busy: false, approval: null, approvalStage: ASK_STAGE })
   }
 
   // ------------------------------------------------------------ 后端事件
@@ -650,13 +727,22 @@ export class SessionStore {
         return
 
       case 'approval_request':
+        // 每个字段都给默认值：老后端不发新字段，界面不该因此显示 undefined。
+        // 尤其 suggestions 缺省成空数组——那正好等于「这次记不成规则」，
+        // 于是老后端接新界面时，a 键自然而然地不起作用，而不是发出一条后端不认的回复
         this.set({
           approval: {
             id: event.id,
+            kind: event.kind ?? 'bash',
             action: event.action,
             detail: event.detail,
             reason: event.reason,
+            preview: event.preview ?? '',
+            origin: event.origin ?? '',
+            suggestions: event.suggestions ?? [],
+            preferred: event.preferred ?? 0,
           },
+          approvalStage: ASK_STAGE,
         })
         return
 
@@ -667,6 +753,7 @@ export class SessionStore {
         this.set({
           busy: event.busy,
           approval: event.busy ? this.state.approval : null,
+          approvalStage: event.busy ? this.state.approvalStage : ASK_STAGE,
           planConfirm: event.busy ? this.state.planConfirm : null,
           step: event.busy ? this.state.step : 0,
           tokens: event.tokens ?? this.state.tokens,

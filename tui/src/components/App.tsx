@@ -439,12 +439,41 @@ export function App(props: AppProps) {
 
     const approval = state().approval
     if (approval) {
-      if (key.name === "y") return consume(), session.approve(approval.id, "yes")
-      if (key.name === "n" || key.name === "escape")
-        return consume(), session.approve(approval.id, "no")
-      if (key.name === "a") return consume(), session.approve(approval.id, "always")
-      // 确认框挂着时，其余按键一律吞掉：此刻不该有任何别的操作
-      return consume()
+      // 确认框挂着时，所有按键都归它——此刻不该有任何别的操作。
+      // 先 consume 再分发，省得下面每条出路都得记着调一次
+      consume()
+      const stage = state().approvalStage
+
+      // ---- 挑授权范围：←/→ 调松紧，enter 存下，esc 只批这一次 ----
+      if (stage.step === "rule") {
+        if (key.name === "left" || key.name === "up") return session.moveRule(-1)
+        if (key.name === "right" || key.name === "down") return session.moveRule(1)
+        if (key.name === "return") {
+          const level = approval.suggestions[stage.index]
+          return session.approve(approval.id, "always", level?.patterns ?? [])
+        }
+        if (key.name === "escape") return session.approve(approval.id, "yes")
+        return
+      }
+
+      // ---- 补一句话：可打印字符进输入，enter 发出，esc 不带话直接拒绝 ----
+      if (stage.step === "feedback") {
+        if (key.name === "return") return session.approve(approval.id, "no", [], stage.text)
+        if (key.name === "escape") return session.approve(approval.id, "no")
+        // typeFeedback 把方向键之类的退回来，那些在这一步没有意义，吞掉就是
+        session.typeFeedback(key)
+        return
+      }
+
+      // ---- 表态 ----
+      if (key.name === "y") return session.approve(approval.id, "yes")
+      // n 不直接拒绝，而是先给一个补话的机会：拒绝本身只是把路堵上，
+      // 「换个做法」那句话才是模型下一步的依据。Esc 仍然是一键拒绝，
+      // 而且在矮到画不出框的终端上，它是唯一还看得见的出路
+      if (key.name === "n") return session.askFeedback()
+      if (key.name === "escape") return session.approve(approval.id, "no")
+      if (key.name === "a") return session.pickRule()
+      return
     }
 
     // 计划确认同一套道理。刻意没有 [a]——每份计划都不一样，不给一次性授权
@@ -635,7 +664,12 @@ export function App(props: AppProps) {
         <Show when={state().approval}>
           {(approval) => (
             <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <ApprovalDialog approval={approval()} columns={dimensions().width - 2} />
+              <ApprovalDialog
+                approval={approval()}
+                stage={state().approvalStage}
+                columns={dimensions().width - 2}
+                rows={dimensions().height}
+              />
             </box>
           )}
         </Show>

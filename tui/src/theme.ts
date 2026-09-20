@@ -50,6 +50,15 @@ export type Theme = {
   promptBorderBusy: string
   /** 需要确认时的边框 */
   approvalBorder: string
+  /**
+   * 确认框里 diff 的增删两色。
+   *
+   * 不复用 success/error：那两个色说的是「成功了 / 出错了」，
+   * 而这里说的是「加了一行 / 删了一行」——删一行不是错误，
+   * 借用同一个红会把一次正常改动看成一屏报错。
+   */
+  diffAdd: string
+  diffDel: string
   /** 转圈动画 */
   spinner: string
 
@@ -83,6 +92,8 @@ export const dark: Theme = {
   promptBorder: "#5c5c5c",
   promptBorderBusy: "#5b9dfb",
   approvalBorder: "#d9a441",
+  diffAdd: "#98c379",
+  diffDel: "#e06c75",
   spinner: "#5b9dfb",
   border: "#3d4757",
   panel: "#1b1f27",
@@ -108,6 +119,8 @@ export const light: Theme = {
   promptBorder: "#9a9a9a",
   promptBorderBusy: "#1d4ed8",
   approvalBorder: "#a16207",
+  diffAdd: "#166534",
+  diffDel: "#b91c1c",
   spinner: "#1d4ed8",
   border: "#c4ccd8",
   panel: "#f2f4f8",

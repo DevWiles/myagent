@@ -24,6 +24,7 @@ function stateOf(partial: {
         }
       : null,
     entries: partial.entries ?? [],
+    approvalStage: { step: 'ask' as const },
     mode: 'normal' as const,
     activePlanKey: null,
     activeTeamKey: null,

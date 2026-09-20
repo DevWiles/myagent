@@ -186,7 +186,28 @@ export type ServerEvent =
   | { t: 'done'; text: string; steps: number }
   | { t: 'failed'; reason: string }
   /** 需要用户确认某个危险动作。回 approval_reply 之前后端是卡住的。 */
-  | { t: 'approval_request'; id: number; action: string; detail: string; reason: string }
+  | {
+      t: 'approval_request'
+      id: number
+      /** 机器键：`bash` | `write`。规则按它分类，界面按它决定 preview 怎么画 */
+      kind?: string
+      action: string
+      detail: string
+      reason: string
+      /** 写文件时是 diff 正文。没有就是空串 */
+      preview?: string
+      /** 计划/圆桌里是「编码者 · t3」。单轮对话里是空串 */
+      origin?: string
+      /**
+       * 「以后都同意」可以存成哪几条规则，从紧到松。空数组表示这次不能记规则。
+       *
+       * `patterns` 才是回给后端的东西，`label` 只是显示。
+       * **后端只接受它自己提议过的 pattern**——回别的一律当没回。
+       */
+      suggestions?: { label: string; patterns: string[] }[]
+      /** 默认选中第几档 */
+      preferred?: number
+    }
   /** 一轮对话的开始/结束。结束时带上耗时和上下文占用。 */
   | {
       t: 'busy'
@@ -324,7 +345,19 @@ export type ClientCommand =
   | { t: 'continue' }
   | { t: 'plan_confirm_reply'; id: number; approved: boolean }
   | { t: 'cancel' }
-  | { t: 'approval_reply'; id: number; decision: ApprovalDecision }
+  /**
+   * 回应 `approval_request`。
+   *
+   * `always` 时带上 `rules`（从 `suggestions[i].patterns` 里原样取），后端会存进
+   * `~/.myagent/policy.json`；`no` 时可以带 `feedback`，那句话会原样交给模型。
+   */
+  | {
+      t: 'approval_reply'
+      id: number
+      decision: ApprovalDecision
+      rules?: string[]
+      feedback?: string
+    }
   | { t: 'reset' }
   /**
    * 现在就压一次上下文（feature: `compact`）。
