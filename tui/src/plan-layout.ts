@@ -30,6 +30,42 @@ export type PlanPanelLayout = {
 }
 
 /**
+ * 这一步派给谁，显示成什么。
+ *
+ * <p>三级退让：后端给的中文名 → 角色 id → 类型。**最后一级是为老后端留的**，
+ * 那时候还没有角色这回事；退回类型比画一个空标签强得多——
+ * 空标签看起来像「这一步出了什么问题」，而其实只是后端老。
+ */
+export function roleLabel(task: PlanTask): string {
+  return task.roleTitle ?? task.role ?? task.type
+}
+
+/**
+ * 标签列要留多宽（按终端列数，中文算两列）。
+ *
+ * <p>按实际内容算，不写死：角色名册是后端给的，会长。写死一个宽度的话，
+ * 名册里哪天多一个三个字的角色，那几行就比别人多出一格——
+ * 而这种错位在真机上要盯很久才看得出来。
+ */
+export function labelColumns(tasks: readonly PlanTask[]): number {
+  return tasks.reduce((max, task) => Math.max(max, displayWidth(roleLabel(task))), 0)
+}
+
+/** 中日韩字符在终端里占两列，别的按一列算。够用了——标签里不会有 emoji。 */
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const ch of text) {
+    width += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1
+  }
+  return width
+}
+
+/** 右补空格到指定列宽。补不齐（内容本来就更宽）就原样返回，宁可错位也别截角色名。 */
+export function padToColumns(text: string, columns: number): string {
+  return text + " ".repeat(Math.max(0, columns - displayWidth(text)))
+}
+
+/**
  * 当前该盯着哪一步：正在跑的那个；没有就是第一个还没了结的；再没有就是最后一个。
  *
  * <p>最后一档不是凑数——计划跑完之后用户最关心的是结尾（成没成、最后一步说了什么），

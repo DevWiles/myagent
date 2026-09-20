@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.wiles.myagent.plan.AgentRole;
+import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
@@ -64,7 +66,30 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact", "memory");
+                    "session", "sessions", "compact", "memory", "roles");
+
+    /**
+     * 角色名册，进首帧。
+     *
+     * <p><b>为什么服务端把名册整份发过去，而不是让界面自己写一张表</b>：
+     * 和 {@code layers} 由服务端算好是同一个理由——同一份事实在两种语言里各写一遍，
+     * 迟早有一边过期。这里过期的症状还特别隐蔽：后端加了个角色，
+     * 界面不认得它的 id，于是那一步显示成一个空标签，而其它一切正常。
+     */
+    public static ArrayNode encodeRoles() {
+        ArrayNode list = MAPPER.createArrayNode();
+        for (AgentRole role : AgentRoles.all()) {
+            ObjectNode item = list.addObject();
+            item.put("id", role.id());
+            item.put("title", role.title());
+            item.put("summary", role.summary());
+            item.put("type", role.taskType().name());
+            item.put("mutates", role.mutates());
+            ArrayNode tools = item.putArray("tools");
+            role.tools().forEach(tools::add);
+        }
+        return list;
+    }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -185,6 +210,8 @@ public final class Protocol {
         ObjectNode n = event("plan_task_started");
         n.put("taskId", task.id());
         n.put("taskType", task.type().name());
+        n.put("role", task.role().id());
+        n.put("roleTitle", task.role().title());
         n.put("description", task.description());
         return n;
     }
@@ -245,6 +272,12 @@ public final class Protocol {
         ObjectNode item = MAPPER.createObjectNode();
         item.put("id", task.id());
         item.put("type", task.type().name());
+        // 派给谁。和 type 一起发而不是取代它：两者回答的不是同一个问题——
+        // type 是「这一步会对世界做什么」（界面上色、将来排并发靠它），
+        // role 是「派谁去、用什么姿势」。而且老界面只认 type，
+        // 换掉它就是一次破坏性改动，得升协议版本；新增一个字段不用
+        item.put("role", task.role().id());
+        item.put("roleTitle", task.role().title());
         item.put("description", task.description());
         // 新增字段不升协议版本：老界面照约定忽略不认识的字段，照跑不误
         item.put("acceptance", task.acceptance());

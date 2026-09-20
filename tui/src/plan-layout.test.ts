@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { focusIndex, layoutPlanPanel, planProgress } from './plan-layout.ts'
+import {
+  displayWidth,
+  focusIndex,
+  labelColumns,
+  layoutPlanPanel,
+  padToColumns,
+  planProgress,
+  roleLabel,
+} from './plan-layout.ts'
 import type { PlanTask } from './store.ts'
 
 function task(id: string, status = 'PENDING'): PlanTask {
@@ -124,5 +132,42 @@ describe('进度', () => {
   test('一步没跑是 0，空计划也是 0 而不是 NaN', () => {
     expect(planProgress(tasks(3))).toBe(0)
     expect(planProgress([])).toBe(0)
+  })
+})
+
+describe('角色标签', () => {
+  const withRole = (id: string, role?: string, roleTitle?: string): PlanTask => ({
+    ...task(id),
+    role,
+    roleTitle,
+  })
+
+  test('有中文名就用中文名', () => {
+    expect(roleLabel(withRole('t1', 'reviewer', '审查'))).toBe('审查')
+  })
+
+  test('只有 id 时用 id——总比空标签强', () => {
+    expect(roleLabel(withRole('t1', 'reviewer'))).toBe('reviewer')
+  })
+
+  test('老后端根本不发角色，退回类型，不画空标签', () => {
+    expect(roleLabel(task('t1'))).toBe('FILE_READ')
+  })
+
+  test('中文按两列算，标签列才不会错位', () => {
+    expect(displayWidth('审查')).toBe(4)
+    expect(displayWidth('coder')).toBe(5)
+  })
+
+  test('列宽按实际内容算：混着老任务也能对齐', () => {
+    const tasks = [withRole('t1', 'coder', '编码'), task('t2')]
+
+    // FILE_READ 是 9 列，比「编码」的 4 列宽
+    expect(labelColumns(tasks)).toBe(9)
+    expect(padToColumns('编码', 9)).toBe('编码     ')
+  })
+
+  test('内容本来就比列宽还宽时原样返回——宁可错位也别把角色名截断', () => {
+    expect(padToColumns('VERIFICATION', 4)).toBe('VERIFICATION')
   })
 })

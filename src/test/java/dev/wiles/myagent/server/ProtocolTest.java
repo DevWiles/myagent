@@ -3,6 +3,7 @@ package dev.wiles.myagent.server;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.TaskGraph;
@@ -207,8 +208,48 @@ class ProtocolTest {
     }
 
     @Test
+    @DisplayName("每个任务都带上派了谁——type 也留着，老界面照样看得懂")
+    void encodesRoleAlongsideType() {
+        Plan plan = new Plan("挑毛病", TaskGraph.of(List.of(
+                new Task("t1", "审一遍", AgentRoles.REVIEWER, List.of(), "给出清单"))));
+
+        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
+
+        assertEquals("reviewer", task.get("role").asText());
+        assertEquals("审查", task.get("roleTitle").asText());
+        assertEquals("FILE_READ", task.get("type").asText(),
+                "type 不能因为有了 role 就消失——删字段是破坏性改动，得升协议版本");
+    }
+
+    @Test
+    @DisplayName("任务开始那条也带角色：界面画「正在做第几步」时就得知道是谁在做")
+    void taskStartedCarriesRole() {
+        ObjectNode started = Protocol.encodeTaskStarted(
+                new Task("t1", "跑测试", AgentRoles.VERIFIER, List.of(), "全绿"));
+
+        assertEquals("verifier", started.get("role").asText());
+        assertEquals("验证", started.get("roleTitle").asText());
+        assertEquals("VERIFICATION", started.get("taskType").asText());
+    }
+
+    @Test
+    @DisplayName("首帧把整份名册发过去，界面不用自己维护一张角色表")
+    void readyCarriesTheRoster() {
+        JsonNode roles = Protocol.encodeRoles();
+
+        assertEquals(AgentRoles.all().size(), roles.size());
+        JsonNode first = roles.get(0);
+        for (String field : List.of("id", "title", "summary", "type", "mutates", "tools")) {
+            assertTrue(first.has(field), "名册里缺字段 " + field + ": " + first);
+        }
+        // 界面要靠 mutates 之类的字段做区分，不能全靠 id 硬编码
+        assertTrue(roles.findValuesAsText("id").contains("reviewer"), roles.toString());
+    }
+
+    @Test
     @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
     void announcesFeatures() {
+        assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());

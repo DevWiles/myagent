@@ -18,6 +18,7 @@ function stateOf(partial: {
           planMode: false,
           hasApiKey: true,
           tools: [],
+          roles: [],
           features: [],
           auditLog: partial.auditLog,
         }

@@ -892,6 +892,8 @@ public final class AgentServer extends WebSocketServer {
         if (rejection != null) {
             n.put("workspaceWarning", rejection);   // 能走到这儿说明是 --unsafe 放行的
         }
+        // 角色名册。界面靠它给每一步标出「派了谁」，不用自己维护一张表
+        n.set("roles", Protocol.encodeRoles());
         ArrayNode list = n.putArray("tools");
         for (Tool tool : tools.all()) {
             list.addObject().put("name", tool.name()).put("description", tool.description());

@@ -1,10 +1,11 @@
 package dev.wiles.myagent.cli;
 
+import dev.wiles.myagent.plan.AgentRole;
+import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.TaskStatus;
-import dev.wiles.myagent.plan.TaskType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,7 +15,7 @@ import java.util.List;
  *
  * <p>计划面板是这个特性里<b>唯一要用户真正读一遍</b>的东西：模型理解对了吗、
  * 拆得合理吗、哪些步骤其实可以并行——用户看完才决定要不要放它跑。
- * 所以这里的取舍一律偏向「一眼能看懂」：按层缩进、标出依赖、类型用中文短标签。
+ * 所以这里的取舍一律偏向「一眼能看懂」：按层缩进、标出依赖、角色用中文短标签。
  *
  * <p>纯函数、不打印，是为了能单测——终端渲染最容易在窄屏和长文本上出问题，
  * 那两种情况用断言比肉眼盯可靠。
@@ -30,16 +31,25 @@ public final class PlanView {
     private PlanView() {
     }
 
-    /** 类型的中文短标签。定长两字，任务行才能对齐。 */
-    private static String label(TaskType type) {
-        return switch (type) {
-            case PLANNING -> "规划";
-            case FILE_READ -> "读取";
-            case FILE_WRITE -> "写入";
-            case COMMAND -> "命令";
-            case ANALYSIS -> "分析";
-            case VERIFICATION -> "验证";
-        };
+    /**
+     * 最长的角色名有几个字。补齐到它，任务行才能对齐。
+     *
+     * <p>按名册算而不是写死 2：名册是会长的，哪天多一个三字角色，
+     * 写死的那个 2 不会报错，只会让某几行比别人多出一格——
+     * 而这种错位在真机上要盯很久才看得出来。
+     */
+    private static final int LABEL_WIDTH = AgentRoles.all().stream()
+            .mapToInt(role -> role.title().length()).max().orElse(2);
+
+    /**
+     * 角色的短标签。
+     *
+     * <p>显示角色而不是类型：{@code explorer} 和 {@code reviewer} 同属 FILE_READ，
+     * 画成同一个「读取」的话，用户在确认计划时根本分不出哪一步是去查、哪一步是去挑毛病——
+     * 而那正是他要判断的东西。
+     */
+    private static String label(AgentRole role) {
+        return " ".repeat(Math.max(0, LABEL_WIDTH - role.title().length())) + role.title();
     }
 
     /**
@@ -70,7 +80,7 @@ public final class PlanView {
 
     /** 某个任务开跑。 */
     public static String taskStarted(Task task) {
-        return Ansi.cyan("▸ ") + Ansi.dim("[" + label(task.type()) + " " + task.id() + "] ")
+        return Ansi.cyan("▸ ") + Ansi.dim("[" + label(task.role()) + " " + task.id() + "] ")
                 + task.description();
     }
 
@@ -126,7 +136,7 @@ public final class PlanView {
     }
 
     private static String taskLine(String mark, Task task, int width) {
-        String prefix = "    " + mark + " " + Ansi.dim("[" + label(task.type()) + " "
+        String prefix = "    " + mark + " " + Ansi.dim("[" + label(task.role()) + " "
                 + task.id() + "] ");
         String deps = task.dependencies().isEmpty() ? ""
                 : Ansi.dim("  ← " + String.join(", ", task.dependencies()));

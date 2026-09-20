@@ -95,6 +95,9 @@ public final class AuditLog implements AutoCloseable {
             ObjectNode item = tasks.addObject();
             item.put("id", task.id());
             item.put("type", task.type().name());
+            // 派了谁要记：角色决定了这一步手上有哪些工具，
+            // 事后查「它怎么会改到这个文件」时，第一个要看的就是这里
+            item.put("role", task.role().id());
             item.put("description", clip(task.description()));
             ArrayNode deps = item.putArray("dependsOn");
             task.dependencies().forEach(deps::add);
@@ -109,6 +112,7 @@ public final class AuditLog implements AutoCloseable {
         ObjectNode node = event("task_started");
         node.put("taskId", task.id());
         node.put("taskType", task.type().name());
+        node.put("role", task.role().id());
         node.put("description", clip(task.description()));
         write(node);
     }

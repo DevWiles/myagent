@@ -111,7 +111,7 @@ src/main/java/dev/wiles/myagent/
   llm/        DeepSeek 客户端、流式累积、工具协议
   tool/       工具注册表 + 内置工具（读/写/列目录/跑命令/建项目）
     safety/   工作区、命令、写文件三道守卫
-  plan/       规划 → 任务图 → 执行 → 重规划
+  plan/       规划 → 任务图 → 执行 → 重规划；角色名册（谁拿什么工具、按什么规矩干）
   context/    上下文窗口管理、token 估算
   audit/      审计日志
   server/     --serve 的 WebSocket 服务端
@@ -128,8 +128,8 @@ docs/protocol.md   前后端契约
 ## 开发
 
 ```bash
-mvn test                       # 后端（861 个测试）
-cd tui && bun test             # 界面（222 个测试）
+mvn test                       # 后端（882 个测试）
+cd tui && bun test             # 界面（230 个测试）
 cd tui && bun run typecheck
 cd tui && bun run cover        # 重新生成上面那张封面图
 ```

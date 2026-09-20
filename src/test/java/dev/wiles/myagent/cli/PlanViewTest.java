@@ -47,12 +47,12 @@ class PlanViewTest {
     }
 
     @Test
-    @DisplayName("每个任务都标出类型和 id，出问题时用户能指着说是哪一个")
-    void showsTypeAndId() {
+    @DisplayName("每个任务都标出角色和 id，出问题时用户能指着说是哪一个")
+    void showsRoleAndId() {
         String out = joined(PlanView.plan(plan(), 80));
 
         assertTrue(out.contains("t3"), out);
-        assertTrue(out.contains("写"), "FILE_WRITE 要有个看得懂的标签：" + out);
+        assertTrue(out.contains("编码"), "coder 要有个看得懂的标签：" + out);
         assertTrue(out.contains("验证"), out);
     }
 

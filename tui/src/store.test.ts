@@ -321,6 +321,32 @@ function planOf(store: SessionStore) {
 }
 
 describe('计划面板', () => {
+  test('角色跟着任务一起进来——面板要靠它区分「去查」和「去挑毛病」', () => {
+    const store = new SessionStore()
+    feed(store, {
+      t: 'plan_created',
+      goal: '审一遍再改',
+      tasks: [
+        { ...wireTask('t1'), role: 'reviewer', roleTitle: '审查' },
+        { ...wireTask('t2', ['t1']), type: 'FILE_WRITE', role: 'coder', roleTitle: '编码' },
+      ],
+      layers: [['t1'], ['t2']],
+    })
+
+    const plan = planOf(store)
+    expect(plan.tasks[0].role).toBe('reviewer')
+    expect(plan.tasks[0].roleTitle).toBe('审查')
+    expect(plan.tasks[1].roleTitle).toBe('编码')
+  })
+
+  test('老后端不发角色：字段就是 undefined，不能编一个出来', () => {
+    const store = new SessionStore()
+    feed(store, planCreated())
+
+    expect(planOf(store).tasks[0].role).toBeUndefined()
+    expect(planOf(store).tasks[0].roleTitle).toBeUndefined()
+  })
+
   test('plan_created 落成一条 plan entry，goal 和分层原样保留', () => {
     const store = new SessionStore()
     feed(store, planCreated())

@@ -60,6 +60,21 @@ class AuditLogTest {
     }
 
     @Test
+    @DisplayName("审计里要记下派了谁——事后查「它怎么会改到这个文件」先看这里")
+    void recordsWhichRoleRanEachStep(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("run.jsonl");
+        try (AuditLog audit = new AuditLog(file)) {
+            audit.planCreated(plan());
+            audit.taskStarted(plan().graph().get("t2"));
+        }
+
+        List<JsonNode> lines = read(file);
+        assertEquals("explorer", lines.get(0).get("tasks").get(0).get("role").asText());
+        assertEquals("coder", lines.get(0).get("tasks").get(1).get("role").asText());
+        assertEquals("coder", lines.get(1).get("role").asText());
+    }
+
+    @Test
     @DisplayName("同一次运行的所有记录共享一个 runId——串不起来的日志等于没有")
     void sharesOneRunId(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("run.jsonl");

@@ -16,7 +16,7 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
-import type { MemoryRow, PlanTaskWire, ServerEvent, ToolInfo } from './protocol.ts'
+import type { MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
@@ -32,6 +32,10 @@ export type ToolCall = {
 export type PlanTask = {
   id: string
   type: string
+  /** 派给这一步的角色 id。老后端不发这个字段，那就只有 type 可显示。 */
+  role?: string
+  /** 角色的中文名，后端给的。界面不自己按 id 映射——两边措辞会漂。 */
+  roleTitle?: string
   description: string
   /** 做到什么算完。可能没有——老计划里没这个字段。 */
   acceptance?: string
@@ -90,6 +94,8 @@ export type ReadyInfo = {
   planMode: boolean
   hasApiKey: boolean
   tools: ToolInfo[]
+  /** 后端的角色名册。老后端不发，那就是空数组。 */
+  roles: RoleInfo[]
   /** 后端宣告的可选能力。'plan' 在里面才放出 /plan 入口。 */
   features: string[]
   workspaceWarning?: string
@@ -380,6 +386,7 @@ export class SessionStore {
             planMode: event.planMode,
             hasApiKey: event.hasApiKey,
             tools: event.tools,
+            roles: event.roles ?? [],
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
@@ -688,6 +695,8 @@ function fromWire(task: PlanTaskWire, recovery = false): PlanTask {
   return {
     id: task.id,
     type: task.type,
+    role: task.role,
+    roleTitle: task.roleTitle,
     description: task.description,
     acceptance: task.acceptance ?? undefined,
     status: task.status,

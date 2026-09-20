@@ -12,10 +12,34 @@ export const PROTOCOL_VERSION = 1
 
 export type ToolInfo = { name: string; description: string }
 
+/**
+ * 一个角色在名册里的样子。
+ *
+ * `mutates` 是「它会不会动手改东西」——界面拿它分色比按 id 硬编码可靠：
+ * 名册是会长的，硬编码的那张表只会停在写它的那天。
+ */
+export type RoleInfo = {
+  id: string
+  title: string
+  summary: string
+  type: string
+  mutates: boolean
+  tools: string[]
+}
+
 /** 计划里的一个任务，线上形态。status/parentId 在 plan_created 里分别是 PENDING/null。 */
 export type PlanTaskWire = {
   id: string
   type: string
+  /**
+   * 派给这一步的角色 id（`explorer` / `coder` / …）。老后端没有这个字段。
+   *
+   * 和 `type` 不是一回事：同一个 `FILE_READ` 底下既可能是 `explorer`（去查清楚）
+   * 也可能是 `reviewer`（去挑毛病）——只画 type 的话这两件事长得一模一样。
+   */
+  role?: string
+  /** 角色的中文名，后端给。界面**不要自己按 id 映射**——两边措辞会漂。 */
+  roleTitle?: string
   description: string
   /** 做到什么算这一步完成。老计划里可能是 null。 */
   acceptance?: string | null
@@ -62,6 +86,13 @@ export type ServerEvent =
       sentTokens?: number
       contextLimit?: number
       workspaceWarning?: string
+      /**
+       * 后端的角色名册。老后端没有这个字段。
+       *
+       * 整份发过来而不是让界面自己写一张表，理由和 `layers` 一样：
+       * 同一份事实在两种语言里各写一遍，迟早有一边过期。
+       */
+      roles?: RoleInfo[]
       /** 审计日志的位置。界面退出时显示给用户，好让人知道去哪儿查这趟做了什么。 */
       auditLog?: string
       /**
@@ -186,7 +217,14 @@ export type ServerEvent =
   | { t: 'plan_created'; goal: string; tasks: PlanTaskWire[]; layers: string[][] }
   /** 等界面确认。必须回 plan_confirm_reply，900 秒不回按否决。 */
   | { t: 'plan_confirm_request'; id: number }
-  | { t: 'plan_task_started'; taskId: string; taskType: string; description: string }
+  | {
+      t: 'plan_task_started'
+      taskId: string
+      taskType: string
+      role?: string
+      roleTitle?: string
+      description: string
+    }
   | {
       t: 'plan_task_finished'
       taskId: string

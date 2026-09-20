@@ -47,7 +47,8 @@ token 随进程生灭，每次启动都不一样。
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions"]
+"features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
+             "compact", "memory", "roles"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -150,7 +151,7 @@ token 随进程生灭，每次启动都不一样。
 |---|---|---|
 | `plan_created` | `goal` `tasks[]` `layers[][]` | 规划产出，见下 |
 | `plan_confirm_request` | `id` | 等界面确认，必须回 `plan_confirm_reply` |
-| `plan_task_started` | `taskId` `taskType` `description` | |
+| `plan_task_started` | `taskId` `taskType` `role` `roleTitle` `description` | `role` 见 3.13 |
 | `plan_task_finished` | `taskId` `status` `durationMs` `result` `error` | `result`/`error` 可能是 `null` |
 | `plan_tasks_added` | `parentId` `tasks[]` | 图长大了，见 3.5 |
 | `plan_revised` | `failedTaskId` `tasks[]` | 某一步失败后补出了救场任务，见 3.6 |
@@ -164,10 +165,12 @@ token 随进程生灭，每次启动都不一样。
   "t": "plan_created",
   "goal": "模型用自己的话复述的目标，界面要显眼地展示——用户靠它判断有没有理解偏",
   "tasks": [
-    {"id": "t1", "type": "FILE_READ", "description": "读 pom.xml",
+    {"id": "t1", "type": "FILE_READ", "role": "explorer", "roleTitle": "调研",
+     "description": "读 pom.xml",
      "acceptance": "说清 Java 版本是多少",
      "status": "PENDING", "parentId": null, "dependsOn": []},
-    {"id": "t3", "type": "FILE_WRITE", "description": "按 {{t1}} 查到的版本改 X",
+    {"id": "t3", "type": "FILE_WRITE", "role": "coder", "roleTitle": "编码",
+     "description": "按 {{t1}} 查到的版本改 X",
      "acceptance": "X 里的版本号和 pom 一致",
      "status": "PENDING", "parentId": null, "dependsOn": ["t1", "t2"]}
   ],
@@ -187,6 +190,11 @@ token 随进程生灭，每次启动都不一样。
 t1 的产出」。**界面原样显示就行**，不要试图自己替换——真正的产出要等 t1 跑完才有，
 替换发生在服务端执行那一步之前。占位符引用的任务一定在 `dependsOn` 里，这条由服务端保证。
 
+**`role` 是派给这一步的角色**，`roleTitle` 是它的中文名（见 3.13）。
+`type` 仍然照发，两者回答的不是同一个问题：`type` 说「这一步会对世界做什么」，
+`role` 说「派谁去、用什么姿势」。同一个 `FILE_READ` 底下既可能是 `explorer` 也可能是
+`reviewer`——**只认 type 的界面会把这两件事画成一样的**。
+
 `taskType` 六种：`PLANNING` `FILE_READ` `FILE_WRITE` `COMMAND` `ANALYSIS` `VERIFICATION`
 `status` 五种：`PENDING` `RUNNING` `SUCCEEDED` `FAILED` `SKIPPED`
 计划 `status` 五种：`CREATED` `RUNNING` `COMPLETED` `FAILED` `CANCELLED`
@@ -197,7 +205,8 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 
 ```json
 {"t":"plan_tasks_added","parentId":"t1",
- "tasks":[{"id":"t1.1","type":"FILE_WRITE","description":"改 A",
+ "tasks":[{"id":"t1.1","type":"FILE_WRITE","role":"coder","roleTitle":"编码",
+           "description":"改 A",
            "status":"PENDING","parentId":"t1","dependsOn":[]}]}
 ```
 
@@ -211,7 +220,8 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 
 ```json
 {"t":"plan_revised","failedTaskId":"t3",
- "tasks":[{"id":"r1","type":"FILE_READ","description":"查清 App.java 的真实位置",
+ "tasks":[{"id":"r1","type":"FILE_READ","role":"explorer","roleTitle":"调研",
+           "description":"查清 App.java 的真实位置",
            "acceptance":"给出实际路径","status":"PENDING","parentId":null,"dependsOn":[]}]}
 ```
 
@@ -500,6 +510,46 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
    用户看到的是「两条都没了」，比不给撤销更糟。
 4. **这三个动作都不拦 `busy`**。它们不碰会话记录，也不发模型调用，
    跑着任务时查一眼记忆是安全的——这一点和 `compact` 不同。
+
+---
+
+### 3.13 角色（feature: `roles`）
+
+计划里的每一步都**派给一个角色**。角色决定三件事：执行这一步的子循环拿得到哪些工具、
+系统提示词里那段行事规矩是什么、最多跑几轮。所以「派了谁」是执行层的事实，
+不是显示用的标签。
+
+首帧 `ready` 里带整份名册：
+
+```json
+"roles": [
+  {"id": "explorer", "title": "调研", "summary": "查清某件事：读文件、列目录…",
+   "type": "FILE_READ", "mutates": false, "tools": ["read_file", "list_dir"]},
+  {"id": "reviewer", "title": "审查", "summary": "对着已经存在的代码挑毛病…",
+   "type": "FILE_READ", "mutates": false, "tools": ["read_file", "list_dir"]},
+  {"id": "coder", "title": "编码", "summary": "新建或修改文件",
+   "type": "FILE_WRITE", "mutates": true,
+   "tools": ["read_file", "list_dir", "write_file", "create_project"]}
+]
+```
+
+**为什么把名册整份发过去，而不是让界面自己写一张表**：和 `layers` 由服务端算好是
+同一个理由——同一份事实在两种语言里各写一遍，迟早有一边过期。这里过期的症状还特别隐蔽：
+后端加了个角色，界面不认得它的 id，那一步就显示成一个空标签，而其它一切正常。
+
+给界面实现者的三条：
+
+1. **别按 id 硬编码文案和颜色**。要显示中文名就用 `title`，要分「会不会动手」就用
+   `mutates`——名册是会长的（现在七个），硬编码的那张表只会停在你写它的那天。
+2. **`role` 可能是你没见过的 id**。老界面连上新后端就是这个情况。
+   退回显示 `type` 就行，别画空白，更别断连（第 2 节那条通则）。
+3. **`type` 和 `role` 都要用**。同一个 `FILE_READ` 底下既有 `explorer` 也有 `reviewer`，
+   只画 type 的界面会把「去查清楚」和「去挑毛病」显示成同一件事。
+
+只读模式（`--readonly`）下，`mutates` 为 true 的角色一个都不会出现在计划里——
+规划提示词里就没有它们，产出还要再校验一遍。
+
+---
 
 ---
 

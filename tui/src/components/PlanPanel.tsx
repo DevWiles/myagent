@@ -2,7 +2,7 @@ import { Index, Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import { useTheme } from "../theme.ts"
 import { truncate } from "../format.ts"
-import { layoutPlanPanel, planProgress } from "../plan-layout.ts"
+import { labelColumns, layoutPlanPanel, padToColumns, planProgress, roleLabel } from "../plan-layout.ts"
 import type { PlanData, PlanTask } from "../store.ts"
 
 /**
@@ -16,8 +16,6 @@ import type { PlanData, PlanTask } from "../store.ts"
  * 那是纯函数，边界条件在 plan-layout.test.ts 里测。
  */
 
-/** 最长的类型名是 VERIFICATION，按它对齐，标签才不会一行一个宽度。 */
-const TYPE_WIDTH = 12
 
 const MARKS: Record<string, string> = {
   PENDING: "⧗",
@@ -71,13 +69,19 @@ export function PlanPanel(props: { plan: PlanData; columns: number; maxRows: num
     }
   }
 
-  /** 编号行右边那截：类型 + 依赖。留给描述的宽度靠它算出来。 */
+  // 角色标签的宽度按这份计划里实际出现的角色算，不写死——
+  // 名册是后端给的，会长；写死的宽度只会让某几行比别人多出一格
+  const roleWidth = () => labelColumns(props.plan.tasks)
+
+  /** 编号行右边那截：角色 + 依赖。留给描述的宽度靠它算出来。 */
   const headRow = (task: PlanTask, index: number) => {
     const number = `${index + 1}`.padStart(2)
     const id = task.id.padEnd(idWidth())
-    const type = `[${task.type.padEnd(TYPE_WIDTH)}]`
+    // 显示角色而不是类型：explorer 和 reviewer 同属 FILE_READ，
+    // 画成同一个标签的话，用户在确认计划时分不出哪一步是去查、哪一步是去挑毛病
+    const role = `[${padToColumns(roleLabel(task), roleWidth())}]`
     const deps = task.dependsOn.length === 0 ? "依赖 无" : `依赖 ${task.dependsOn.join(", ")}`
-    return { number, id, type, deps }
+    return { number, id, role, deps }
   }
 
   return (
@@ -119,7 +123,7 @@ export function PlanPanel(props: { plan: PlanData; columns: number; maxRows: num
                 <text fg={task().status === "RUNNING" ? theme.brand : theme.text}>
                   {head().id}{" "}
                 </text>
-                <text fg={theme.toolName}>{head().type} </text>
+                <text fg={theme.toolName}>{head().role} </text>
                 <text fg={theme.inactive}>{truncate(head().deps, 24)}</text>
                 <Show when={task().recovery}>
                   <text fg={theme.warning}> ↻改道</text>
