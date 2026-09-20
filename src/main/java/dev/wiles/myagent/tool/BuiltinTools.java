@@ -3,6 +3,8 @@ package dev.wiles.myagent.tool;
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.tool.builtin.BashTool;
 import dev.wiles.myagent.tool.builtin.CreateProjectTool;
+import dev.wiles.myagent.tool.builtin.GlobTool;
+import dev.wiles.myagent.tool.builtin.GrepTool;
 import dev.wiles.myagent.tool.builtin.ListDirTool;
 import dev.wiles.myagent.tool.builtin.ReadFileTool;
 import dev.wiles.myagent.tool.builtin.RecallTool;
@@ -37,6 +39,10 @@ public final class BuiltinTools {
     /**
      * 只读工具集：连写文件和执行命令的工具都不注册。
      *
+     * <p>{@code grep} 和 {@code glob} 在这一套里——它们只读不写，
+     * 而且只读模式下<b>更要有</b>：没有 bash 可以退而求其次去敲 {@code grep -r} 了，
+     * 唯一的检索手段就是这两个。
+     *
      * 这比「注册了但拦住」可靠得多——模型看不到菜单上没有的工具，
      * 就根本不会尝试调用，也就不存在被绕过的可能。
      */
@@ -55,7 +61,9 @@ public final class BuiltinTools {
     public static ToolRegistry createReadOnly(Workspace workspace, MemoryStore memory) {
         ToolRegistry registry = new ToolRegistry()
                 .register(new ReadFileTool(workspace))
-                .register(new ListDirTool(workspace));
+                .register(new ListDirTool(workspace))
+                .register(new GrepTool(workspace))
+                .register(new GlobTool(workspace));
         if (memory != null) {
             registry.register(new RecallTool(memory, workspace.root()));
         }
@@ -78,6 +86,8 @@ public final class BuiltinTools {
                 .register(new ReadFileTool(workspace))
                 .register(new WriteFileTool(workspace, new FileWriteGuard(), approval))
                 .register(new ListDirTool(workspace))
+                .register(new GrepTool(workspace))
+                .register(new GlobTool(workspace))
                 .register(new BashTool(workspace, new CommandGuard(), approval))
                 .register(new CreateProjectTool(workspace, new FileWriteGuard(), approval));
         if (memory != null) {

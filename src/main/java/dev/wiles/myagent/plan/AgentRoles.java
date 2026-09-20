@@ -41,7 +41,8 @@ public final class AgentRoles {
      * 只读工具。单独拎出来是因为 {@code scout}/{@code explorer}/{@code reviewer}
      * 共用它，而「审查用的工具应该和调研一样」这件事，写成共享常量比抄三遍可靠。
      */
-    private static final List<String> READ_ONLY = List.of("read_file", "list_dir");
+    private static final List<String> READ_ONLY =
+            List.of("read_file", "list_dir", "grep", "glob");
 
     public static final AgentRole SCOUT = new AgentRole(
             "scout", "探路",
@@ -63,13 +64,14 @@ public final class AgentRoles {
             "coder", "编码",
             "新建或修改文件",
             TaskType.FILE_WRITE,
-            List.of("read_file", "list_dir", "write_file", "create_project"),
+            List.of("read_file", "list_dir", "grep", "glob", "write_file", "create_project"),
             12, true, false);
 
     public static final AgentRole OPERATOR = new AgentRole(
             "operator", "执行",
             "跑命令：构建、装依赖、执行脚本",
-            TaskType.COMMAND, List.of("read_file", "list_dir", "bash"), 12, true, false);
+            TaskType.COMMAND, List.of("read_file", "list_dir", "grep", "glob", "bash"),
+            12, true, false);
 
     public static final AgentRole ANALYST = new AgentRole(
             "analyst", "分析",
@@ -82,7 +84,8 @@ public final class AgentRoles {
     public static final AgentRole VERIFIER = new AgentRole(
             "verifier", "验证",
             "跑测试或构建，确认前面做的事真的成了",
-            TaskType.VERIFICATION, List.of("read_file", "list_dir", "bash"), 12, true, true);
+            TaskType.VERIFICATION, List.of("read_file", "list_dir", "grep", "glob", "bash"),
+            12, true, true);
 
     /**
      * 名册。顺序就是它出现在规划提示词里的顺序，所以<b>按「从看不清到收尾」排</b>，
