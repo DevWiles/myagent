@@ -36,22 +36,18 @@ public final class AgentTaskRunner implements TaskRunner {
     private static final Logger log = LoggerFactory.getLogger(AgentTaskRunner.class);
 
     /**
-     * 单个任务最多跑几轮 ReAct 的<b>天花板</b>。
+     * 不指定时，一个任务跑几轮由<b>角色</b>说了算（{@link AgentRole#maxSteps()}）。
      *
-     * <p>比整段对话的上限（{@link Agent#DEFAULT_MAX_STEPS}）小得多，因为这里是<b>子任务</b>：
-     * 一个拆好的步骤要是 12 轮还收不了口，多半是计划拆得太粗，
-     * 让它撞上限收敛，比放任它跑 25 轮烧掉额度强。
-     *
-     * <p><b>角色可以比它更省，但不能比它更奢</b>（见 {@link #stepsFor}）。
-     * 分析角色一个工具都没有，给它 12 轮纯属摆设；而反过来让某个角色
-     * 突破调用方设的总闸，那这个总闸就不是闸了。
+     * <p>这个常量只是历史入口的默认值，语义是「别指定，听角色的」。
      */
-    public static final int DEFAULT_MAX_STEPS = 12;
+    public static final int DEFAULT_MAX_STEPS = 0;
 
     private final LlmClient client;
     private final ToolRegistry allTools;
     private final Path workspaceRoot;
-    /** 天花板，不是定值。真正用几步由角色和它一起决定，见 {@link #stepsFor}。 */
+    /**
+     * 调用方指定的步数。{@code <= 0} 表示不指定，听角色的。见 {@link #stepsFor}。
+     */
     private final int maxSteps;
 
     private BiConsumer<Task, AgentEvent> listener = (task, event) -> {
@@ -59,6 +55,21 @@ public final class AgentTaskRunner implements TaskRunner {
 
     /** 给 PLANNING 任务拆子任务用。没配就退化成一次普通的只读调研。 */
     private Planner planner;
+
+    /**
+     * 要不要执行角色的「结论行」契约（{@link AgentRole#requiresVerdict()}）。
+     *
+     * <p>默认执行。关掉它的是圆桌：<b>同一个 verifier，在计划里和在圆桌上，
+     * 「测试没过」的意思完全不同</b>。
+     * <ul>
+     *   <li>计划里：下游全建立在「改好了」这个前提上，没过就必须落成失败，
+     *       才能顺着依赖把下游跳过</li>
+     *   <li>圆桌上：没有下游。「测试没过」是<b>一条有价值的意见</b>，
+     *       把它判成这一席失败，等于唯一发现真问题的那个人被消音了</li>
+     * </ul>
+     * 这不是配置项，是两种场合下同一句话的语义差别，所以由调用方声明，不由角色声明。
+     */
+    private boolean verdictContract = true;
 
     /** 当前正在跑的子循环，取消时要掐它。volatile：置位的是监听 Ctrl-C 的那个线程。 */
     private volatile Agent current;
@@ -89,6 +100,12 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     public AgentTaskRunner withPlanner(Planner planner) {
         this.planner = planner;
+        return this;
+    }
+
+    /** 关掉结论行契约。理由见 {@link #verdictContract}。 */
+    public AgentTaskRunner verdictContract(boolean on) {
+        this.verdictContract = on;
         return this;
     }
 
@@ -131,7 +148,7 @@ public final class AgentTaskRunner implements TaskRunner {
             log.info("任务 {} 的子循环没能收口: {}", task.id(), failure[0]);
             return TaskOutcome.failed(compose(failure[0], text));
         }
-        if (role.requiresVerdict() && !passed(text)) {
+        if (verdictContract && role.requiresVerdict() && !passed(text)) {
             // 验证不通过必须落成失败，才能顺着 dependents 把下游跳过。
             // 记成「成功但其实没过」是最糟的——后面每一步都建立在一个假前提上。
             return TaskOutcome.failed(text);
@@ -165,9 +182,21 @@ public final class AgentTaskRunner implements TaskRunner {
         return narrowed;
     }
 
-    /** 角色想省就让它省，但越不过调用方设的天花板。 */
+    /**
+     * 这一趟给几步。
+     *
+     * <h3>为什么调用方一旦指定就是它说了算，而不是取两者的小值</h3>
+     * 角色上的数字是按<b>计划里的一小步</b>调的（「读 pom.xml 说清 Java 版本」那种）。
+     * 同一个角色换个场合，活的大小可能完全不同：圆桌上的一席要把整个包审一遍，
+     * 十步根本收不了口——而<b>撞上限的代价不是少跑几步，是这一席整个作废</b>
+     * （撞上限会走 {@code AgentEvent.Failed}）。
+     *
+     * <p>这一条是真机跑出来的：圆桌头一回开，两席都把话说完了，
+     * 却因为撞上限双双被判失败，屏幕上是「0/2 位给了意见」。
+     * 只有调用方知道这一趟的活有多大，所以它有权改这个数。
+     */
     private int stepsFor(AgentRole role) {
-        return Math.min(maxSteps, role.maxSteps());
+        return maxSteps > 0 ? maxSteps : role.maxSteps();
     }
 
     /**
