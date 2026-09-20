@@ -700,24 +700,48 @@ public final class AgentServer extends WebSocketServer {
      * 有后台算好的现货就直接用，没有就现算。
      */
     private void handleCompact(WebSocket conn) {
-        if (busy.get()) {
-            send(conn, error("正在处理中，压缩要等这一轮跑完"));
-            return;
-        }
         if (agent == null) {
             send(conn, error("没配 API key，压缩无从谈起"));
             return;
         }
-        if (agent.compactNow() == null) {
-            send(conn, error(agent.hasCompacted()
-                    ? "已经压到头了——剩下的就是最近几轮，那几轮是原样保留的"
-                    : "还没有可压的内容——最近几轮原样保留，得再聊几轮才有东西可摘"));
+        // 和 handlePrompt 用同一个闸：压缩改写 agent 的派生物（segments/summary/coversUpTo），
+        // 和一轮对话并发跑会互相踩
+        if (!busy.compareAndSet(false, true)) {
+            send(conn, error("正在处理中，压缩要等这一轮跑完"));
             return;
         }
-        // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
-        // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
-        sessions.save(sessionId, agent.history(), workspace.root(),
-                config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+        publish(Protocol.event("busy").put("busy", true));
+        long startedAt = System.currentTimeMillis();
+
+        // 必须扔到 worker 上。原先是直接在这儿跑的，而这里是 WebSocket 的解码线程：
+        // 同一条连接的后续报文全排在它后面，于是压缩那几十秒里 `cancel` **根本送不进来**，
+        // 用户按 Esc 毫无反应，界面上也没有 busy——看起来就是整个客户端死了
+        worker.submit(() -> {
+            try {
+                if (agent.compactNow() == null) {
+                    publish(error(agent.hasCompacted()
+                            ? "已经压到头了——剩下的就是最近几轮，那几轮是原样保留的"
+                            : "还没有可压的内容——最近几轮原样保留，得再聊几轮才有东西可摘"));
+                    return;
+                }
+                // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
+                // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
+                sessions.save(sessionId, agent.history(), workspace.root(),
+                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+            } catch (RuntimeException e) {
+                log.error("压缩跑挂了", e);
+                publish(error("压缩失败：" + e.getMessage()));
+            } finally {
+                busy.set(false);
+                ObjectNode idle = Protocol.event("busy");
+                idle.put("busy", false);
+                idle.put("durationMs", System.currentTimeMillis() - startedAt);
+                idle.put("tokens", agent.estimatedTokens());
+                idle.put("sentTokens", meter.snapshot().promptTokens());
+                idle.put("contextLimit", agent.contextLimit());
+                publish(idle);
+            }
+        });
     }
 
     /**
