@@ -13,6 +13,7 @@
 import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { writeSync } from "node:fs"
+import { queryCursorOrigin, restoreCursorOrigin, type CursorOrigin } from "./cursor-origin.ts"
 import { resolve } from "node:path"
 import type { Accessor } from "solid-js"
 import { App } from "./components/App.tsx"
@@ -78,6 +79,21 @@ let epilogueWritten = false
  * 用 writeSync 而不是 console.log：stdout 被重定向成管道时 console.log 是异步的，
  * 紧跟着的 process.exit 会把还没刷出去的内容直接丢掉。
  */
+let cursorRestored = false
+
+/**
+ * 把光标放回启动时的位置。
+ *
+ * <p>和 {@link flushEpilogue} 分开、而且<b>不能合并</b>：没有收尾信息可打时
+ * flushEpilogue 会提前 return，而那种情况下光标照样是错的——
+ * 接下来 shell 画提示符，照样从第 1 行开始盖。
+ */
+function restoreCursor(): void {
+  if (cursorRestored) return
+  cursorRestored = true
+  restoreCursorOrigin(cursorOrigin)
+}
+
 function flushEpilogue(): void {
   if (epilogueWritten) return
   epilogueWritten = true
@@ -90,12 +106,26 @@ function flushEpilogue(): void {
   writeSync(1, (process.stdout.isTTY ? `\x1b[2m${body}\x1b[0m` : body) + "\n")
 }
 
+/**
+ * 启动那一刻光标在哪。**必须在 createCliRenderer 之前问**——
+ * OpenTUI 一接管 stdin 就自己读键盘了，终端的回答会被它当成按键吃掉。
+ *
+ * 问不到（不是 TTY、终端不回话）就是 null，退出时跳过这一步，
+ * 行为和修之前一模一样。
+ */
+const cursorOrigin: CursorOrigin | null = await queryCursorOrigin()
+
 const renderer = await createCliRenderer({
   targetFps: 30,
   // 自己处理 Ctrl-C：要在退出前关掉后端进程，不能让它变成孤儿
   exitOnCtrlC: false,
   useMouse: true,
-  onDestroy: flushEpilogue,
+  // 顺序不能反：收尾信息要打在**还原之后的**光标位置上。
+  // 反过来的话，那两行还是会盖掉用户第 1、2 行的内容
+  onDestroy: () => {
+    restoreCursor()
+    flushEpilogue()
+  },
 })
 
 let shuttingDown = false
@@ -118,7 +148,9 @@ function shutdown(reason?: string, code = 0): void {
   // java 进程。实测不显式关的话，java 在 Ctrl-C 之后还要活 10 秒以上。
   exit.dispose?.()
   if (!renderer.isDestroyed) renderer.destroy()
-  flushEpilogue()   // destroy 若被推迟（正好卡在渲染帧中间）就靠这一下兜底
+  // destroy 若被推迟（正好卡在渲染帧中间）就靠这两下兜底。两个都是幂等的
+  restoreCursor()
+  flushEpilogue()
   if (reason) writeSync(2, reason.endsWith("\n") ? reason : reason + "\n")
   process.exit(code)
 }
