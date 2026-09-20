@@ -8,7 +8,7 @@ import java.util.List;
  *
  * <p>字段分成泾渭分明的两拨，这个划分比字段本身更重要：
  * <pre>
- *   final   id / description / type / dependencies   —— 规划产出，一旦定下就不许改
+ *   final   id / description / role / dependencies   —— 规划产出，一旦定下就不许改
  *   可变     status / result / error / 两个时间戳      —— 执行过程中一步步填上
  *   半可变   dependents                               —— 反向边，由建图的人一次性补齐
  * </pre>
@@ -29,7 +29,17 @@ public class Task {
 
     private final String id;
     private final String description;
-    private final TaskType type;
+
+    /**
+     * 派谁来干这一步。
+     *
+     * <p><b>类型不再是独立字段，而是从角色推导</b>（{@link #type()}）。
+     * 两个字段并存的话，总有一天会出现「角色是 coder、类型是 FILE_READ」的任务——
+     * 可能来自模型，也可能来自某次只改了一处的重构。到那时候派工具该听谁的？
+     * 按类型派就没有写工具，按角色派就违背了它自己声明的类型，两条路都得猜。
+     * 一个字段，这种矛盾在类型系统层面就不存在。
+     */
+    private final AgentRole role;
 
     /**
      * 做到什么程度算这一步做完了。规划阶段由模型给出，执行阶段原样交给执行这一步的子模型。
@@ -57,15 +67,28 @@ public class Task {
     private long startTime;
     private long endTime;
 
-    /** 造一个根任务（规划阶段直接产出的那种）。 */
+    /**
+     * 造一个根任务，只说类型不说角色。
+     *
+     * <p>落到这个类型的默认角色上（见 {@link AgentRoles#defaultFor}）。
+     * 留着这条入口不是为了兼容老代码——是因为<b>「只知道要读文件，不在乎派谁去读」
+     * 是一种正当的表达</b>：调度测试、老存档、模型偷懒只填了 type，
+     * 三者都属于这一类，没必要逼它们各自去查一遍默认角色。
+     */
     public Task(String id, String description, TaskType type, List<String> dependencies) {
-        this(id, description, type, dependencies, null, null, 0);
+        this(id, description, AgentRoles.defaultFor(type), dependencies, null, null, 0);
     }
 
-    /** 带验收标准的根任务，规划器走的是这条路。 */
+    /** 带验收标准、只说类型。 */
     public Task(String id, String description, TaskType type, List<String> dependencies,
                 String acceptance) {
-        this(id, description, type, dependencies, acceptance, null, 0);
+        this(id, description, AgentRoles.defaultFor(type), dependencies, acceptance, null, 0);
+    }
+
+    /** 造一个根任务，指名角色。规划器走的是这条路。 */
+    public Task(String id, String description, AgentRole role, List<String> dependencies,
+                String acceptance) {
+        this(id, description, role, dependencies, acceptance, null, 0);
     }
 
     /**
@@ -75,7 +98,7 @@ public class Task {
      * 解析模型输出的代码就算想造一个 depth=2 的任务，也没有入口。
      * 把约束做成「写不出来」，比做成「写出来会被校验拦下」更硬。
      */
-    private Task(String id, String description, TaskType type, List<String> dependencies,
+    private Task(String id, String description, AgentRole role, List<String> dependencies,
                  String acceptance, String parentId, int depth) {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("任务 id 不能为空");
@@ -83,8 +106,8 @@ public class Task {
         if (description == null || description.isBlank()) {
             throw new IllegalArgumentException("任务 " + id + " 缺少描述");
         }
-        if (type == null) {
-            throw new IllegalArgumentException("任务 " + id + " 缺少类型");
+        if (role == null) {
+            throw new IllegalArgumentException("任务 " + id + " 缺少角色");
         }
         if (depth < 0 || depth > PlanLimits.MAX_DEPTH) {
             throw new IllegalArgumentException(
@@ -92,7 +115,7 @@ public class Task {
         }
         this.id = id;
         this.description = description;
-        this.type = type;
+        this.role = role;
         // 空白和 null 一视同仁：模型很爱塞一个 "" 进来，让下游各自判空是自找麻烦
         this.acceptance = acceptance == null || acceptance.isBlank() ? null : acceptance.strip();
         this.parentId = parentId;
@@ -116,11 +139,11 @@ public class Task {
      * <p>开成包私有而不是 public，是因为这个能力一旦漏到外面，
      * 就等于把状态机的全部约束作废了——谁都能随手把一个任务改成 SUCCEEDED。
      */
-    static Task restore(String id, String description, TaskType type, List<String> dependencies,
+    static Task restore(String id, String description, AgentRole role, List<String> dependencies,
                         String acceptance, String parentId, int depth,
                         TaskStatus status, String result, String error,
                         long startTime, long endTime) {
-        Task task = new Task(id, description, type, dependencies, acceptance, parentId, depth);
+        Task task = new Task(id, description, role, dependencies, acceptance, parentId, depth);
         task.status = status == null ? TaskStatus.PENDING : status;
         task.result = result;
         task.error = error;
@@ -137,8 +160,17 @@ public class Task {
         return description;
     }
 
+    /** 派谁干这一步。 */
+    public AgentRole role() {
+        return role;
+    }
+
+    /**
+     * 这一步属于哪一类活。<b>推导自角色，不是独立字段</b>——
+     * 调度（能不能并发）和界面（图标、颜色）继续认它，协议里也照发。
+     */
     public TaskType type() {
-        return type;
+        return role.taskType();
     }
 
     /** 做到什么算完。没给就是 null，调用方自己兜底。 */
@@ -171,17 +203,23 @@ public class Task {
      * 模型想再套一层是完全可能发生的，得让调用方当场知道，然后把这句话回灌给模型让它改。
      */
     public Task subTask(String id, String description, TaskType type, List<String> dependencies) {
-        return subTask(id, description, type, dependencies, null);
+        return subTask(id, description, AgentRoles.defaultFor(type), dependencies, null);
     }
 
-    /** 带验收标准的子任务。 */
+    /** 带验收标准的子任务，只说类型。 */
     public Task subTask(String id, String description, TaskType type, List<String> dependencies,
+                        String acceptance) {
+        return subTask(id, description, AgentRoles.defaultFor(type), dependencies, acceptance);
+    }
+
+    /** 带验收标准的子任务，指名角色。 */
+    public Task subTask(String id, String description, AgentRole role, List<String> dependencies,
                         String acceptance) {
         if (!canSpawnSubtasks()) {
             throw new IllegalStateException("任务 " + this.id + " 已经在第 " + depth
                     + " 层，不能再拆子任务（最深 " + PlanLimits.MAX_DEPTH + " 层）");
         }
-        return new Task(id, description, type, dependencies, acceptance, this.id, depth + 1);
+        return new Task(id, description, role, dependencies, acceptance, this.id, depth + 1);
     }
 
     public String result() {
@@ -268,6 +306,6 @@ public class Task {
 
     @Override
     public String toString() {
-        return "Task[" + id + " " + type + " " + status + " " + description + "]";
+        return "Task[" + id + " " + role.id() + " " + status + " " + description + "]";
     }
 }

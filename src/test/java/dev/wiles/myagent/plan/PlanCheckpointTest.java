@@ -165,11 +165,49 @@ class PlanCheckpointTest {
     }
 
     @Test
+    @DisplayName("派给谁也要存下来——不然续跑时 reviewer 会悄悄变回 explorer")
+    void keepsTheRole() {
+        Plan plan = new Plan("挑毛病", TaskGraph.of(List.of(
+                new Task("t1", "审一遍 Task.java", AgentRoles.REVIEWER, List.of(), "给出清单"),
+                new Task("t2", "按清单改", AgentRoles.CODER, List.of("t1"), "改完"))));
+
+        Plan back = roundTrip(plan);
+
+        assertEquals(AgentRoles.REVIEWER, back.graph().get("t1").role());
+        assertEquals(AgentRoles.CODER, back.graph().get("t2").role());
+    }
+
+    @Test
+    @DisplayName("老存档没有 role 字段：按 type 落到默认角色，照样能续")
+    void oldArchiveWithoutRoleStillResumes() {
+        PlanCheckpoint checkpoint = new PlanCheckpoint(
+                PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ", null,
+                        List.of(), "读到了", null, 0, "PENDING", null, null, 0, 0)));
+
+        assertEquals(AgentRoles.EXPLORER, checkpoint.toPlan().graph().get("t1").role());
+    }
+
+    @Test
+    @DisplayName("角色名认不出来（改过名、来自新版本）就退回类型默认值，别让整份存档报废")
+    void unknownRoleFallsBackToTypeDefault() {
+        PlanCheckpoint checkpoint = new PlanCheckpoint(
+                PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ",
+                        "archaeologist", List.of(), "读到了", null, 0, "PENDING", null, null, 0, 0)));
+
+        Task restored = checkpoint.toPlan().graph().get("t1");
+        assertEquals(AgentRoles.EXPLORER, restored.role(),
+                "丢一个「派谁去」的偏好，好过让几十次模型调用换来的产出全废");
+        assertEquals(TaskType.FILE_READ, restored.type());
+    }
+
+    @Test
     @DisplayName("状态字段认不出来就当没开始，别让整份存档报废")
     void unknownStatusFallsBackToPending() {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
-                List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "FILE_READ", List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "FILE_READ", null, List.of(),
                         "干完", null, 0, "ZOMBIE", null, null, 0, 0)));
 
         assertEquals(TaskStatus.PENDING, checkpoint.toPlan().graph().get("t1").status());
@@ -180,7 +218,7 @@ class PlanCheckpointTest {
     void unknownTypeIsFatal() {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
-                List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "TELEPORT", List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "TELEPORT", null, List.of(),
                         "干完", null, 0, "PENDING", null, null, 0, 0)));
 
         assertTrue(assertThrows(IllegalArgumentException.class, checkpoint::toPlan)
@@ -193,9 +231,9 @@ class PlanCheckpointTest {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(
-                        new PlanCheckpoint.TaskSnapshot("t1", "甲", "FILE_READ", List.of("t2"),
+                        new PlanCheckpoint.TaskSnapshot("t1", "甲", "FILE_READ", null, List.of("t2"),
                                 "完", null, 0, "PENDING", null, null, 0, 0),
-                        new PlanCheckpoint.TaskSnapshot("t2", "乙", "FILE_READ", List.of("t1"),
+                        new PlanCheckpoint.TaskSnapshot("t2", "乙", "FILE_READ", null, List.of("t1"),
                                 "完", null, 0, "PENDING", null, null, 0, 0)));
 
         assertTrue(assertThrows(IllegalArgumentException.class, checkpoint::toPlan)

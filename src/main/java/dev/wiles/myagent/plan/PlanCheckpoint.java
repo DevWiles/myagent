@@ -60,6 +60,17 @@ public record PlanCheckpoint(
             String id,
             String description,
             String type,
+            /**
+             * 派给谁。<b>老存档里没有这个字段</b>，那时还没有角色这回事——
+             * 读到 null 就按 {@code type} 落到默认角色上（见 {@link #agentRole}），
+             * 所以这是一次纯新增，{@link #FORMAT} 不用 +1。
+             *
+             * <p>{@code type} 留着不删，正是为了这条退路：角色名册是会变的
+             * （改名、拆分、删掉一个用不上的角色），而六种类型是稳定的。
+             * 存档里两个都有，认不出角色时还能退回类型；只存角色的话，
+             * 哪天把 {@code reviewer} 改个名，盘上那些计划就全废了。
+             */
+            String role,
             List<String> dependsOn,
             String acceptance,
             String parentId,
@@ -75,7 +86,8 @@ public record PlanCheckpoint(
         List<TaskSnapshot> snapshots = new ArrayList<>(plan.graph().size());
         for (Task task : plan.graph().tasks()) {
             snapshots.add(new TaskSnapshot(
-                    task.id(), task.description(), task.type().name(), task.dependencies(),
+                    task.id(), task.description(), task.type().name(), task.role().id(),
+                    task.dependencies(),
                     task.acceptance(), task.parentId(), task.depth(),
                     task.status().name(), task.result(), task.error(),
                     task.startTime(), task.endTime()));
@@ -139,7 +151,7 @@ public record PlanCheckpoint(
                 log.info("任务 {} 上次跑到一半就断了，退回未开始重跑", snapshot.id());
             }
             restored.add(Task.restore(
-                    snapshot.id(), snapshot.description(), taskType(snapshot),
+                    snapshot.id(), snapshot.description(), agentRole(snapshot),
                     snapshot.dependsOn() == null ? List.of() : snapshot.dependsOn(),
                     snapshot.acceptance(), snapshot.parentId(), snapshot.depth(),
                     interrupted ? TaskStatus.PENDING : status,
@@ -160,6 +172,30 @@ public record PlanCheckpoint(
         } catch (RuntimeException e) {
             return PlanStatus.CREATED;
         }
+    }
+
+    /**
+     * 存档里的这一步该派给谁。
+     *
+     * <p>三条路，都不让整份存档报废：
+     * <ol>
+     *   <li>角色名认得出来 —— 就用它</li>
+     *   <li>角色名认不出来（改过名、来自更新的版本）—— 退回该类型的默认角色，
+     *       打一行警告。丢的是「派谁去」这个偏好，保住的是整份存档；
+     *       反过来直接拒掉，用户丢的是几十次模型调用换来的产出</li>
+     *   <li>压根没有角色字段（老存档）—— 按类型取默认角色，这是正常情况，不用警告</li>
+     * </ol>
+     */
+    private static AgentRole agentRole(TaskSnapshot snapshot) {
+        TaskType type = taskType(snapshot);
+        if (snapshot.role() == null || snapshot.role().isBlank()) {
+            return AgentRoles.defaultFor(type);
+        }
+        return AgentRoles.find(snapshot.role()).orElseGet(() -> {
+            log.warn("任务 {} 存的角色 {} 不认识，按类型 {} 退回默认角色",
+                    snapshot.id(), snapshot.role(), type);
+            return AgentRoles.defaultFor(type);
+        });
     }
 
     private static TaskType taskType(TaskSnapshot snapshot) {
