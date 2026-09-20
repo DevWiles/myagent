@@ -4,6 +4,7 @@ import dev.wiles.myagent.llm.ChatMessage;
 import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
+import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import org.junit.jupiter.api.DisplayName;
@@ -22,6 +23,178 @@ import static org.junit.jupiter.api.Assertions.*;
  * 每个用例结束时原始记录都必须一个字没变。
  */
 class ContextManagerTest {
+
+    // ------------------------------------------------------------------
+    // 进度
+    // ------------------------------------------------------------------
+
+    /** 记下每一次进度报告，供断言。 */
+    private record Tick(String phase, int done, int total, int percent) { }
+
+    private static List<Tick> ticksOf(ContextManager cm, List<ChatMessage> rec, LlmClient llm) {
+        List<Tick> ticks = new ArrayList<>();
+        cm.compute(rec, List.of(), llm,
+                (phase, done, total, percent) -> ticks.add(new Tick(phase, done, total, percent)));
+        return ticks;
+    }
+
+    @Test
+    @DisplayName("总步数 = 要摘的块数 + reduce 那一步，不是块数本身")
+    void totalCountsTheReduceStep() {
+        ContextManager cm = new ContextManager(4_000);
+        List<ChatMessage> rec = record(9, 60);
+        int chunks = cm.chunks(rec, 0,
+                ContextWindow.startOfLastTurns(rec, ContextWindow.KEEP_RECENT_TURNS)).size();
+        assertTrue(chunks >= 2, "前提：这份记录会被切成多块，否则不跑 reduce");
+
+        List<Tick> ticks = ticksOf(cm, rec, new CountingLlm("摘要"));
+
+        assertFalse(ticks.isEmpty(), "一条进度都没报，界面上就是一块不动的屏幕");
+        // 少算这一步的话，条会走到 n/n 然后停在那儿等 reduce——
+        // 而 reduce 恰恰是整次压缩里最慢的一步
+        assertEquals(chunks + 1, ticks.get(0).total());
+        assertTrue(ticks.stream().anyMatch(t -> ContextManager.PHASE_REDUCE.equals(t.phase())),
+                "reduce 阶段也得报，不然最后那段空白没有解释");
+    }
+
+    @Test
+    @DisplayName("只有一块时不把 reduce 算进总步数——那一步根本不发调用")
+    void singleSegmentSkipsTheReduceStep() {
+        // 窗口给得足够大，整段记录只切出一块；单段直接返回那一段，reduce 不发调用
+        ContextManager cm = new ContextManager(1_000_000);
+        List<ChatMessage> rec = record(6, 5);
+        assertEquals(1, cm.chunks(rec, 0,
+                ContextWindow.startOfLastTurns(rec, ContextWindow.KEEP_RECENT_TURNS)).size(),
+                "前提：这份记录只有一块");
+
+        List<Tick> ticks = ticksOf(cm, rec, new CountingLlm("摘要"));
+
+        assertEquals(1, ticks.get(0).total(),
+                "把不存在的 reduce 算进去，条就永远停在 50%%——那一步不会发生，也就永远不会推进");
+    }
+
+    @Test
+    @DisplayName("百分比单调不减，而且从不报 100")
+    void percentIsMonotonicAndNeverClaimsDone() {
+        ContextManager cm = new ContextManager(4_000);
+        List<Tick> ticks = ticksOf(cm, record(9, 60), new CountingLlm("摘要"));
+
+        int previous = -1;
+        for (Tick t : ticks) {
+            assertTrue(t.percent() >= previous,
+                    "进度倒退过：" + previous + " -> " + t.percent() + "，用户会以为出错了");
+            // 100 的意思是「结束了」，而每一条报告都发生在某一步还没做完的时候。
+            // 收尾那一下由 Agent 补（CompactProgress.finished），不在这儿
+            assertTrue(t.percent() < 100, "报了 100 之后还在跑，条会干等着");
+            previous = t.percent();
+        }
+    }
+
+    @Test
+    @DisplayName("不传进度回调的老调用方一字不变——后台预压缩就走这条")
+    void progressIsOptional() {
+        ContextManager cm = new ContextManager(4_000);
+        List<ChatMessage> rec = record(9, 60);
+
+        var withProgress = cm.compute(rec, List.of(), new CountingLlm("摘要"),
+                (phase, done, total, percent) -> { });
+        var without = cm.compute(rec, List.of(), new CountingLlm("摘要"));
+
+        assertEquals(without.coversUpTo(), withProgress.coversUpTo());
+        assertEquals(without.segments().size(), withProgress.segments().size());
+    }
+
+    /** 一个字一个字往外吐的假模型，用来验证「条跟着输出走」那一层。 */
+    private static class StreamingLlm implements LlmClient {
+        private final String reply;
+
+        StreamingLlm(String reply) {
+            this.reply = reply;
+        }
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t) {
+            return new ChatResponse("x", "f", List.of(new ChatResponse.Choice(
+                    0, ChatMessage.assistant(reply), "stop")), null);
+        }
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t, StreamListener listener) {
+            for (int i = 0; i < reply.length(); i += 8) {
+                listener.onTextDelta(reply.substring(i, Math.min(reply.length(), i + 8)));
+            }
+            return chat(m, t);
+        }
+
+        @Override
+        public String modelName() {
+            return "fake-stream";
+        }
+    }
+
+    @Test
+    @DisplayName("一块也能看到条在走——靠的是流式输出，不是块数")
+    void progressAdvancesWithinASingleChunk() {
+        // 这正是 1M 窗口下的常态：整段会话只切出一块。纯按块数报进度的话，
+        // 条会在 0%% 上干等几十秒再直接跳到头，等于没有进度条
+        ContextManager cm = new ContextManager(1_000_000);
+        List<ChatMessage> rec = record(6, 200);
+        assertEquals(1, cm.chunks(rec, 0,
+                ContextWindow.startOfLastTurns(rec, ContextWindow.KEEP_RECENT_TURNS)).size(),
+                "前提：这份记录只有一块");
+
+        // 摘要长度接近「按输入规模估出来的预期」，条才走得完大半
+        int expected = (int) (cm.estimate(rec.subList(0, ContextWindow.startOfLastTurns(
+                rec, ContextWindow.KEEP_RECENT_TURNS)), List.of()) * 0.4);
+        List<Tick> ticks = ticksOf(cm, rec, new StreamingLlm("摘".repeat(Math.max(200, expected))));
+
+        assertTrue(ticks.size() > 2,
+                "只报了 " + ticks.size() + " 次，条不会动——这一层的全部意义就是让它动起来");
+        assertTrue(ticks.get(ticks.size() - 1).percent() > ticks.get(0).percent(),
+                "条从头到尾没往前挪过");
+    }
+
+    @Test
+    @DisplayName("没人看进度就不走流式——流式那条路不重试，而失败的段会被永久缓存")
+    void silentCompactionStaysOnTheRetryingPath() {
+        var streamed = new AtomicInteger();
+        var plain = new AtomicInteger();
+        LlmClient watcher = new LlmClient() {
+            @Override
+            public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t) {
+                plain.incrementAndGet();
+                return new ChatResponse("x", "f", List.of(new ChatResponse.Choice(
+                        0, ChatMessage.assistant("摘要"), "stop")), null);
+            }
+
+            @Override
+            public ChatResponse chat(List<ChatMessage> m, List<ToolSpec> t,
+                                     StreamListener listener) {
+                streamed.incrementAndGet();
+                return chat(m, t);
+            }
+
+            @Override
+            public String modelName() {
+                return "fake";
+            }
+        };
+        ContextManager cm = new ContextManager(4_000);
+        List<ChatMessage> rec = record(9, 60);
+
+        cm.compute(rec, List.of(), watcher);        // 后台预压缩走的就是这条
+
+        assertEquals(0, streamed.get(),
+                "后台预压缩不该用流式：那条路不重试，而一次 429 会把「摘要没能生成」"
+                        + "永久焊死在这段历史上（段是一辈子缓存的）");
+        assertTrue(plain.get() > 0, "前提：确实发了摘要请求");
+
+        // 有人看进度时反过来——条要动起来就非流式不可
+        streamed.set(0);
+        plain.set(0);
+        cm.compute(rec, List.of(), watcher, (phase, done, total, percent) -> { });
+        assertTrue(streamed.get() > 0, "有人看进度时必须流式，否则条一格都不会动");
+    }
 
     /** 固定返回一句摘要的假模型，顺便数一数被调了几次。 */
     static class CountingLlm implements LlmClient {

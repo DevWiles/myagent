@@ -766,6 +766,9 @@ public final class Repl {
             collapseToolGroup();
             flushQuietBuffer();
 
+        } else if (event instanceof AgentEvent.CompactProgress p) {
+            renderCompactProgress(p);
+
         } else if (event instanceof AgentEvent.Compacted c) {
             collapseToolGroup();
             // 必须让用户知道：摘要意味着早期细节已经丢了，后面它"想不起来"是正常的
@@ -924,6 +927,33 @@ public final class Repl {
             toolPrintln(Ansi.dim("    … 另有 " + hidden + " 行"
                     + (detail == OutputDetail.VERBOSE ? "" : "（/verbose 展开）")));
         }
+    }
+
+    /** 上一条压缩进度打的是哪一步。用来把百分比刷新过滤掉，只在换步时出声。 */
+    private String lastCompactStep = "";
+
+    /**
+     * 压缩进度。
+     *
+     * <h3>这里<b>不</b>画那根百分比进度条</h3>
+     * 界面版（TUI）画，是因为它有一块能原地重绘的区域。这边是逐行往下滚的终端，
+     * 而进度一秒能来十几次——照单全收就是几百行刷屏，把刚才的对话整个顶出屏幕。
+     * 所以只在<b>换步</b>时打一行，一次压缩最多几行。
+     */
+    private void renderCompactProgress(AgentEvent.CompactProgress p) {
+        if (AgentEvent.CompactProgress.PHASE_DONE.equals(p.phase())) {
+            lastCompactStep = "";
+            return;             // 收尾不出声：紧接着的 Compacted 那一行才是结论
+        }
+        String step = p.phase() + p.done();
+        if (step.equals(lastCompactStep)) {
+            return;
+        }
+        lastCompactStep = step;
+        collapseToolGroup();
+        emit(Ansi.dim(ContextManager.PHASE_REDUCE.equals(p.phase())
+                ? "… 正在合并分段摘要"
+                : "… 正在压缩对话（第 " + (p.done() + 1) + "/" + p.total() + " 块）"));
     }
 
     /** 打印一行；摘要行之后的内容要记下来，展开时原样重放。 */

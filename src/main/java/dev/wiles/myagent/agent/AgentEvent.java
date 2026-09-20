@@ -37,6 +37,35 @@ public sealed interface AgentEvent {
     record ToolFinished(String tool, boolean ok, String output) implements AgentEvent {
     }
 
+    /**
+     * 压缩正在进行。
+     *
+     * <h3>为什么需要这个事件</h3>
+     * 压缩是一次（或几次）完整的模型调用，几十秒起步。在此之前界面上什么都没有：
+     * 用户敲了 {@code /compact}，然后对着一个不动的屏幕，无从判断是在干活还是按键丢了。
+     *
+     * <p><b>只有用户等得到的那些压缩才发这个事件</b>。后台预压缩（80% 那条线）
+     * 刻意不发——它的全部价值就在于无感，弹一条「正在压缩」等于把它的意义抵消掉。
+     *
+     * @param phase   {@code map}（逐块摘要）还是 {@code reduce}（合并成一份）；
+     *                {@code done} 是收尾信号，界面收到它就把进度条撤掉
+     * @param done    走完几步
+     * @param total   一共几步
+     * @param percent 0~100。<b>内层是估的</b>——当前这一步的进度按「摘要已经吐了多少字
+     *                / 按输入规模估出来的预期长度」算，所以条可能提前走完或者顶在 99%
+     *                等收尾。界面要把「估算」这件事说出来
+     */
+    record CompactProgress(String phase, int done, int total, int percent)
+            implements AgentEvent {
+
+        /** 收尾。进度条该撤了——不管是压完了、压失败了，还是用户按了 Esc。 */
+        public static final String PHASE_DONE = "done";
+
+        public static CompactProgress finished(int total) {
+            return new CompactProgress(PHASE_DONE, total, total, 100);
+        }
+    }
+
     /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢失。 */
     record Compacted(int tokensBefore, int tokensAfter, boolean summarized) implements AgentEvent {
     }

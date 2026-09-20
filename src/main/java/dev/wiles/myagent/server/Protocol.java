@@ -120,6 +120,14 @@ public final class Protocol {
             n.put("output", e.output());
             return n;
         }
+        if (event instanceof AgentEvent.CompactProgress e) {
+            ObjectNode n = event("compacting");
+            n.put("phase", e.phase());
+            n.put("done", e.done());
+            n.put("total", e.total());
+            n.put("percent", e.percent());
+            return n;
+        }
         if (event instanceof AgentEvent.Compacted e) {
             ObjectNode n = event("compacted");
             n.put("tokensBefore", e.tokensBefore());

@@ -417,16 +417,66 @@ public final class Agent {
      *
      * <p>有现货就用现货（零调用），没有就同步算。记录长度还不够三轮时什么都不做。
      *
+     * <h3>进度</h3>
+     * 全程会发 {@link AgentEvent.CompactProgress}，<b>包括最后那一条 {@code done}</b>——
+     * 它必须无条件发出去，压成了、压不了、被取消了都一样。少发一次，界面上那根进度条
+     * 就永远停在 87% 不动，而后台其实早就结束了。
+     *
+     * <h3>用现货时不闪进度条</h3>
+     * 有待用件时整个过程是零调用、瞬间完成的。那一路<b>一条进度事件都不发</b>，
+     * 免得界面上闪过一根来不及看清的条——界面只在收到第一条 map/reduce 时才建进度条。
+     *
      * @return 压了返回结果，没压返回 null
      */
     public ContextManager.Result compactNow() {
         List<ToolSpec> specs = tools.specs();
         ContextManager.Result before = buildWindow(specs);
-        ContextManager.Compaction ready = precompute.ready() ? precompute.take()
-                : canAdvance() ? context.compute(conversation(), segments, client) : null;
-        // 过期货必须在这儿就拦掉，不能交给 land 去默默拒绝：那样 /compact 会一声不吭
-        // 地报成功，用户看不到任何变化，也不知道为什么
-        return ready == null || !advances(ready) ? null : land(ready, before, specs);
+        if (precompute.ready()) {
+            ContextManager.Compaction ready = precompute.take();
+            // 现货也可能是过期货，见 advances()。这儿必须**返回 null** 而不是交给 land
+            // 去默默拒绝：那样 /compact 会一声不吭地报成功，用户看不到任何变化，
+            // 也不知道为什么
+            return ready == null || !advances(ready) ? null : land(ready, before, specs);
+        }
+        if (!canAdvance()) {
+            return null;
+        }
+        cancelled = false;      // 上一轮按过 Esc 的残留标志，不该让这次压缩一出生就作废
+        ContextManager.Compaction fresh;
+        try {
+            fresh = context.compute(conversation(), segments, client, this::onCompactProgress);
+        } finally {
+            finishCompactProgress();
+        }
+        // 按了 Esc 就整份丢掉，一个段都不留。这里不能只看「有没有结果」：
+        // summarizeChunk 把调用失败降级成一段占位文本，而段是**一辈子缓存**的，
+        // 落地了就再也不会重算——于是用户按一次取消，换来的是这段历史永久变成
+        // 「（摘要没能生成）」。宁可这次白跑
+        if (cancelled) {
+            log.info("压缩被取消，算出来的东西整份丢弃（段有缓存，留着会把占位文本焊死）");
+            return null;
+        }
+        return fresh == null ? null : land(fresh, before, specs);
+    }
+
+    /**
+     * 这次压缩一共几步。只为了让收尾那条事件报得出 {@code n/n} 而记——
+     * 总步数是 {@link ContextManager} 切完块才知道的，{@link Agent} 这边只能听来。
+     */
+    private int compactSteps;
+
+    private void onCompactProgress(String phase, int done, int total, int percent) {
+        compactSteps = total;
+        listener.accept(new AgentEvent.CompactProgress(phase, done, total, percent));
+    }
+
+    /**
+     * 收尾。<b>无条件发</b>——压成了、压不了、被取消了都一样，
+     * 少发一次界面上那根条就永远停在 87% 不动。
+     */
+    private void finishCompactProgress() {
+        listener.accept(AgentEvent.CompactProgress.finished(compactSteps));
+        compactSteps = 0;
     }
 
     /**
@@ -489,7 +539,15 @@ public final class Agent {
                     c = precompute.awaitReady(FORCE_WAIT_MILLIS);
                 }
                 if (c == null && canAdvance()) {
-                    c = context.compute(conversation(), segments, client);
+                    // 到了硬线这一轮无论如何要卡住几十秒，而此刻界面上只有一个
+                    // 转着的「思考中」——用户完全不知道它在压缩，只觉得这次特别慢。
+                    // 报进度不改变任何行为，但把这段黑箱变成了看得见的事
+                    try {
+                        c = context.compute(conversation(), segments, client,
+                                this::onCompactProgress);
+                    } finally {
+                        finishCompactProgress();
+                    }
                 }
                 if (c != null) {
                     result = land(c, result, specs);

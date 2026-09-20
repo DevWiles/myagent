@@ -1,8 +1,10 @@
 package dev.wiles.myagent.context;
 
 import dev.wiles.myagent.llm.ChatMessage;
+import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
+import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolSpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
 import java.util.function.Supplier;
 
 /**
@@ -297,6 +300,51 @@ public final class ContextManager {
     // ------------------------------------------------------------------
 
     /**
+     * 压缩进度的回调。
+     *
+     * <h3>为什么是<b>参数</b>而不是字段</h3>
+     * 后台预压缩（{@link Precompute}）调的是同一个 {@link #compute}，而它的全部价值
+     * 就在于<b>用户看不见</b>——80% 那条线上悄悄把摘要算好，等到要用时零调用换进去。
+     * 做成字段的话，接了进度的实例一旦被后台复用，界面上就会毫无来由地弹出一条
+     * 「正在压缩对话…」，而那一刻用户什么都没做。所以进度只能由<b>这一次调用</b>的
+     * 发起方决定要不要看，不进入对象状态。
+     */
+    @FunctionalInterface
+    public interface Progress {
+
+        /** 什么都不报。后台预压缩走这个。 */
+        Progress SILENT = (phase, done, total, percent) -> { };
+
+        /**
+         * @param phase   {@link #PHASE_MAP} 或 {@link #PHASE_REDUCE}
+         * @param done    已经走完几步（不含正在进行的这一步）
+         * @param total   一共几步 = 要摘的块数 + （要不要 reduce ? 1 : 0）
+         * @param percent 0~99 的整体进度。<b>最后那一下由调用方补</b>——
+         *                这里永远不报 100，见 {@link #percentOf}
+         */
+        void step(String phase, int done, int total, int percent);
+    }
+
+    public static final String PHASE_MAP = "map";
+    public static final String PHASE_REDUCE = "reduce";
+
+    /**
+     * 摘要的预期长度，按输入规模估：一块原文压到大约这个比例。
+     *
+     * <p><b>这个数只用来画进度条</b>，不进提示词、不裁剪输出，估歪了也只是条走得快一点
+     * 或者慢一点。之所以需要它：1M 窗口下整段会话通常只有<b>一块</b>
+     * （块预算 = 1,000,000 × {@value #CHUNK_RATIO}），纯按块数报进度的话，
+     * 条会在 0% 上干等几十秒然后直接跳 100%——那跟没有进度条是一回事。
+     * 有了它，条就能跟着模型一个字一个字往外吐而平滑推进。
+     *
+     * <p>0.12 是从实测的摘要长度反推的量级（一块几千 token 的工作记录，
+     * 摘要通常几百 token）。模型写得比这短，条会从半路直接走完；写得长，
+     * 条会顶在 99% 等它收尾。两种都不难看，也都没有说谎——
+     * 界面那一行写的是「估算」。
+     */
+    private static final double SUMMARY_RATIO = 0.12;
+
+    /**
      * 算一份待用件。<b>这是唯一会发模型调用的方法</b>，可能很慢——
      * 正常路径上它跑在后台线程里，只有到了 {@link Stage#FORCE} 才同步调用。
      *
@@ -308,6 +356,12 @@ public final class ContextManager {
      */
     public Compaction compute(List<ChatMessage> record, List<SummarySegment> known,
                               LlmClient client) {
+        return compute(record, known, client, Progress.SILENT);
+    }
+
+    /** 带进度的版本。{@code /compact} 和硬线上的同步压缩走这条。 */
+    public Compaction compute(List<ChatMessage> record, List<SummarySegment> known,
+                              LlmClient client, Progress progress) {
         if (record == null || record.isEmpty()) {
             return null;
         }
@@ -315,12 +369,40 @@ public final class ContextManager {
         if (upTo <= 0) {
             return null;    // 还不够三轮，没有可压的区间
         }
+        Progress p = progress == null ? Progress.SILENT : progress;
 
-        List<SummarySegment> segments = map(record, upTo, known, client);
+        List<SummarySegment> kept = fitting(known, record.size());
+        int covered = SummarySegment.coveredUpTo(kept);
+        List<int[]> todo = covered >= upTo ? List.of() : chunks(record, covered, upTo);
+        // reduce 只在段不止一段时才发调用（单段直接返回那一段），所以总步数也得跟着判，
+        // 否则条会停在 6/7 上再也不动
+        boolean reducing = kept.size() + todo.size() > 1;
+        int total = todo.size() + (reducing ? 1 : 0);
+
+        List<SummarySegment> segments = map(record, upTo, kept, todo, client, p, total);
         if (segments.isEmpty()) {
             return null;
         }
-        return new Compaction(segments, reduce(segments, client), upTo);
+        return new Compaction(segments, reduce(segments, client, p, todo.size(), total), upTo);
+    }
+
+    /** 还对得上号的老段。记录只追加，所以下标没越界的就永远有效。 */
+    private static List<SummarySegment> fitting(List<SummarySegment> known, int size) {
+        return known == null ? List.of()
+                : known.stream().filter(s -> s.fitsIn(size)).toList();
+    }
+
+    /**
+     * 整体进度的百分比。<b>封在 99</b>：100% 意味着「这件事结束了」，
+     * 而这里每一次报告都发生在某一步<b>还没做完</b>的时候。
+     * 让条提前走到 100 再干等几秒，比走到 99 停一下难看得多。
+     */
+    private static int percentOf(int done, double withinStep, int total) {
+        if (total <= 0) {
+            return 0;
+        }
+        double ratio = (done + Math.max(0, Math.min(1, withinStep))) / total;
+        return Math.max(0, Math.min(99, (int) (ratio * 100)));
     }
 
     /**
@@ -331,22 +413,32 @@ public final class ContextManager {
      */
     List<SummarySegment> map(List<ChatMessage> record, int upTo, List<SummarySegment> known,
                              LlmClient client) {
-        List<SummarySegment> segments = new ArrayList<>();
-        if (known != null) {
-            known.stream().filter(s -> s.fitsIn(record.size())).forEach(segments::add);
-        }
-        int covered = SummarySegment.coveredUpTo(segments);
-        if (covered >= upTo) {
+        List<SummarySegment> kept = fitting(known, record.size());
+        int covered = SummarySegment.coveredUpTo(kept);
+        List<int[]> todo = covered >= upTo ? List.of() : chunks(record, covered, upTo);
+        return map(record, upTo, kept, todo, client, Progress.SILENT, todo.size());
+    }
+
+    private List<SummarySegment> map(List<ChatMessage> record, int upTo,
+                                     List<SummarySegment> kept, List<int[]> todo,
+                                     LlmClient client, Progress progress, int total) {
+        List<SummarySegment> segments = new ArrayList<>(kept);
+        if (todo.isEmpty()) {
             return segments;        // 全都算过了，一次调用都不用发
         }
 
         int[] budget = {MAX_HARVEST};
-        int mapped = 0;
-        for (int[] chunk : chunks(record, covered, upTo)) {
-            segments.add(summarizeChunk(record, chunk[0], chunk[1], client, budget));
-            mapped++;
+        for (int i = 0; i < todo.size(); i++) {
+            int[] chunk = todo.get(i);
+            int done = i;
+            // 先报一次 0 进度：第一块要跑好几秒，不先报的话条要干等到第一个字才出现
+            progress.step(PHASE_MAP, done, total, percentOf(done, 0, total));
+            segments.add(summarizeChunk(record, chunk[0], chunk[1], client, budget,
+                    watching(progress, w -> progress.step(PHASE_MAP, done, total,
+                            percentOf(done, w, total)))));
         }
-        log.info("map: 新增 {} 块，覆盖记录 [{}, {})", mapped, covered, upTo);
+        log.info("map: 新增 {} 块，覆盖记录 [{}, {})", todo.size(),
+                SummarySegment.coveredUpTo(kept), upTo);
         return segments;
     }
 
@@ -428,6 +520,11 @@ public final class ContextManager {
      * 白花一次钱换来信息损耗，正是这次重构要消灭的东西。
      */
     String reduce(List<SummarySegment> segments, LlmClient client) {
+        return reduce(segments, client, Progress.SILENT, 0, 0);
+    }
+
+    private String reduce(List<SummarySegment> segments, LlmClient client,
+                          Progress progress, int done, int total) {
         if (segments == null || segments.isEmpty()) {
             return null;
         }
@@ -442,8 +539,12 @@ public final class ContextManager {
         if (client == null) {
             return joined.toString().strip();   // 没客户端就原样拼起来，总比没有强
         }
+        progress.step(PHASE_REDUCE, done, total, percentOf(done, 0, total));
+        // 合并的输出长度对着输入（各段拼起来）估，和 map 那边用的是同一把尺子
+        DoubleConsumer within = watching(progress, w -> progress.step(PHASE_REDUCE, done, total,
+                percentOf(done, w, total)));
         try {
-            var response = client.chat(List.of(
+            var response = summarize(client, List.of(
                     ChatMessage.system("你负责把分段摘要合并成一份连贯摘要。不要寒暄。"),
                     ChatMessage.user("""
                             下面是同一段工作记录被分块摘要后的结果，按时间先后排列。
@@ -455,7 +556,7 @@ public final class ContextManager {
                             4. 不要输出「第一段说……第二段说……」这种转述结构
 
                             %s
-                            """.formatted(joined))), null);
+                            """.formatted(joined))), within, joined.length());
 
             String text = response.text();
             return text == null || text.isBlank() ? joined.toString().strip() : text.strip();
@@ -468,11 +569,93 @@ public final class ContextManager {
     }
 
     /**
+     * 有人在看进度吗。没人看（后台预压缩）就返回 null，调用方据此走非流式那条路。
+     *
+     * <p>判的是<b>身份</b>而不是「非 null」：{@link Progress#SILENT} 是这个包里唯一
+     * 表示「没人看」的值，而调用方随手传个空 lambda 是另一回事——那说明它确实接了，
+     * 只是这一刻不关心，那就照样按「有人看」办。
+     */
+    private static DoubleConsumer watching(Progress progress, DoubleConsumer sink) {
+        return progress == Progress.SILENT ? null : sink;
+    }
+
+    /**
+     * 发一次摘要请求。有人看进度就走流式，没人看就走非流式。
+     *
+     * <h3>为什么不一律用流式</h3>
+     * 因为<b>流式那条路不重试</b>（{@code DeepSeekClient}：内容可能已经打到用户屏幕上了，
+     * 重来一次会把前半段重复输出一遍），而非流式会对 429/5xx 退避重试两次。
+     * 摘要特别输不起这个：调用失败会降级成一段占位文本，
+     * 而段是<b>一辈子缓存</b>的——一次转瞬即逝的 429，换来这段历史永久变成
+     * 「（摘要没能生成）」。所以没人看进度时（后台预压缩，也是绝大多数情况）
+     * 照旧走带重试的那条。
+     *
+     * <h3>流式失败了再退回去试一次</h3>
+     * 有人看进度时必须流式（条才动得起来），但失败的代价没变。
+     * 所以流式抛了就用非流式再来一遍，把重试补回来——摘要的输出不进转录，
+     * 没有「前半段重复输出」那个顾虑。
+     */
+    private static ChatResponse summarize(
+            LlmClient client, List<ChatMessage> messages, DoubleConsumer within, int inputLength) {
+        if (within == null) {
+            return client.chat(messages, null);
+        }
+        try {
+            return client.chat(messages, null, new Counter(inputLength * SUMMARY_RATIO, within));
+        } catch (LlmException e) {
+            log.warn("流式摘要失败，退回带重试的非流式再试一次: {}", e.getMessage());
+            return client.chat(messages, null);
+        }
+    }
+
+    /**
+     * 数流式输出到哪儿了，换算成「这一步走了几成」。
+     *
+     * <h3>为什么按字数而不按 token</h3>
+     * 要的是一个<b>单调递增、大致成比例</b>的数，用来画进度条。
+     * 为此现场跑一遍 {@link TokenEstimator} 是把成本花在没有回报的地方——
+     * 字数和 token 数在同一种语言里近似线性，画条完全够用。
+     *
+     * <h3>为什么要节流</h3>
+     * 流式回调一次可能只来几个字。不拦的话，一段几百 token 的摘要会推出上千个
+     * 进度事件，全都经 WebSocket 广播出去——而肉眼能分辨的档位撑死一百个。
+     */
+    private static final class Counter implements StreamListener {
+
+        /** 百分比涨了这么多才报一次。1 个百分点是界面能画出来的最小一格。 */
+        private static final double MIN_DELTA = 0.01;
+
+        private final double expected;
+        private final DoubleConsumer sink;
+        private int chars;
+        private double reported;
+
+        Counter(double expected, DoubleConsumer sink) {
+            this.expected = Math.max(1, expected);
+            this.sink = sink;
+        }
+
+        @Override
+        public void onTextDelta(String delta) {
+            if (delta == null) {
+                return;
+            }
+            chars += delta.length();
+            double within = Math.min(1, chars / expected);
+            if (within - reported >= MIN_DELTA) {
+                reported = within;
+                sink.accept(within);
+            }
+        }
+    }
+
+    /**
      * 摘一块。失败只降级<b>这一块</b>，其余块照常——
      * 这比旧实现的全有全无（一次调用挂了整段历史变成一句「已省略」）严格更好。
      */
     private SummarySegment summarizeChunk(List<ChatMessage> record, int from, int to,
-                                          LlmClient client, int[] harvestBudget) {
+                                          LlmClient client, int[] harvestBudget,
+                                          DoubleConsumer within) {
         List<ChatMessage> slice = record.subList(from, to);
         if (client == null) {
             return new SummarySegment(from, to, placeholder(slice.size()));
@@ -492,7 +675,7 @@ public final class ContextManager {
         }
 
         try {
-            var response = client.chat(List.of(
+            var response = summarize(client, List.of(
                     ChatMessage.system("你负责压缩对话历史。输出要点式摘要，不要寒暄。"),
                     ChatMessage.user("""
                             把下面这段编码助手的工作记录压缩成简洁摘要，必须保留：
@@ -520,7 +703,8 @@ public final class ContextManager {
                             ----- 工作记录 -----
                             %s
                             """.formatted(HARVEST_MARKER, renderTopicHints(),
-                            Math.max(harvestBudget[0], 0), transcript))), null);
+                            Math.max(harvestBudget[0], 0), transcript))),
+                    within, transcript.length());
 
             String[] parts = splitSummary(response.text());
             if (parts[0].isBlank()) {

@@ -407,6 +407,81 @@ class AgentTest {
     }
 
     @Test
+    @DisplayName("/compact 全程报进度，而且收尾那一条无条件发")
+    void compactNowReportsProgressAndAlwaysFinishes() {
+        FakeLlm llm = new FakeLlm().says("好").says("好").says("好").says("好");
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys", 25, new ContextManager(4_000));
+        for (int i = 0; i < 4; i++) {
+            agent.run("第 " + i + " 个问题");
+        }
+
+        List<AgentEvent> events = new ArrayList<>();
+        agent.onEvent(events::add);
+        assertNotNull(agent.compactNow(), "前提：这段记录压得动");
+
+        List<AgentEvent.CompactProgress> progress = events.stream()
+                .filter(e -> e instanceof AgentEvent.CompactProgress)
+                .map(e -> (AgentEvent.CompactProgress) e)
+                .toList();
+        assertFalse(progress.isEmpty(), "一条进度都没有，界面上就是一块不动的屏幕");
+        // 少了这一条，那根条就永远停在 87% 不动，而后台其实早就结束了
+        assertEquals(AgentEvent.CompactProgress.PHASE_DONE,
+                progress.get(progress.size() - 1).phase(),
+                "最后一条必须是收尾，界面靠它撤进度条");
+    }
+
+    @Test
+    @DisplayName("压不动的时候也要发收尾，否则进度条永远挂着")
+    void finishIsSentEvenWhenNothingGetsCompacted() {
+        FakeLlm llm = new FakeLlm().says("好");
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys", 25, new ContextManager(4_000));
+        agent.run("就说一句");          // 一轮而已，凑不出可压的区间
+
+        List<AgentEvent> events = new ArrayList<>();
+        agent.onEvent(events::add);
+
+        assertNull(agent.compactNow(), "前提：这段记录压不动");
+        // 这一路走的是 canAdvance() == false 的提前返回。它同样不能留下一根挂着的条
+        assertTrue(events.stream().noneMatch(e -> e instanceof AgentEvent.CompactProgress),
+                "压根没开始压，就不该建进度条——闪一下再消失比没有更让人疑惑");
+    }
+
+    @Test
+    @DisplayName("按 Esc 取消压缩：一个段都不留，下次重来")
+    void cancelledCompactionKeepsNothing() {
+        FakeLlm llm = new FakeLlm().says("好").says("好").says("好").says("好");
+        Agent[] holder = new Agent[1];
+        // Esc 必须发生在压缩**途中**——压缩一开始会把上一轮的残留标志清掉
+        // （和 run() 一样），所以提前按是不算数的
+        LlmClient cancelsMidway = new LlmClient() {
+            @Override
+            public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+                if (messages.get(0).content().contains("压缩对话历史")) {
+                    holder[0].cancel();
+                }
+                return llm.chat(messages, tools);
+            }
+
+            @Override
+            public String modelName() {
+                return "fake";
+            }
+        };
+        Agent agent = new Agent(cancelsMidway, new ToolRegistry(), "sys", 25,
+                new ContextManager(4_000));
+        holder[0] = agent;
+        for (int i = 0; i < 4; i++) {
+            agent.run("第 " + i + " 个问题");
+        }
+
+        assertNull(agent.compactNow(), "取消了就不该落地");
+        // 段是**一辈子缓存**的，落地了就再也不会重算。取消时留下降级出来的占位文本，
+        // 等于把「（摘要没能生成）」永久焊死在这段历史上
+        assertTrue(agent.segments().isEmpty(), "取消之后一个段都不该留下");
+        assertFalse(agent.hasCompacted(), "取消之后不该显示成已压缩");
+    }
+
+    @Test
     @DisplayName("过期的待用件不许落地——边界只能往前，不能倒退")
     void staleWorkInHandIsRejected() {
         FakeLlm llm = new FakeLlm();

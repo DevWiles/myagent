@@ -127,6 +127,7 @@ token 随进程生灭，每次启动都不一样。
 | `thought` | `text` | 调工具前说的那句话 |
 | `tool_started` | `id` `tool` `arguments` | `arguments` 是 JSON 字符串 |
 | `tool_finished` | `id` `tool` `ok` `output` | |
+| `compacting` | `phase` `done` `total` `percent` | 压缩正在进行，画进度条。`phase:"done"` 是收尾 |
 | `compacted` | `tokensBefore` `tokensAfter` `summarized` | 上下文被压缩了 |
 | `done` | `text` `steps` | 最终答复，本轮结束 |
 | `failed` | `reason` | 跑不下去了（调用失败、被取消、超步数） |
@@ -406,13 +407,48 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 |---|---|---|
 | 80% | 后台**先把摘要算好**，不换上下文 | 什么都没有——这正是重点 |
 | 93.5% | **有算好的就换上**，零调用、无卡顿 | 一条 `compacted` |
-| 98.7% | 没算好也得压，此时才会卡一下 | 一条 `compacted` |
+| 98.7% | 没算好也得压，此时才会卡一下 | 一串 `compacting` + 一条 `compacted` |
 | 跌回 80% 以下 | 把没用上的那份丢掉 | 无 |
 
 ```
 界面 → {"t":"compact"}
+后端 → {"t":"busy","busy":true}
+后端 → {"t":"compacting","phase":"map","done":0,"total":3,"percent":4}
+后端 → {"t":"compacting","phase":"map","done":0,"total":3,"percent":19}
+后端 → {"t":"compacting","phase":"reduce","done":2,"total":3,"percent":72}
+后端 → {"t":"compacting","phase":"done","done":3,"total":3,"percent":100}
 后端 → {"t":"compacted","tokensBefore":48210,"tokensAfter":19044,"summarized":true}
+后端 → {"t":"busy","busy":false,"tokens":19044,...}
 ```
+
+#### `compacting`：画进度条
+
+压缩是一次（或几次）完整的模型调用，几十秒起步。没有这个事件的话，用户敲完
+`/compact` 面对的是一块完全不动的屏幕——按键丢了、后端挂了、还是在干活，
+三种情况长得一模一样。
+
+| 字段 | 含义 |
+|---|---|
+| `phase` | `map` 逐块摘要 / `reduce` 合并成一份 / `done` 收尾 |
+| `done` / `total` | 走完几步 / 一共几步。`total` = 要摘的块数 + （要 reduce ? 1 : 0） |
+| `percent` | 0~100 的整体进度 |
+
+四条规矩：
+
+1. **只有用户等得到的压缩才发**。`/compact`，以及占用到 98.7% 时那次不得不卡的
+   同步压缩。80% 那条线上的后台预压缩**刻意不发**——它的全部价值就是无感，
+   弹一条「正在压缩」等于把它的意义抵消掉。有现货可用时（零调用、瞬间完成）
+   同样一条都不发，免得界面上闪过一根来不及看清的条。
+2. **`phase:"done"` 一定会来**。压成了、压失败了、用户按 Esc 取消了，三种都发。
+   界面收到它就把进度条**整条移走**——留一根凝固在 62% 的条，比没有进度条更让人疑惑。
+   稳妥起见，界面也该在 `busy:false` 时兜一道。
+3. **`percent` 的内层是估的**。外层（第几块 / 共几块）是准的；内层是「摘要已经吐了
+   多少字 ÷ 按输入规模估的预期长度」。之所以要这一层：1M 窗口下整段会话通常只切出
+   **一块**，纯按块数报的话条会在 0% 上干等几十秒再直接跳 100%。代价是条可能提前
+   走完或者顶在 99% 等收尾，所以**界面要把「估算」这件事写出来**——
+   让人以为这是精确进度，比没有进度条更糟。
+4. **进度期间 `busy` 为 true**，和一轮对话同一个闸。压缩会改写 agent 的派生物，
+   和对话并发跑会互相踩；上了闸之后 Esc 也能真的把它掐断。
 
 几条容易误会的地方：
 
