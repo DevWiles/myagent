@@ -11,8 +11,8 @@ import {
 } from './format.ts'
 import type { ToolCall } from './store.ts'
 
-function call(tool: string): ToolCall {
-  return { id: 1, tool, args: '{}', running: false, ok: true }
+function call(tool: string, args = '{}'): ToolCall {
+  return { id: 1, tool, args, running: false, ok: true }
 }
 
 describe('工具摘要', () => {
@@ -32,6 +32,41 @@ describe('工具摘要', () => {
 
   test('空列表返回空串', () => {
     expect(summarizeTools([])).toBe('')
+  })
+
+  test('检索只调一次时显示模式本身——「搜索 1 次」几乎不含信息', () => {
+    expect(summarizeTools([call('grep', '{"pattern":"AgentRole"}')]))
+      .toBe('搜索 AgentRole')
+    expect(summarizeTools([call('glob', '{"pattern":"**/*Test.java"}')]))
+      .toBe('找文件 **/*Test.java')
+  })
+
+  test('检索调了好几次就退回计数，不然一行会被一串模式撑爆', () => {
+    expect(summarizeTools([
+      call('grep', '{"pattern":"a"}'),
+      call('grep', '{"pattern":"b"}'),
+    ])).toBe('搜索 2 次')
+  })
+
+  test('过长的模式要截断，这一行还要和别的摘要并排放', () => {
+    const long = 'x'.repeat(80)
+    const out = summarizeTools([call('grep', JSON.stringify({ pattern: long }))])
+    expect(out.length).toBeLessThan(45)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  test('参数不是合法 JSON 时退回计数，绝不抛', () => {
+    // 参数是模型生成的，什么都可能来。摘要是装饰，不该有能力让界面崩掉
+    expect(summarizeTools([call('grep', '{截断的半截')])).toBe('搜索 1 次')
+    expect(summarizeTools([call('grep', '{}')])).toBe('搜索 1 次')
+  })
+
+  test('检索和别的工具混在一起时说法各自成立', () => {
+    expect(summarizeTools([
+      call('grep', '{"pattern":"foo"}'),
+      call('read_file'),
+      call('read_file'),
+    ])).toBe('搜索 foo · 读取 2 个文件')
   })
 })
 

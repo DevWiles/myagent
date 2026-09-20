@@ -1,8 +1,10 @@
 /**
  * 文案与格式化。
  *
- * 措辞刻意和 Java 版的 ToolSummary / Logo 保持一致——两套前端共用一个后端，
- * 说法不一样会让人以为是两个程序。
+ * 早先这里的措辞要和 Java 版的 ToolSummary 对齐——那时候有两套前端共用一个后端，
+ * 说法不一样会让人以为是两个程序。自带终端界面删掉之后只剩这一套，
+ * 但那条理由的另一半仍然成立：**和工具自己的说明词对齐**。
+ * grep 的 description 里管它叫「搜索」，界面上就不该叫「查询」。
  */
 
 import type { ToolCall } from './store.ts'
@@ -14,6 +16,34 @@ const WORDING: Record<string, [string, string]> = {
   list_dir: ['列出', '个目录'],
   bash: ['执行', '条命令'],
   create_project: ['创建', '批文件'],
+  grep: ['搜索', '次'],
+  glob: ['找文件', '次'],
+}
+
+/**
+ * 这些工具只调一次时，显示模式本身而不是次数。
+ *
+ * 「搜索 1 次」几乎不含信息——用户想知道的是**搜了什么**。
+ * 而检索恰恰是最该让人看见的一类调用：它替代了用户自己去 grep，
+ * 看不见搜的是什么，就没法判断 agent 是不是找错了方向。
+ * 调了好几次时退回计数，否则一行会被一串模式撑爆。
+ */
+const SHOWS_PATTERN = new Set(['grep', 'glob'])
+
+/** 单条模式在摘要里的最大宽度。超了截断——这一行要和别的摘要并排放。 */
+const MAX_PATTERN = 32
+
+/** 从工具参数里取出 pattern。参数不是合法 JSON 就当没有，绝不为它抛。 */
+function patternOf(call: ToolCall): string | null {
+  if (!SHOWS_PATTERN.has(call.tool)) return null
+  try {
+    const parsed = JSON.parse(call.args) as { pattern?: unknown }
+    const pattern = parsed?.pattern
+    if (typeof pattern !== 'string' || pattern.length === 0) return null
+    return truncate(pattern, MAX_PATTERN)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -29,7 +59,12 @@ export function summarizeTools(calls: readonly ToolCall[]): string {
   const parts: string[] = []
   for (const [tool, count] of counts) {
     const wording = WORDING[tool]
-    parts.push(wording ? `${wording[0]} ${count} ${wording[1]}` : `调用 ${count} 次 ${tool}`)
+    if (!wording) {
+      parts.push(`调用 ${count} 次 ${tool}`)
+      continue
+    }
+    const only = count === 1 ? patternOf(calls.find((c) => c.tool === tool)!) : null
+    parts.push(only ? `${wording[0]} ${only}` : `${wording[0]} ${count} ${wording[1]}`)
   }
   return parts.join(' · ')
 }
