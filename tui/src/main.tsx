@@ -123,9 +123,21 @@ function shutdown(reason?: string, code = 0): void {
   process.exit(code)
 }
 
+/**
+ * App 挂载之前，Ctrl-C 归这里管。
+ *
+ * 挂载之后就交给 App——只有它看得见「正跑着一轮」「输入框里有字」，
+ * 而这两样恰恰是最不该被一下 Ctrl-C 抹掉的东西（见 `interrupt.ts`）。
+ * 这条兜底不能删：后端起不来、界面还没画出来的那一两秒，
+ * 用户唯一能按的就是 Ctrl-C，那时候 App 还接不了。
+ */
+let appOwnsCtrlC = false
+
 renderer.keyInput.on("keypress", (key: { name?: string; ctrl?: boolean }) => {
-  if (key.ctrl && key.name === "c") shutdown()
+  if (key.ctrl && key.name === "c" && !appOwnsCtrlC) shutdown()
 })
+// SIGINT 照旧立刻退：raw 模式下 Ctrl-C 根本不产生它（-isig），
+// 能走到这儿的只有 `kill -INT` 那种外部指令——那是真的要它死，不该再问一遍
 process.on("SIGINT", () => shutdown())
 process.on("SIGTERM", () => shutdown())
 process.on("SIGHUP", () => shutdown())
@@ -145,9 +157,11 @@ await render(
       // 后端没了就退出，并把原因留在终端上——altscreen 一还原，
       // 界面里印的任何错误都会跟着消失，只有这里打的才看得见
       onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
+      onExit={() => shutdown()}
       onMounted={(handle) => {
         exit.state = handle.state
         exit.dispose = handle.dispose
+        appOwnsCtrlC = true
       }}
     />
   ),

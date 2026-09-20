@@ -11,6 +11,7 @@
 
 import type { KeyEvent } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
+import { armedAfter, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
@@ -51,6 +52,14 @@ export type AppProps = {
    * 递 **accessor** 而不是快照：退出那一刻才求值，拿到的才是最新的数。
    */
   onMounted?: (handle: { state: Accessor<SessionState>; dispose: () => void }) => void
+  /**
+   * 用户确认要退了，由入口执行（要关后端、还终端、打收尾）。
+   *
+   * 「确认」这两个字是重点：Ctrl-C 什么时候算退出是 {@link decideCtrlC} 的事，
+   * 入口只管退。原先入口自己接 Ctrl-C 直接退，而它看不见「正跑着一轮」
+   * 也看不见「输入框里有字」——看不见的东西自然也就保护不了。
+   */
+  onExit: () => void
 }
 
 export function App(props: AppProps) {
@@ -124,6 +133,14 @@ export function App(props: AppProps) {
   const [draft, setDraft] = createSignal("")
   /** 菜单里选中第几条（↑↓ 移动，Tab 补全）。 */
   const [picked, setPicked] = createSignal(0)
+  /**
+   * 「再按一次 Ctrl-C 就退出」此刻成立吗。
+   *
+   * 它和输入框下面那行提示是<b>同一件事</b>：提示亮着 ⟺ 再按一下真的会退。
+   * 所以这里没有超时——加了超时，提示还在屏幕上、按下去却只是重新武装，
+   * 那行字就开始说谎了。解除交给「按了别的键」。
+   */
+  const [exitArmed, setExitArmed] = createSignal(false)
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
   let inputControls: { setValue: (value: string) => void } | undefined
 
@@ -318,6 +335,47 @@ export function App(props: AppProps) {
     else session.closeSessionPicker()
   }
 
+  /**
+   * 按下 Ctrl-C。判断在 {@link decideCtrlC} 里（纯函数，有测试），这里只负责执行。
+   *
+   * <p>原先这个键根本到不了 App——入口的 `renderer.keyInput` 接到就直接退进程了。
+   * 于是一次跑了两分钟的任务，手一抖整个会话就没了，而 agent 那边还在跑。
+   */
+  const handleCtrlC = (): void => {
+    const action = decideCtrlC({
+      hasApproval: state().approval !== null,
+      hasPlanConfirm: state().planConfirm !== null,
+      pickerOpen: picker() !== null,
+      busy: state().busy,
+      draft: draft(),
+      armed: exitArmed(),
+    })
+    setExitArmed(armedAfter(action))
+
+    switch (action.kind) {
+      case "decline-approval": {
+        const approval = state().approval
+        if (approval) session.approve(approval.id, "no")
+        return
+      }
+      case "decline-plan": {
+        const confirm = state().planConfirm
+        if (confirm) session.confirmPlan(confirm.id, false)
+        return
+      }
+      case "close-picker":
+        return leavePicker()
+      case "interrupt":
+        return session.cancel()
+      case "clear-input":
+        return inputControls?.setValue("")
+      case "arm":
+        return          // 提示那一行由 exitArmed() 驱动，这里没有别的事要做
+      case "exit":
+        return props.onExit()
+    }
+  }
+
   // 确认框的按键在**这里**接，而不是在对话框组件里。
   // 因为矮终端下那个框可能整个不渲染，而后端正卡着等回答——
   // 按键要是跟着组件消失，会话就永久挂死了。这条纪律从 Ink 版继承。
@@ -332,6 +390,17 @@ export function App(props: AppProps) {
      * preventDefault() 正好卡在两段派发之间（InternalKeyHandler.emitWithPriority）。
      */
     const consume = () => key.preventDefault()
+
+    // Ctrl-C 必须在所有分支**之前**接。确认框那一段会把其余按键全部吞掉，
+    // 放到后面的话，用户会陷进一个既答不了、也退不出的框里
+    if (key.ctrl && key.name === "c") {
+      consume()
+      handleCtrlC()
+      return
+    }
+    // 按了别的键就解除武装。和终端版 consecutiveInterrupts 被下一次成功读行
+    // 清零是同一套语义——「连按两次」说的是连按，中间插了别的就不算
+    if (exitArmed()) setExitArmed(false)
 
     const approval = state().approval
     if (approval) {
@@ -551,7 +620,7 @@ export function App(props: AppProps) {
               : picker()
                 ? "输入即搜索（标题或分支）· ↑↓ 选 · Enter 接着聊 · Esc 取消"
                 : state().busy
-                  ? "正在跑…（Esc 中断）"
+                  ? "正在跑…（Esc 或 Ctrl-C 中断）"
                   : "交代一件事，比如「把 README 里的启动命令补全」"
           }
           busy={state().busy}
@@ -561,6 +630,15 @@ export function App(props: AppProps) {
           controls={(api) => (inputControls = api)}
           onSubmit={submit}
         />
+
+        {/* 「再按一次就退出」。贴着输入框下面，不进转录——
+            它描述的是**此刻的键盘状态**，不是发生过的事；
+            混进转录里就成了一条永远留在那儿的假消息 */}
+        <Show when={exitArmed()}>
+          <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+            <text fg={dark.warning}>再按一次 Ctrl-C 退出（按别的键就当没按过）</text>
+          </box>
+        </Show>
 
         {/* 计划面板钉在输入框下边：出现时把输入框往上顶，
             执行完不收走——用户说下一句话才让位（见 store 的 activePlanKey） */}

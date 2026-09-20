@@ -115,7 +115,7 @@ const TIPS = [
   "输入任务后按 Enter，agent 会自己决定调哪些工具",
   "敲一个 / 看有哪些命令，边打边筛",
   "/resume 挑一段历史会话接着聊，/continue 直接接最近那段",
-  "Ctrl-O 展开工具调用详情，Ctrl-C 退出",
+  "Ctrl-O 展开工具调用详情，Ctrl-C 中断当前这轮（空着连按两次退出）",
 ] as const
 
 const WHATS_NEW = [
