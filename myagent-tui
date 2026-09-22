@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# 一行命令把整个软件拉起来：按需 build 后端 jar、按需装前端依赖，然后起界面。
+# 一行命令把整个软件拉起来：按需装前端依赖，然后起界面。
 #
-# 设计原则是「只做必要的事」——每次都重新 build 会让启动慢到没人愿意用这个脚本，
-# 所以两件事都带新鲜度判断，正常情况下直接跳过，启动时间和裸跑界面一样。
+# 后端 jar 的按需 build **不在这里**——在界面里（tui/src/build.ts）。
+# 原来在这里同步做，改过一行 Java 之后的每次启动都要对着一行裸文本等 mvn
+# 五秒起步；挪进界面之后，界面亚秒级起来，build 进度打在状态栏上，
+# 输入框还是活的。脚本只留一件非做不可的事：bun 依赖没装时界面根本起不来，
+# 这一步谁也替不了它。
 #
 # 用法:
 #   ./myagent-tui                 在当前目录起界面
 #   ./myagent-tui -d ~/proj       指定工作区
-#   ./myagent-tui --rebuild       强制重新 build 后端
-#   ./myagent-tui --help          用法（不会触发 build）
+#   ./myagent-tui --rebuild       后端强制重 build（由界面执行）
+#   ./myagent-tui --help          用法
 #
 set -euo pipefail
 
@@ -22,7 +25,6 @@ while [ -L "$SOURCE" ]; do
 done
 ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-JAR="$ROOT/target/myagent.jar"
 TUI="$ROOT/tui"
 
 # 用户敲命令时所在的目录，就是 agent 要干活的工作区。必须在 cd 之前存下来。
@@ -43,16 +45,10 @@ need() {
 
 # --- 参数预处理 -------------------------------------------------------------
 
-FORCE_REBUILD=0
-ARGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --rebuild) FORCE_REBUILD=1 ;;          # 自己消化掉，不传给界面
-    *) ARGS+=("$arg") ;;
-  esac
-done
+# --rebuild 原样传给界面，由 build.ts 执行
+ARGS=("$@")
 
-# --help 只是打印文字，没必要为它 build 一遍后端
+# --help 只是打印文字，跳过依赖安装那一段
 for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
   case "$arg" in
     -h|--help)
@@ -65,27 +61,7 @@ done
 need java "需要 JDK 17 或更高版本。"
 need bun  "装一个: curl -fsSL https://bun.sh/install | bash"
 
-# --- 1. 后端 jar ------------------------------------------------------------
-
-# 有任何一个源文件比 jar 新就重新 build。用 find -newer 而不是记时间戳文件，
-# 免得再多一个需要自己维护的状态。
-jar_is_stale() {
-  [ ! -f "$JAR" ] && return 0
-  [ -n "$(find "$ROOT/src/main" "$ROOT/pom.xml" -newer "$JAR" -print -quit 2>/dev/null)" ]
-}
-
-if [ "$FORCE_REBUILD" = 1 ] || jar_is_stale; then
-  need mvn "需要 Maven。也可以自己跑 mvn -DskipTests package 后再用 MYAGENT_JAR 指定 jar。"
-  if [ ! -f "$JAR" ]; then
-    echo "› 第一次运行，正在 build 后端…" >&2
-  else
-    echo "› 后端有改动，正在 build…" >&2
-  fi
-  # 跳过测试：这是启动路径，不是 CI。要跑测试用 mvn test。
-  mvn -q -f "$ROOT/pom.xml" -DskipTests package >&2 || die "后端 build 失败，上面有原因。"
-fi
-
-# --- 2. 前端依赖 ------------------------------------------------------------
+# --- 1. 前端依赖 ------------------------------------------------------------
 
 # 用一个安装完成标记来判断新鲜度，而不是直接比 node_modules 目录的时间：
 # bun install 自己会重写 bun.lock，于是 lock 永远比 node_modules 新，
@@ -99,7 +75,7 @@ if [ ! -f "$STAMP" ] \
   touch "$STAMP"
 fi
 
-# --- 3. 起界面 --------------------------------------------------------------
+# --- 2. 起界面 --------------------------------------------------------------
 
 # 用户没自己指定工作区的话，把进 cd 之前存下的 cwd 传回去
 has_dir=0

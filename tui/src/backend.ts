@@ -13,6 +13,7 @@ import type { Readable } from 'node:stream'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildBackend, jarIsStale } from './build.ts'
 import {
   PROTOCOL_VERSION,
   parseEvent,
@@ -30,6 +31,8 @@ export type BackendOptions = {
   planMode: boolean
   unsafe: boolean
   jar?: string
+  /** 不管新鲜不新鲜都重 build 一遍（--rebuild）。只对仓库自带的 jar 有意义。 */
+  forceRebuild?: boolean
 }
 
 export type Backend = {
@@ -40,23 +43,48 @@ export type Backend = {
   dispose(): void
 }
 
-/** 后端 jar 的位置。允许用环境变量覆盖，方便指向另一个 build。 */
-export function resolveJar(explicit?: string): string {
-  const candidates = [
-    explicit,
-    process.env['MYAGENT_JAR'],
-    // tui/src/ → tui/ → 仓库根 → target/myagent.jar
-    join(dirname(dirname(fileURLToPath(new URL('.', import.meta.url)))), 'target', 'myagent.jar'),
-  ].filter((p): p is string => typeof p === 'string' && p.length > 0)
+/** tui/src/ → tui/ → 仓库根。 */
+function repoRoot(): string {
+  return dirname(dirname(fileURLToPath(new URL('.', import.meta.url))))
+}
 
-  for (const candidate of candidates) {
-    const path = resolve(candidate)
-    if (existsSync(path)) return path
+/**
+ * 该用哪个 jar，以及它归不归我们管。
+ *
+ * <p>两种来源，责任完全不同：显式指定（参数或 MYAGENT_JAR）的是用户
+ * **钉死的某个 build**——它不存在就报错，绝不替人家重编译；
+ * 仓库自带的 target/myagent.jar 归我们管——没有或者过期就现场 build。
+ */
+export function resolveJar(explicit?: string): { path: string; managed: boolean } {
+  const pinned = explicit ?? process.env['MYAGENT_JAR']
+  if (pinned && pinned.length > 0) {
+    const path = resolve(pinned)
+    if (!existsSync(path)) {
+      throw new Error(`指定的后端 jar 不存在: ${path}\n检查 MYAGENT_JAR 或 jar 参数。`)
+    }
+    return { path, managed: false }
   }
-  throw new Error(
-    `找不到后端 jar，试过:\n  ${candidates.map(c => resolve(c)).join('\n  ')}\n` +
-      `先在仓库根目录跑一次 \`mvn -DskipTests package\`，或用 MYAGENT_JAR 指定路径。`,
-  )
+  return { path: join(repoRoot(), 'target', 'myagent.jar'), managed: true }
+}
+
+/**
+ * 保证 jar 可用：仓库自管的 jar 缺了或旧了就地 build。
+ *
+ * <p>这一步以前在 myagent-tui 脚本里、界面起来**之前**同步做，
+ * 用户对着一行裸文本等 mvn。现在它发生在界面之后：进度经 `onStatus`
+ * 打到状态栏，输入框也活着——搬家的全部理由见 build.ts 开头。
+ */
+async function ensureJar(
+  options: BackendOptions,
+  signal?: AbortSignal,
+  onStatus?: (text: string) => void,
+): Promise<string> {
+  const jar = resolveJar(options.jar)
+  if (jar.managed && (options.forceRebuild || jarIsStale(jar.path, repoRoot()))) {
+    onStatus?.(existsSync(jar.path) ? '后端有改动，正在 build…' : '第一次运行，正在 build 后端…')
+    await buildBackend(repoRoot(), signal)
+  }
+  return jar.path
 }
 
 /**
@@ -87,8 +115,12 @@ function javaOptions(): string[] {
 export async function startBackend(
   options: BackendOptions,
   signal?: AbortSignal,
+  /** 启动过程走到哪了（build 中/启动中），给状态栏看。没人关心就不传。 */
+  onStatus?: (text: string) => void,
 ): Promise<Backend> {
-  const jar = resolveJar(options.jar)
+  const jar = await ensureJar(options, signal, onStatus)
+  if (signal?.aborted) throw new Error('已取消')
+  onStatus?.('正在启动后端…')
   const args = [...javaOptions(), '-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
   if (options.model) args.push('-m', options.model)
   if (options.planMode) args.push('--plan')

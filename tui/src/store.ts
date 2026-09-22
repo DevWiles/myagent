@@ -269,6 +269,14 @@ export type SessionState = {
   /** 非空表示后端没了，界面该退出。 */
   closed: string | null
   /**
+   * 后端还没 ready 时状态栏显示的那句话（「正在 build 后端…」「正在启动后端…」）。
+   *
+   * <p>ready 一到它就没人看了（状态栏优先画 ready.model），所以不用清。
+   * 存在的理由：build 挪到界面起来**之后**做了，最长的那段等待（mvn 五秒起步）
+   * 发生在界面上，不写进度的话就是一个看起来卡死的空界面。
+   */
+  bootStatus: string
+  /**
    * 会话选择器的数据。null = 面板没开。
    *
    * <p>**不缓存**：每次 /resume 都重新问一次后端。会话列表随时在变
@@ -296,6 +304,7 @@ const EMPTY_STATE: SessionState = {
   lastDurationMs: null,
   startedAt: null,
   closed: null,
+  bootStatus: '连接后端中…',
   sessionPicker: null,
 }
 
@@ -604,6 +613,11 @@ export class SessionStore {
 
   clearTranscript(): void {
     this.set({ entries: [], expanded: new Set(), step: 0 })
+  }
+
+  /** 启动进行到哪一步了。ready 之前状态栏画的就是这句话。 */
+  setBootStatus(text: string): void {
+    this.set({ bootStatus: text })
   }
 
   markClosed(reason: string): void {

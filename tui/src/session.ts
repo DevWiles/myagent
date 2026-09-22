@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs"
 import { createSignal, onCleanup, type Accessor } from "solid-js"
 import { startBackend, type Backend, type BackendOptions } from "./backend.ts"
+import type { ClientCommand } from "./protocol.ts"
 import { SessionStore, type SessionState } from "./store.ts"
 
 export type Session = {
@@ -145,6 +146,20 @@ export function createSession(options: BackendOptions): Session {
   let backend: Backend | undefined
 
   /**
+   * 后端起来之前攒下的命令，连上那一刻按序补发。
+   *
+   * <p>为什么现在必须有：build 挪到了界面起来之后（见 build.ts），
+   * 「界面活着、后端还没影」这扇窗从零点几秒变成了 mvn 的五秒起步，
+   * 而输入框在这期间是活的。原来的 `backend?.send` 会把这五秒里敲的话
+   * **静默扔掉**——transcript 里记了、模型永远收不到，界面就此干等到天荒地老。
+   */
+  const outbox: ClientCommand[] = []
+  const send = (command: ClientCommand): void => {
+    if (backend) backend.send(command)
+    else outbox.push(command)
+  }
+
+  /**
    * 用来在「后端还没起好」时也能把 java 子进程杀掉。
    *
    * backend 只在 startBackend 的 then 里才被赋值，而 java 要一两秒才起得来。
@@ -167,11 +182,13 @@ export function createSession(options: BackendOptions): Session {
   if (replayPath) {
     stopReplay = startReplay(store, replayPath, Number(process.env["MYAGENT_REPLAY_CPS"] ?? 120))
   } else {
-    startBackend(options, aborter.signal)
+    startBackend(options, aborter.signal, (text) => store.setBootStatus(text))
       .then((b) => {
         backend = b
         b.onEvent((event) => store.apply(event))
         b.onClose((reason) => store.markClosed(reason ?? "后端已退出"))
+        // 事件先接好再补发：攒下的第一句话马上会引来回答，接晚了会漏帧
+        for (const command of outbox.splice(0)) b.send(command)
       })
       .catch((error: unknown) => {
         // 起不来是常见情况（jar 没 build、没装 java），要把原因原样显示出来，
@@ -202,18 +219,18 @@ export function createSession(options: BackendOptions): Session {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了
       store.submitPrompt(text)
-      backend?.send({ t: "prompt", text })
+      send({ t: "prompt", text })
     },
     plan(goal) {
       // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
       // 常驻模式标识回答，而转录里紧跟着就是计划面板。
       // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
       store.submitPrompt(goal)
-      backend?.send({ t: "plan", goal })
+      send({ t: "plan", goal })
     },
     team(goal, roles) {
       store.submitPrompt(roles.length === 0 ? goal : `${roles.join(" ")} ${goal}`)
-      backend?.send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
+      send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
     },
     cycleMode() {
       store.cycleMode()
@@ -223,20 +240,20 @@ export function createSession(options: BackendOptions): Session {
       // 屏幕上什么都不留的话像是按键丢了
       store.submitPrompt("/resume-plan")
       // 发新名字。后端两个都认（老名字 resume 还留着），但界面该说新的那个
-      backend?.send({ t: "resume_plan" })
+      send({ t: "resume_plan" })
     },
     continueSession() {
       store.submitPrompt("/continue")
-      backend?.send({ t: "continue" })
+      send({ t: "continue" })
     },
     requestSessions() {
       // 刻意**不往 transcript 里记一条**：打开一个面板不是「说了一句话」。
       // 记了的话，翻历史时会看到一串莫名其妙的 /resume
-      backend?.send({ t: "sessions" })
+      send({ t: "sessions" })
     },
     resumeSession(id) {
       store.closeSessionPicker()      // 先收面板：后端要几十毫秒，面板挂着会像没反应
-      backend?.send({ t: "session_resume", id })
+      send({ t: "session_resume", id })
     },
     closeSessionPicker() {
       store.closeSessionPicker()
@@ -245,7 +262,7 @@ export function createSession(options: BackendOptions): Session {
       // 先收框再发：后端收到回复后要等工具跑完才会有下一个事件，
       // 这期间框不收掉，用户会对着一个已经答过的框发呆
       store.clearApproval()
-      backend?.send({ t: "approval_reply", id, decision, rules, feedback })
+      send({ t: "approval_reply", id, decision, rules, feedback })
     },
     pickRule() {
       store.beginRulePick()
@@ -270,26 +287,26 @@ export function createSession(options: BackendOptions): Session {
     },
     confirmPlan(id, approved) {
       store.clearPlanConfirm()
-      backend?.send({ t: "plan_confirm_reply", id, approved })
+      send({ t: "plan_confirm_reply", id, approved })
     },
     compact() {
       // 记一条：压缩要发模型调用，有肉眼可见的停顿，屏幕上不留痕像是按键丢了
       store.submitPrompt("/compact")
-      backend?.send({ t: "compact" })
+      send({ t: "compact" })
     },
     memory(action) {
       // 记一条：三个动作都会在转录里留下结果，不记的话那段结果像是凭空冒出来的
       store.submitPrompt(
         action === "list" ? "/memory" : action === "undo" ? "/memory undo" : "/memory clear-auto",
       )
-      backend?.send({ t: "memory", action })
+      send({ t: "memory", action })
     },
     reset() {
       store.submitPrompt("/clear")
-      backend?.send({ t: "reset" })
+      send({ t: "reset" })
     },
     cancel() {
-      backend?.send({ t: "cancel" })
+      send({ t: "cancel" })
     },
     notice(level, text) {
       store.notice(level, text)

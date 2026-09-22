@@ -27,7 +27,8 @@ import type { SessionState } from "./store.ts"
  * 起点取「用户敲下命令的那一刻」而不是「连上后端的那一刻」——等 java 起来那一两秒
  * 他也在等，那也是会话的一部分。
  *
- * 不用担心把 mvn build 的时间算进来：myagent-tui 脚本是 build 完才 exec 过来的。
+ * mvn build 的时间**算在内**：build 现在发生在界面起来之后（见 build.ts），
+ * 那几秒用户同样在等，收尾报的时长就该把它算进去。
  */
 const sessionStartedAt = Date.now()
 
@@ -57,6 +58,7 @@ if (argv.includes("-h") || argv.includes("--help")) {
   -m, --model <名字>  覆盖模型
       --readonly      只读模式，不允许改文件
       --unsafe        放行工作区外的路径
+      --rebuild       后端不管新鲜不新鲜都重 build 一遍
   -h, --help          这段文字
 `)
   process.exit(0)
@@ -182,6 +184,7 @@ await render(
         model: flag("-m", "--model"),
         planMode: argv.includes("--readonly"),
         unsafe: argv.includes("--unsafe"),
+        forceRebuild: argv.includes("--rebuild"),
       }}
       // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
       // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的

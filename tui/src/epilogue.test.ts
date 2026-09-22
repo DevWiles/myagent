@@ -39,6 +39,7 @@ function stateOf(partial: {
     lastDurationMs: null,
     startedAt: null,
     closed: null,
+    bootStatus: '连接后端中…',
     sessionPicker: null,
   }
 }

@@ -658,7 +658,9 @@ export function App(props: AppProps) {
             <Welcome
               info={{
                 version: state().ready?.version ?? "…",
-                model: state().ready?.model ?? "连接后端中…",
+                // ready 之前显示启动进度（build 中/启动中）。最长的等待是 mvn，
+                // 五秒起步，不写进度的话就是一个看起来卡死的空界面
+                model: state().ready?.model ?? state().bootStatus,
                 toolCount: state().ready?.tools.length ?? 0,
                 workspace: workspace(),
               }}
