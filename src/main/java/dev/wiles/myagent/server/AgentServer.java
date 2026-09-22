@@ -26,6 +26,8 @@ import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
+import dev.wiles.myagent.mcp.McpConfig;
+import dev.wiles.myagent.mcp.McpServers;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.GitBranch;
 import dev.wiles.myagent.tool.Tool;
@@ -102,6 +104,8 @@ public final class AgentServer extends WebSocketServer {
     private final MemoryStore memory;
     private final SessionStore sessions;
     private final ToolRegistry tools;
+    /** 接入的 MCP server 们。它们是子进程，停服时必须跟着死，不能变孤儿。 */
+    private final McpServers mcp;
     /**
      * 会话级 token 电表，按会话清零。
      *
@@ -193,6 +197,12 @@ public final class AgentServer extends WebSocketServer {
         this.tools = options.readOnly()
                 ? BuiltinTools.createReadOnly(workspace, memory)
                 : BuiltinTools.createDefault(workspace, policy, memory);
+        // MCP 是外挂工具：~/.myagent/mcp.json 里配了才有，没配这行是零成本。
+        // 只读模式**不接**——MCP 工具做什么我们无从判断（它叫 query 也可能在写库），
+        // 而只读模式承诺的是「不改任何东西」，兑现不了的承诺不能开这个口子
+        this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
+                : McpServers.start(McpConfig.load());
+        tools.registerAll(mcp.tools());
 
         // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
         this.agent = config.hasApiKey()
@@ -420,6 +430,7 @@ public final class AgentServer extends WebSocketServer {
             super.stop(timeout);
         } finally {
             audit.close();
+            mcp.close();     // MCP server 是子进程，不关就是孤儿
         }
     }
 
