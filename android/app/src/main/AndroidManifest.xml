@@ -29,6 +29,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 竖屏扫码页：库自带的 CaptureActivity 锁横屏，这里用子类改回竖屏 -->
+        <activity
+            android:name=".ui.PortraitCaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            android:theme="@style/zxing_CaptureTheme"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+
         <service
             android:name=".service.AgentService"
             android:exported="false"

@@ -88,6 +88,9 @@ fun ConnectScreen(client: AgentClient, prefs: Prefs, connecting: Boolean, closed
                     setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                     setPrompt("对准终端里的二维码")
                     setBeepEnabled(false)
+                    // 库自带的扫码页默认锁横屏——换成我们的竖屏子类。
+                    // 人举着手机扫桌上的终端，姿势就是竖的
+                    setCaptureActivity(PortraitCaptureActivity::class.java)
                     setOrientationLocked(true)
                 })
             }, modifier = Modifier.fillMaxWidth()) {
