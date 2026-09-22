@@ -28,6 +28,7 @@ import {
   type CommandEntry,
 } from "../commands.ts"
 import { askChoices, digitIndex, PLAN_CHOICES, type AskChoice } from "../approval.ts"
+import { qrText } from "../qr.ts"
 import { copyToClipboard } from "../clipboard.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
@@ -349,6 +350,20 @@ export function App(props: AppProps) {
       case "clear":
         session.reset()
         return
+      case "qr": {
+        const url = session.pairingUrl()
+        if (url === null) {
+          session.notice(
+            "warn",
+            "没有配对地址。后端要以局域网模式启动才能被手机连上：\n" +
+              "  ./myagent-tui --lan\n" +
+              "（明文 ws，只在可信网络用——见 docs/protocol.md 1.1）",
+          )
+          return
+        }
+        session.notice("info", `手机扫码连入（或手填下面的地址）：\n\n${qrText(url)}\n\n${url}`)
+        return
+      }
     }
   }
 

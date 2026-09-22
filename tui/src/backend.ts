@@ -33,9 +33,16 @@ export type BackendOptions = {
   jar?: string
   /** 不管新鲜不新鲜都重 build 一遍（--rebuild）。只对仓库自带的 jar 有意义。 */
   forceRebuild?: boolean
+  /** 局域网模式：后端绑 0.0.0.0，手机扫码可连（协议 1.1 节）。 */
+  lan?: boolean
 }
 
 export type Backend = {
+  /**
+   * 手机配对用的完整 ws URL（`ws://<lan>:<port>/?token=…`）。
+   * 不是 --lan 启动、或后端挑不出局域网地址时是 null——二维码入口就不该出现。
+   */
+  pairingUrl: string | null
   send(command: ClientCommand): void
   onEvent(handler: (event: ServerEvent) => void): () => void
   /** 连接断了（后端挂了或主动停了）。参数是原因，正常退出时为 null。 */
@@ -125,6 +132,7 @@ export async function startBackend(
   if (options.model) args.push('-m', options.model)
   if (options.planMode) args.push('--plan')
   if (options.unsafe) args.push('--unsafe')
+  if (options.lan) args.push('--lan')
 
   const child = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] })
 
@@ -158,7 +166,11 @@ export async function startBackend(
   const socket = await connect(listening)
   // 连上了就不再需要这个应急通道，后面交给 backend.dispose()
   signal?.removeEventListener('abort', onAbort)
-  return wire(child, socket)
+  // 手机连的和本机连的是同一个 URL 格式，只是 host 换成后端挑好的局域网 IP
+  const pairingUrl = listening.lan
+    ? `ws://${listening.lan}:${listening.port}/?token=${listening.token}`
+    : null
+  return wire(child, socket, pairingUrl)
 }
 
 /** 等 stdout 上那一行握手信息。后端在这之前挂掉就直接报错，别让界面干等。 */
@@ -231,7 +243,7 @@ function connect(listening: ListeningLine): Promise<WebSocket> {
   })
 }
 
-function wire(child: BackendProcess, socket: WebSocket): Backend {
+function wire(child: BackendProcess, socket: WebSocket, pairingUrl: string | null): Backend {
   const eventHandlers = new Set<(event: ServerEvent) => void>()
   const closeHandlers = new Set<(reason: string | null) => void>()
   let disposed = false
@@ -254,6 +266,7 @@ function wire(child: BackendProcess, socket: WebSocket): Backend {
   })
 
   return {
+    pairingUrl,
     send(command) {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(command))
     },

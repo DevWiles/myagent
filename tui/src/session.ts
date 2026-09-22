@@ -85,6 +85,12 @@ export type Session = {
    */
   notice: (level: "info" | "warn" | "error", text: string) => void
   /**
+   * 手机配对 URL。null 的两种情况要区分给用户听：
+   * 后端还没起来（等一下再试），或不是 --lan 启动（要重启才有）。
+   * 这里只回答「有没有」，怎么措辞归命令层。
+   */
+  pairingUrl: () => string | null
+  /**
    * 显式关掉后端。
    *
    * 正常卸载走 onCleanup，这里再暴露一份是给退出路径用的：入口的 shutdown()
@@ -215,6 +221,7 @@ export function createSession(options: BackendOptions): Session {
 
   return {
     state,
+    pairingUrl: () => backend?.pairingUrl ?? null,
     prompt(text) {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了

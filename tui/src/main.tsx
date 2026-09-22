@@ -59,6 +59,8 @@ if (argv.includes("-h") || argv.includes("--help")) {
       --readonly      只读模式，不允许改文件
       --unsafe        放行工作区外的路径
       --rebuild       后端不管新鲜不新鲜都重 build 一遍
+      --lan           局域网模式：手机可以扫码连进来（界面里敲 /qr 出码）。
+                      明文 ws，只在可信网络用
   -h, --help          这段文字
 `)
   process.exit(0)
@@ -185,6 +187,7 @@ await render(
         planMode: argv.includes("--readonly"),
         unsafe: argv.includes("--unsafe"),
         forceRebuild: argv.includes("--rebuild"),
+        lan: argv.includes("--lan"),
       }}
       // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
       // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的

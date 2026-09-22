@@ -396,6 +396,8 @@ export type ListeningLine = {
   port: number
   token: string
   protocol: number
+  /** --lan 时后端挑好的局域网 IP。有它才画得出配对二维码（协议 1.1 节）。 */
+  lan?: string
 }
 
 /**

@@ -78,8 +78,8 @@ describe("命令菜单", () => {
     for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/memory", "/clear"]) {
       expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
-    // 七条命令 + 一行键位提示 = 八行，多出来的行就是折行折出来的
-    expect(rows).toHaveLength(8)
+    // 八条命令 + 一行键位提示 = 九行，多出来的行就是折行折出来的
+    expect(rows).toHaveLength(9)
     expect(frame).toContain("…")
   })
 
