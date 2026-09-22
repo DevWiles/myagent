@@ -9,7 +9,7 @@
  * 事件规约逻辑两版共用，这里只管画。
  */
 
-import type { KeyEvent } from "@opentui/core"
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
 import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
@@ -201,6 +201,39 @@ export function App(props: AppProps) {
   onCleanup(() => clearTimeout(copyHintTimer))
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
   let inputControls: { setValue: (value: string) => void } | undefined
+
+  /** 对话区的滚动容器。展开/收起工具明细时要按住它的滚动位置（见 toggleToolEntry）。 */
+  let transcriptScroll: ScrollBoxRenderable | undefined
+
+  /**
+   * 展开/收起一组工具明细，**不让屏幕跳**。
+   *
+   * <p>抖动的真凶不是哪一行被顶替，是 scrollbox 的 stickyStart="bottom"：
+   * 只要当前贴着底，内容高度一变它就重新钉底——展开在转录中间加了一块高度，
+   * 重新钉底等于把整屏往上顶那么多行；收起再弹回来。摘要行钉不钉住都没用，
+   * 动的是滚动位置本身。
+   *
+   * <p>所以在切换前关掉 sticky、记下 scrollTop，布局重排后原样按回去——
+   * 上方内容纹丝不动，明细块只朝下长。下一帧再把 sticky 打开：
+   * 此刻已经不在底部，sticky 的「贴底才钉」判定不会再抢。
+   */
+  const toggleToolEntry = (key: string): void => {
+    const sb = transcriptScroll
+    if (!sb) {
+      session.toggleEntry(key)
+      return
+    }
+    const keep = sb.scrollTop
+    sb.stickyScroll = false
+    session.toggleEntry(key)
+    // 布局在渲染循环的下一帧里重排，restore 必须排在它**后面**——
+    // setTimeout(0) 会抢在渲染帧之前，sticky 恢复太早，重排时又被钉底。
+    // 50ms ≈ 两三帧，窗口内 sticky 一直关着，重排怎么排都动不了 scrollTop
+    setTimeout(() => {
+      sb.scrollTop = keep
+      sb.stickyScroll = true
+    }, 50)
+  }
 
   /**
    * 一条命令能不能用，取决于后端宣告了什么、有没有存档。
@@ -673,7 +706,13 @@ export function App(props: AppProps) {
             scrollbox 是 OpenTUI 的原生滚动容器——Ink 版这里要自己算视口切片，
             这套不用，滚动在原生层做。 */}
         <box flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
-          <scrollbox stickyScroll stickyStart="bottom">
+          <scrollbox
+            stickyScroll
+            stickyStart="bottom"
+            ref={(r: ScrollBoxRenderable) => {
+              transcriptScroll = r
+            }}
+          >
             {/* 欢迎框在**滚动容器里面**，是对话流的第一项而不是固定页头。
                 钉在顶上的话，聊到第十轮它还占着五分之一个屏幕，
                 而那时它显示的信息（版本、工具数）早就没人看了。
@@ -707,7 +746,7 @@ export function App(props: AppProps) {
                   streaming={state().busy && index === state().entries.length - 1}
                   columns={dimensions().width - 2}
                   expanded={state().expanded.has(entry().key)}
-                  onToggle={() => session.toggleEntry(entry().key)}
+                  onToggle={() => toggleToolEntry(entry().key)}
                 />
               )}
             </Index>
