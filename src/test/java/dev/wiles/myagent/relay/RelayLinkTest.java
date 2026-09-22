@@ -147,6 +147,22 @@ class RelayLinkTest {
         assertTrue(list.size() >= n, "只等到 " + list.size() + " 条: " + list);
     }
 
+    /**
+     * 等到某个条件成立。
+     *
+     * <p>**别拿「收到几条」当「状态到了哪」**——这两件事在异步里不是一回事。
+     * presence 的序列是 false（host 独自在线）→ true（手机来了）→ false（手机走了），
+     * 按条数等的话，第二条刚到就以为收齐了，断言打在一个中间态上，
+     * 于是测试**时快时慢地红**。这个坑是本测试自己踩出来的。
+     */
+    private static void awaitUntil(String what, java.util.function.BooleanSupplier condition)
+            throws Exception {
+        for (int i = 0; i < 300 && !condition.getAsBoolean(); i++) {
+            Thread.sleep(10);
+        }
+        assertTrue(condition.getAsBoolean(), "等不到：" + what);
+    }
+
     @Test
     @DisplayName("手机是后来才到的，也必须拿得到会话盐——这条是照着真实现场写的")
     void phoneJoiningLaterStillGetsSession(@TempDir Path dir) throws Exception {
@@ -235,12 +251,11 @@ class RelayLinkTest {
         Pairing pairing = startLink(dir);
         FakePhone phone = new FakePhone(pairing);
         assertTrue(phone.connectBlocking(3, TimeUnit.SECONDS));
-        awaitSize(presence, 1);
-        assertTrue(presence.contains(true));
+        awaitUntil("手机上线的通告", () -> presence.contains(true));
 
         phone.closeBlocking();
-        awaitSize(presence, 2);
-        assertEquals(Boolean.FALSE, presence.get(presence.size() - 1));
+        awaitUntil("手机下线的通告",
+                () -> !presence.isEmpty() && Boolean.FALSE.equals(presence.get(presence.size() - 1)));
     }
 
     @Test
