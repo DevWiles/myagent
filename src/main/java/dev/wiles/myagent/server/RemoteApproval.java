@@ -69,7 +69,7 @@ public final class RemoteApproval implements ApprovalPolicy {
      */
     private volatile Set<String> offered = Set.of();
 
-    /** 当前跑着的是谁。计划和圆桌里由服务端在任务起止时更新。 */
+    /** 当前跑着的是谁。计划和流水线里由服务端在任务起止时更新。 */
     private volatile ApprovalOrigin origin = null;
 
     public RemoteApproval(Consumer<ObjectNode> publish, BooleanSupplier hasClients) {
@@ -84,7 +84,7 @@ public final class RemoteApproval implements ApprovalPolicy {
 
     // synchronized：审批一次只能问一个。pendingId / offered / 容量 1 的 answers
     // 全都按「同一时刻只有一问」设计；调度层的「写独占」规矩已经保证了几乎不会撞，
-    // 这把锁是兜底——万一真撞上（比如圆桌上 verifier 之外又坐进一个会动手的角色），
+    // 这把锁是兜底——万一真撞上（比如将来又出现几个会动手的执行体并行跑的场合），
     // 后到的排队等前一问答完，而不是把前一问的现场覆盖掉。
     @Override
     public synchronized ApprovalVerdict decide(ApprovalRequest incoming) {

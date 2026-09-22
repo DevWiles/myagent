@@ -18,7 +18,7 @@ export type ToolInfo = { name: string; description: string }
  * `mutates` 是「它会不会动手改东西」——界面拿它分色比按 id 硬编码可靠：
  * 名册是会长的，硬编码的那张表只会停在写它的那天。
  */
-/** 圆桌上的一席，线上形态。开场那帧里 status 一律是 PENDING。 */
+/** 流水线上的一道工序，线上形态（字段名 seat 是圆桌时期留下的）。开场那帧里 status 一律是 PENDING。 */
 export type TeamSeatWire = {
   id: string
   role: string
@@ -201,7 +201,7 @@ export type ServerEvent =
       reason: string
       /** 写文件时是 diff 正文。没有就是空串 */
       preview?: string
-      /** 计划/圆桌里是「编码者 · t3」。单轮对话里是空串 */
+      /** 计划/流水线里是「编码者 · t3」。单轮对话里是空串 */
       origin?: string
       /**
        * 「以后都同意」可以存成哪几条规则，从紧到松。空数组表示这次不能记规则。
@@ -276,12 +276,18 @@ export type ServerEvent =
    */
   | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
   /**
-   * 圆桌开场：名单定了，还没开跑。
+   * 流水线开场。此刻座位表上**只有规划那一道工序**——worker 有几个、派谁，
+   * 要等规划跑完才知道，届时走 `team_seats_added`。
    *
-   * 这一帧是**花钱之前用户唯一一眼**——后面每一席都是一次完整的子循环，
-   * `reason` 那句话要显眼地画出来，用户靠它判断值不值得。
+   * 帧名和 `seats` 这个字段名是圆桌时期留下的，形状不动、语义换了：
+   * 一「席」是一道**工序**。`reason` 那句分工说明要显眼地画出来。
    */
   | { t: 'team_started'; goal: string; reason: string; seats: TeamSeatWire[] }
+  /**
+   * 座位表长大了：规划拆出的 workers、每轮的验收、返工/重拟长出的新工序。
+   * 按执行顺序追加到已有座位表末尾即可，id 全场唯一。
+   */
+  | { t: 'team_seats_added'; seats: TeamSeatWire[] }
   | { t: 'team_seat_started'; seatId: string; role: string; roleTitle: string }
   | {
       t: 'team_seat_finished'
@@ -290,19 +296,23 @@ export type ServerEvent =
       /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
       status: string
       durationMs: number
-      /** 这一席的定稿。哑火时是 null——流式那份是混在一起的，这份是归到它名下的 */
+      /** 这道工序的定稿。倒了时是 null——流式那份是混在一起的，这份是归到它名下的 */
       opinion: string | null
       error: string | null
     }
-  | { t: 'team_synthesis_started' }
   | {
       t: 'team_finished'
       /** COMPLETED | PARTIAL | FAILED | CANCELLED */
       status: string
       spoke: number
       silent: number
-      /** 合议正文。取消和失败时是 null——没有结论就别画一个出来 */
+      /**
+       * 最后一轮验收的结论正文。PARTIAL 时要看它分两种：非空是打回没修完
+       * （问题清单就在里面），为空是验收没跑成。取消和失败时一律是 null。
+       */
       verdict: string | null
+      /** 验收跑了几轮。老后端不发，可能是 undefined */
+      rounds?: number
     }
   /**
    * 一条 prompt 被自动改走规划了，reason 是后端给的判断依据。
@@ -331,10 +341,11 @@ export type ClientCommand =
   | { t: 'prompt'; text: string }
   | { t: 'plan'; goal: string }
   /**
-   * 开一场圆桌（feature: `team`）：几个角色各把同一件事看一遍，最后合议。
+   * 开一条流水线（feature: `team`）：拟方案 → 并行施工 → 验收，
+   * 打回可重新执行或重新规划。
    *
-   * `roles` 不传就让模型挑。会写文件的角色坐不上桌（几个人各改一遍同一处，
-   * 后写的会盖掉先写的），传了会被服务端静默跳过；传个不存在的 id 会收到 error。
+   * `roles` 字段**已废弃**：分工由规划工序决定（它给每个任务派角色）。
+   * 服务端收到会忽略，界面一律传空数组。
    */
   | { t: 'team'; goal: string; roles?: string[] }
   /**

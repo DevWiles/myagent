@@ -35,14 +35,7 @@ public enum PromptMode {
     PLANNER_SUB("modes/planner-sub.md", false, List.of("只输出一个 JSON 对象")),
 
     /** 重规划：某一步失败之后补一条别的路。 */
-    PLANNER_REPLAN("modes/planner-replan.md", false, List.of("只输出一个 JSON 对象")),
-
-    /**
-     * 圆桌挑人：同一个议题该派哪几个角色各看一遍。
-     *
-     * <p>和三个规划模式同类——它也不动手、只输出 JSON，所以一样不拼 base。
-     */
-    TEAM_CAST("modes/team-cast.md", false, List.of("只输出一个 JSON 对象"));
+    PLANNER_REPLAN("modes/planner-replan.md", false, List.of("只输出一个 JSON 对象"));
 
     private final String resourcePath;
     private final boolean includesBase;

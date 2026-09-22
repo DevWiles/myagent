@@ -3,33 +3,43 @@ package dev.wiles.myagent.team;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.plan.Task;
 
+import java.util.List;
+
 /**
- * 一场圆桌的全部动静。两个界面靠它把过程画出来。
+ * 一条流水线的全部动静。界面靠它把过程画出来。
  *
  * <p>和 {@code PlanListener} 一样全部给空实现：只关心其中两件事的调用方，
  * 不该被迫写一堆空方法；往里加新事件也不会把已有实现弄崩。
  *
- * <p>方法顺序就是事情发生的顺序。
+ * <p>方法顺序就是事情发生的顺序。除了 {@link #onAgentEvent}（来自 worker 线程，
+ * 而且<b>几个 worker 会同时在发</b>，实现要线程安全），
+ * 其余回调都在跑流水线的那条编排线程上来。
  */
 public interface TeamListener {
 
-    /** 人挑好了，还没开始。界面该把名单和理由亮出来——这是花钱之前最后一眼。 */
-    default void onCastChosen(String goal, Cast cast) {
+    /**
+     * 开场。此刻座位表上<b>只有规划那一道工序</b>——worker 有几个、派谁，
+     * 要等规划跑完才知道，届时走 {@link #onStagesAdded}。
+     */
+    default void onStarted(String goal, String reason, List<Task> stages) {
     }
 
-    default void onSeatStarted(Task seat) {
+    /**
+     * 座位表长大了：规划拆出的 workers、每轮的验收工序、返工/重拟长出的新工序。
+     * 按执行顺序追加即可，id 全场唯一。
+     */
+    default void onStagesAdded(List<Task> stages) {
     }
 
-    /** 一席说完了。<b>哑火的那几席也走这里</b>，它们同样是「这一席有结果了」。 */
-    default void onSeatFinished(Task seat) {
+    default void onStageStarted(Task stage) {
     }
 
-    /** 开始合议。单独一个事件，因为界面到这儿要换个画法：前面是并列的几席，这里是收口。 */
-    default void onSynthesisStarted(Task synthesis) {
+    /** 一道工序落定了。<b>倒了的、被跳过的也走这里</b>，它们同样是「这道工序有结果了」。 */
+    default void onStageFinished(Task stage) {
     }
 
-    /** 席位里 ReAct 子循环的动静，带着是哪一席一起给。 */
-    default void onAgentEvent(Task seat, AgentEvent event) {
+    /** 工序里 ReAct 子循环的动静，带着是哪道工序一起给。多个 worker 并行时会被并发调。 */
+    default void onAgentEvent(Task stage, AgentEvent event) {
     }
 
     default void onFinished(TeamResult result) {

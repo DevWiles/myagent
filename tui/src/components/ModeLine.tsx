@@ -22,7 +22,7 @@ type Descriptor = { label: string; hint: string; marker: string }
 const MODES: Record<Mode, Descriptor> = {
   normal: { label: "normal", hint: "直接对话", marker: "·" },
   plan: { label: "plan", hint: "先拆计划，确认后逐个跑", marker: "⏵⏵" },
-  team: { label: "team", hint: "几个角色各看一遍，最后合议", marker: "⏵⏵" },
+  team: { label: "team", hint: "拟方案 → 施工 → 验收", marker: "⏵⏵" },
 }
 
 export function ModeLine(props: { mode: Mode; columns: number }) {

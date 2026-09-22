@@ -23,8 +23,8 @@ export type Session = {
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string) => void
   /**
-   * 开一场圆桌：几个角色各把同一件事看一遍，最后合议。
-   * 后端没宣告 team 能力时不要调。`roles` 空数组表示让模型挑人。
+   * 开一条流水线：拟方案 → 并行施工 → 验收，打回可重新执行或重新规划。
+   * 后端没宣告 team 能力时不要调。`roles` 已废弃，一律传空数组。
    */
   team: (goal: string, roles: string[]) => void
   /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */

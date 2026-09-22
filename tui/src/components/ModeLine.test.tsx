@@ -28,7 +28,7 @@ describe("模式行", () => {
 
   test("每个模式都写清自己是干什么的，不只是一个名字", async () => {
     expect(await frameOf("plan")).toContain("先拆计划")
-    expect(await frameOf("team")).toContain("各看一遍")
+    expect(await frameOf("team")).toContain("施工")
   })
 
   test("只占一行——它贴在状态栏下面，折行会把输入框顶上去", async () => {

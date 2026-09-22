@@ -1,0 +1,462 @@
+package dev.wiles.myagent.team;
+
+import dev.wiles.myagent.llm.LlmClient;
+import dev.wiles.myagent.plan.AgentRoles;
+import dev.wiles.myagent.plan.AgentTaskRunner;
+import dev.wiles.myagent.plan.Plan;
+import dev.wiles.myagent.plan.PlanExecutor;
+import dev.wiles.myagent.plan.Planner;
+import dev.wiles.myagent.plan.Task;
+import dev.wiles.myagent.plan.TaskGraph;
+import dev.wiles.myagent.plan.TaskOutcome;
+import dev.wiles.myagent.plan.TaskRunner;
+import dev.wiles.myagent.plan.TaskStatus;
+import dev.wiles.myagent.tool.ToolRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+
+/**
+ * 流水线：<b>规划拆活、几个 worker 并行施工、验收把关</b>，外加一条反馈回路。
+ *
+ * <pre>
+ *   plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(reviewer 验收)
+ *           ↑___________重新规划___________|________重新执行________↑
+ * </pre>
+ *
+ * <h3>它取代了圆桌，为什么</h3>
+ * 圆桌是「同一件事几个角色各看一遍，最后合议」——只产出意见，不产出工作，
+ * 花三倍的钱换不来一行改动。流水线反过来：分工而不是复看，
+ * 产出从「一份带分歧的报告」变成「一次有人验收过的施工」。
+ *
+ * <h3>和 /plan 的区别，一句话</h3>
+ * 计划跑完就收工，成没成用户自己看；流水线在后面站了一个<b>有权打回的验收</b>——
+ * 它可以要求按原方案重做（{@code 重新执行}），也可以宣判方案本身有问题（{@code 重新规划}），
+ * 最多 {@link #MAX_ROUNDS} 轮验收，用完还过不了就如实报 {@link TeamStatus#PARTIAL}。
+ * worker 失败也<b>不直接结束流水线</b>：验收会看到失败，由它决定是返工还是重拟——
+ * 失败恢复统一走验收这一条路，不再另配失败重规划。
+ *
+ * <h3>拆活和跑活都是借来的</h3>
+ * 规划工序复用 PLANNING 任务的二幕机制（先带只读工具<b>看</b>，再不带工具<b>拆</b>，
+ * 见 {@code AgentTaskRunner.expand}）；worker 阶段直接把拆出的任务装进
+ * {@link PlanExecutor}——只读并行、会动手的独占、超时、失败扩散，全套纪律现成的。
+ * 这层只负责回路本身：轮次、验收判定、返工/重拟的材料交接。
+ *
+ * <h3>上游怎么交接：锚点任务</h3>
+ * 每轮的任务图里塞着几个<b>已经成功的锚点</b>（这轮的方案席、上一轮的验收席），
+ * 每个 worker 都依赖它们。于是 {@code upstreamOf} 自动把方案原文和打回意见
+ * 送进每个 worker 的提示词——不用为「怎么把方案发给工人」另造一条通道。
+ * {@code ready()} 只放行 PENDING 的任务，成功的锚点不会被再跑一遍。
+ */
+public final class Pipeline {
+
+    private static final Logger log = LoggerFactory.getLogger(Pipeline.class);
+
+    /** 这条流水线的分工说明，进 team_started 帧。 */
+    public static final String REASON = "拟方案 → 并行施工 → 验收；打回可重新执行或重新规划";
+
+    /**
+     * 最多几轮验收。第 {@code MAX_ROUNDS} 轮还打回就不再返工，如实报 PARTIAL——
+     * 一个永远过不了验收的目标，多半是方案和验收标准在打架，烧再多轮也烧不出通过。
+     */
+    public static final int MAX_ROUNDS = 3;
+
+    /**
+     * 规划/验收工序能调几轮工具（worker 用角色自带的上限，它们的活是拆好的一小步）。
+     *
+     * <p>沿用圆桌一席的数字：真机教训是角色自带上限按「计划里的一小步」调，
+     * 而这两道工序面对的是整个目标，给小了撞上限直接作废。
+     */
+    public static final int STAGE_STEPS = 16;
+
+    /** 单道工序的时限，毫秒。worker 也按它算（交给 {@link PlanExecutor#taskTimeout}）。 */
+    public static final long DEFAULT_STAGE_TIMEOUT_MILLIS = 900_000;
+
+    private final TaskRunner runner;
+
+    /** 内建执行体时留一份引用，取消要掐它。外部注入执行体（测试）时是 null。 */
+    private final AgentTaskRunner cancellable;
+
+    /** 只为取消留着：拆任务那次结构化调用在它手里。测试注入执行体时是 null。 */
+    private final Planner planner;
+
+    private TeamListener listener = TeamListener.none();
+
+    /** 用户叫停了。volatile：置位的是监听 Ctrl-C / cancel 帧的那个线程。 */
+    private volatile boolean cancelled;
+
+    /** 正在跑 worker 的那台调度器，取消要掐它。没在 worker 阶段时是 null。 */
+    private volatile PlanExecutor executing;
+
+    /** 单道工序的时限。{@code <= 0} 表示不限时（只在测试里用）。 */
+    private long stageTimeoutMillis = DEFAULT_STAGE_TIMEOUT_MILLIS;
+
+    /**
+     * @param clients 每道工序现造一个模型客户端：几个 worker 并行时共用一个
+     *                {@code DeepSeekClient} 会互相踩 {@code currentCall}，取消掐不准
+     * @param planner PLANNING 工序拆子任务用的规划器（也负责被取消）。
+     *                和 /plan 共用一个实例没问题——busy 闸保证同一时刻只有一件事在跑
+     */
+    public Pipeline(Supplier<LlmClient> clients, ToolRegistry tools, Path workspaceRoot,
+                    Planner planner) {
+        AgentTaskRunner built = new AgentTaskRunner(clients, tools, workspaceRoot, STAGE_STEPS)
+                .withPlanner(planner);
+        // 子循环的动静原样转出去，界面才画得出「t2 正在改哪个文件」。
+        // 读的是字段不是构造时的值——listener() 是构造之后才调的
+        built.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
+        this.runner = built;
+        this.cancellable = built;
+        this.planner = planner;
+    }
+
+    /** 给测试用：换掉执行体，整套编排（轮次、判定、返工、取消）就能测干净，一次调用都不发。 */
+    Pipeline(TaskRunner runner) {
+        this.runner = runner;
+        this.cancellable = null;
+        this.planner = null;
+    }
+
+    public Pipeline listener(TeamListener listener) {
+        this.listener = listener == null ? TeamListener.none() : listener;
+        return this;
+    }
+
+    /** 单道工序的时限，从它开跑那一刻算起。传 null 或非正值表示不限时（只在测试里用）。 */
+    public Pipeline stageTimeout(Duration timeout) {
+        this.stageTimeoutMillis = timeout == null || timeout.isZero() || timeout.isNegative()
+                ? 0 : timeout.toMillis();
+        return this;
+    }
+
+    /**
+     * 叫停。四处都要掐：不开下一道工序、掐正在跑的子循环、掐可能正在拆任务的规划请求、
+     * 掐 worker 调度器（不再放新任务进场）。漏掉任何一处，按下停止都像没反应。
+     */
+    public void cancel() {
+        cancelled = true;
+        if (cancellable != null) {
+            cancellable.cancel();
+        }
+        if (planner != null) {
+            planner.cancel();
+        }
+        PlanExecutor current = executing;
+        if (current != null) {
+            current.cancel();
+        }
+    }
+
+    /**
+     * 跑一条流水线。
+     *
+     * <p>只读模式不用单独传：规划器构造时已经带了 {@code readOnly}，
+     * 会动手的角色在拆任务那一步就派不出来。
+     */
+    public TeamResult run(String goal) {
+        cancelled = false;          // 上一场的取消标志不能带到这一场
+
+        List<Task> stages = new ArrayList<>();
+        int round = 1;
+        Task plan = planSeat(round, goal);
+        stages.add(plan);
+        listener.onStarted(goal, REASON, List.of(plan));
+
+        Task review = null;
+        TeamStatus status;
+
+        List<Task> blueprint = advancePlan(plan, List.of());
+        if (blueprint == null) {
+            status = cancelled ? TeamStatus.CANCELLED : TeamStatus.FAILED;
+        } else {
+            status = null;
+            while (status == null) {
+                List<Task> workers = materialize(blueprint, round, plan, review);
+                stages.addAll(workers);
+                listener.onStagesAdded(workers);
+                runWorkers(goal, workers, plan, review);
+                if (cancelled) {
+                    status = TeamStatus.CANCELLED;
+                    break;
+                }
+
+                review = reviewSeat(round, goal, plan, workers);
+                stages.add(review);
+                listener.onStagesAdded(List.of(review));
+                boolean reviewed = advance(review, List.of());
+                if (cancelled) {
+                    status = TeamStatus.CANCELLED;
+                } else if (!reviewed) {
+                    status = TeamStatus.PARTIAL;        // 没审成：活在，担保不在
+                } else {
+                    switch (verdictOf(review.result())) {
+                        case PASS -> status = TeamStatus.COMPLETED;
+                        case REWORK -> {
+                            if (round >= MAX_ROUNDS) {
+                                status = TeamStatus.PARTIAL;
+                            } else {
+                                // 蓝本不变：按原方案再来一遍，打回意见走锚点进 worker 的上游
+                                round++;
+                            }
+                        }
+                        case REPLAN -> {
+                            if (round >= MAX_ROUNDS) {
+                                status = TeamStatus.PARTIAL;
+                                break;
+                            }
+                            round++;
+                            plan = planSeat(round, goal);
+                            stages.add(plan);
+                            listener.onStagesAdded(List.of(plan));
+                            // 打回意见作上游：新方案是对着验收的问题拟的，不是从零再想一遍
+                            blueprint = advancePlan(plan, List.of(review));
+                            if (blueprint == null) {
+                                status = cancelled ? TeamStatus.CANCELLED : TeamStatus.PARTIAL;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 没轮到的工序也要落终态，不然界面上那一道永远转圈
+        String reason = cancelled ? "已取消" : "上游没跑成";
+        for (Task stage : stages) {
+            if (stage.status() == TaskStatus.PENDING) {
+                stage.skip(reason);
+                listener.onStageFinished(stage);
+            }
+        }
+
+        TeamResult result = new TeamResult(goal, REASON, stages, review, round, status);
+        listener.onFinished(result);
+        return result;
+    }
+
+    // ── 三种工序 ────────────────────────────────────────────────
+
+    /** 规划席。id 带轮次（plan、plan2…），每次重拟都是一道新工序，历史在座位表里留着。 */
+    private static Task planSeat(int round, String goal) {
+        return new Task(round == 1 ? "plan" : "plan" + round,
+                TeamPrompt.plannerTitle(goal, round), AgentRoles.SCOUT,
+                List.of(), TeamPrompt.plannerAcceptance(STAGE_STEPS));
+    }
+
+    private static Task reviewSeat(int round, String goal, Task plan, List<Task> workers) {
+        return new Task(round == 1 ? "review" : "review" + round,
+                TeamPrompt.reviewBrief(round, goal, plan, workers), AgentRoles.REVIEWER,
+                List.of(), TeamPrompt.reviewerAcceptance(STAGE_STEPS));
+    }
+
+    /**
+     * 跑规划席，交回拆出的任务蓝本；没拆成（失败、超时、取消、拆出来是空的）返回 null。
+     *
+     * <p>「拆出来是空的」按失败算：这道工序存在的唯一意义就是产出任务，
+     * 产不出来还报成功，后面就是零个 worker 加一场对着空气的验收。
+     */
+    private List<Task> advancePlan(Task plan, List<Task> upstream) {
+        if (cancelled) {
+            return null;
+        }
+        plan.start();
+        listener.onStageStarted(plan);
+        TaskOutcome outcome = settle(plan, upstream);
+        if (outcome.ok() && outcome.subTasks().isEmpty()) {
+            outcome = TaskOutcome.failed("方案没拆出可执行的任务");
+        }
+        apply(plan, outcome);
+        listener.onStageFinished(plan);
+        return plan.status() == TaskStatus.SUCCEEDED && !cancelled ? outcome.subTasks() : null;
+    }
+
+    /**
+     * 把蓝本落成这一轮真正要跑的任务。
+     *
+     * <p>三件事：id 带上轮次前缀（第 2 轮起，{@code r2.t1}——蓝本会被返工反复使用，
+     * 座位表上的 id 必须全场唯一）；依赖和 <code>{{引用}}</code> 跟着 id 一起改写；
+     * 挂上锚点依赖（方案席、上一轮验收席），worker 的上游材料全靠这两条边。
+     */
+    private static List<Task> materialize(List<Task> blueprint, int round,
+                                          Task plan, Task review) {
+        Map<String, String> renames = new LinkedHashMap<>();
+        for (Task raw : blueprint) {
+            renames.put(raw.id(), round == 1 ? raw.id() : "r" + round + "." + raw.id());
+        }
+
+        List<Task> out = new ArrayList<>(blueprint.size());
+        for (Task raw : blueprint) {
+            String description = rewriteRefs(raw.description(), renames);
+            String acceptance = raw.acceptance() == null ? null
+                    : rewriteRefs(raw.acceptance(), renames);
+            List<String> deps = new ArrayList<>();
+            for (String dep : raw.dependencies()) {
+                // 蓝本外的依赖（模型手滑写了方案席的 id 之类）丢掉——锚点马上会统一挂
+                if (renames.containsKey(dep)) {
+                    deps.add(renames.get(dep));
+                }
+            }
+            deps.add(plan.id());
+            if (review != null) {
+                deps.add(review.id());
+            }
+            out.add(plan.subTask(renames.get(raw.id()), description, raw.role(), deps, acceptance));
+        }
+        return out;
+    }
+
+    private static String rewriteRefs(String text, Map<String, String> renames) {
+        String rewritten = text;
+        for (Map.Entry<String, String> e : renames.entrySet()) {
+            if (!e.getKey().equals(e.getValue())) {
+                rewritten = rewritten.replace("{{" + e.getKey() + "}}", "{{" + e.getValue() + "}}");
+            }
+        }
+        return rewritten;
+    }
+
+    /**
+     * 把这一轮的 worker 交给计划执行器跑：只读并行、会动手的独占、超时、失败扩散，
+     * 全套纪律都是它的。方案席和上一轮验收席作为<b>已经成功的锚点</b>一起进图——
+     * 调度器不会再跑它们（{@code ready()} 只放行 PENDING），但 worker 依赖它们，
+     * 上游材料就这么送进去。
+     *
+     * <p>worker 失败在这儿不算流水线失败：验收会看到失败的任务和原因，
+     * 由它决定重新执行还是重新规划。所以这里不配失败重规划（{@code withReplanner}），
+     * 两套补救叠在一起，谁救的、救没救成就说不清了。
+     */
+    private void runWorkers(String goal, List<Task> workers, Task plan, Task review) {
+        if (cancelled) {
+            return;
+        }
+        List<Task> nodes = new ArrayList<>(workers);
+        nodes.add(plan);
+        if (review != null) {
+            nodes.add(review);
+        }
+        PlanExecutor executor = new PlanExecutor(runner)
+                .onTaskStarted(listener::onStageStarted)
+                .onTaskFinished(listener::onStageFinished)
+                .taskTimeout(Duration.ofMillis(stageTimeoutMillis));
+        this.executing = executor;
+        try {
+            executor.execute(new Plan(goal, TaskGraph.of(nodes)));
+        } catch (RuntimeException e) {
+            // 图不合法（蓝本的依赖成环之类）不该炸掉整条流水线：worker 全灭，
+            // 验收会看到零产出并给出打回——和「施工全失败」走同一条收场路
+            log.error("这一轮 worker 没跑起来", e);
+            for (Task worker : workers) {
+                if (worker.status() == TaskStatus.PENDING) {
+                    worker.skip("这一轮没跑起来: " + e.getMessage());
+                    listener.onStageFinished(worker);
+                }
+            }
+        } finally {
+            this.executing = null;
+        }
+    }
+
+    /**
+     * 跑一道单席工序（验收），把它推到终态。
+     *
+     * @return 这道工序成了、且没被叫停
+     */
+    private boolean advance(Task stage, List<Task> upstream) {
+        if (cancelled) {
+            return false;
+        }
+        stage.start();
+        listener.onStageStarted(stage);
+        apply(stage, settle(stage, upstream));
+        listener.onStageFinished(stage);
+        return stage.status() == TaskStatus.SUCCEEDED && !cancelled;
+    }
+
+    private void apply(Task stage, TaskOutcome outcome) {
+        try {
+            if (outcome.ok()) {
+                stage.succeed(outcome.output());
+            } else {
+                stage.fail(outcome.output());
+            }
+        } catch (IllegalStateException e) {
+            log.error("工序 {} 的状态迁移非法，执行体自己动过它", stage.id(), e);
+        }
+    }
+
+    /** 在工作线程上跑一道工序，带时限地等。<b>不抛异常</b>：一道倒了要的是如实落账，不是整条线炸掉。 */
+    private TaskOutcome settle(Task stage, List<Task> upstream) {
+        // 工序在工作线程上跑，Task 的状态迁移留在编排线程——和 PlanExecutor 同一条纪律。
+        // 要线程只是为了能对它计时、能从别的线程掐断它
+        ExecutorService pool = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "stage-" + stage.id());
+            t.setDaemon(true);
+            return t;
+        });
+        Future<TaskOutcome> future = pool.submit(() -> runner.run(stage, upstream));
+        try {
+            return stageTimeoutMillis > 0
+                    ? future.get(stageTimeoutMillis, TimeUnit.MILLISECONDS)
+                    : future.get();
+        } catch (TimeoutException e) {
+            // 先掐子循环再取消 future：掐得干不干净的保留意见和 PlanExecutor 一样，
+            // cancel(true) 只是设中断标志，子循环最多再走完手上这一步
+            if (cancellable != null) {
+                cancellable.cancel();
+            }
+            future.cancel(true);
+            log.warn("工序 {} 超过 {} 毫秒还没完，按失败处理", stage.id(), stageTimeoutMillis);
+            return TaskOutcome.failed("这道工序超时了（上限 " + stageTimeoutMillis + " 毫秒）");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            cancelled = true;
+            future.cancel(true);
+            return TaskOutcome.failed("等待工序完成时被中断");
+        } catch (ExecutionException e) {
+            // 执行体是外部实现，可能没兜住异常。一道炸了不该把整条线带走
+            Throwable cause = e.getCause();
+            log.error("工序 {} 的执行体抛了异常", stage.id(), cause);
+            return TaskOutcome.failed(cause.getClass().getSimpleName() + ": " + cause.getMessage());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ── 验收判定 ────────────────────────────────────────────────
+
+    enum Verdict { PASS, REWORK, REPLAN }
+
+    /**
+     * 只看最后一行非空文本。规矩和 {@code AgentTaskRunner.passed} 同一条：
+     * 模型很爱在过程里写「上一版该重新执行」这种话，整段搜必然误判。
+     *
+     * <p>「重新规划」优先于「重新执行」（一句话俩词都有时，重的那个才是结论）；
+     * 「打回」单独出现按重新执行算——那是这套提示词上一版的用词，模型的语感里还留着；
+     * 三个词都没有按通过算，和验证任务「找不到否决词就是过」同向。
+     */
+    static Verdict verdictOf(String text) {
+        if (text == null || text.isBlank()) {
+            return Verdict.PASS;
+        }
+        String[] lines = text.strip().split("\\R");
+        String last = lines[lines.length - 1];
+        if (last.contains("重新规划")) {
+            return Verdict.REPLAN;
+        }
+        if (last.contains("重新执行") || last.contains("打回")) {
+            return Verdict.REWORK;
+        }
+        return Verdict.PASS;
+    }
+}

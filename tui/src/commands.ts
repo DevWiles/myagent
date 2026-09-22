@@ -8,7 +8,7 @@
  * 而且 agent 可能当场动手改仓库——`/resume` 打上去，它会一本正经地
  * 去读仓库、翻提交记录，试图搞懂你要它「恢复」什么。
  *
- * <h3>规划和圆桌为什么不在这张表里</h3>
+ * <h3>规划和流水线为什么不在这张表里</h3>
  * 它们不是命令，是<b>模式</b>（Shift+Tab 切，左下角常驻显示）。
  * 同一句话在哪个模式下跑，是一个**看得见的状态**；而命令是转瞬即逝的动作——
  * 敲完就没了，用户事后只能靠回忆确认「我刚才有没有加 /plan」。
@@ -330,29 +330,3 @@ export function acceptSelected(
   return { kind: "run", entry, args }
 }
 
-/**
- * team 模式下，把输入拆成「点了谁」和「议题」。
- *
- * <p>斜杠命令没了，这是「我想让审查和验证来看」唯一的入口：team 模式下
- * 开头连着的角色名就算点名。只认**开头连续**的，遇到第一个不是角色的词就停——
- * 不然「reviewer 看看 explorer 这个类写得怎么样」里的第二个词也会被当成点名，
- * 而它其实是议题的一部分。
- *
- * <p>界面<b>不判断这个角色能不能坐上桌</b>（会写文件的坐不上）：那条规矩归后端，
- * 它会静默跳过，而真正坐了谁在 `team_started` 那帧里写着。
- * 界面再判一遍就是把同一条规矩写进两种语言，迟早有一边过期。
- */
-export function splitTeamArgs(
-  args: string,
-  roleIds: readonly string[],
-): { roles: string[]; goal: string } {
-  const words = args.trim().split(/\s+/).filter(word => word.length > 0)
-  const roles: string[] = []
-  let i = 0
-  for (; i < words.length; i++) {
-    const id = words[i].toLowerCase()
-    if (!roleIds.includes(id)) break
-    if (!roles.includes(id)) roles.push(id)
-  }
-  return { roles, goal: words.slice(i).join(" ") }
-}

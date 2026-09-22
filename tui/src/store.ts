@@ -53,7 +53,7 @@ export type PlanTask = {
   error?: string
 }
 
-/** 圆桌上的一席 + 它的进度。 */
+/** 流水线上的一道工序 + 它的进度（类型名 seat 是圆桌时期留下的，跟着协议走）。 */
 export type TeamSeat = {
   id: string
   role: string
@@ -61,28 +61,27 @@ export type TeamSeat = {
   summary: string
   /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
   status: string
-  /** 这一席的定稿。流式那份是混在一起的，这份是归到它名下的 */
+  /** 这道工序的定稿。流式那份是混在一起的，这份是归到它名下的 */
   opinion?: string
   error?: string
   durationMs?: number
 }
 
 /**
- * 一场圆桌的完整状态，和计划一样作为一条 entry 活在 transcript 里。
+ * 一条流水线的完整状态，和计划一样作为一条 entry 活在 transcript 里。
  *
- * <p>`status` 里 **PARTIAL 必须画出来**：少了一席的合议，和全员到齐的合议
- * 长得一模一样——不标出来，用户会把两个人的共识当成三个人的共识。
+ * <p>`status` 里 **PARTIAL 必须画出来，而且分两种**：`verdict` 非空是验收打回
+ * （问题清单就在里面），为空是验收没跑成——两种都意味着工作区里有一批
+ * 没人担保的改动，混成一种用户会把「发现了问题」误读成「审查没跑」。
  */
 export type TeamData = {
   goal: string
-  /** 为什么是这几位。花钱之前用户唯一一眼，要显眼 */
+  /** 分工是什么样。花钱之前用户唯一一眼，要显眼 */
   reason: string
   seats: TeamSeat[]
   /** CREATED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED */
   status: string
-  /** 正在合议。合议没有自己的席位，它是收口那一步 */
-  synthesizing?: boolean
-  /** 合议正文。取消和失败时没有——没有结论就别画一个出来 */
+  /** 验收结论正文。取消、失败、验收没跑成时没有——没有结论就别画一个出来 */
   verdict?: string
   spoke?: number
   silent?: number
@@ -253,7 +252,7 @@ export type SessionState = {
    */
   mode: Mode
   activePlanKey: string | null
-  /** 当前圆桌面板的 key。和计划一样，用户说下一句话时让位 */
+  /** 当前流水线面板的 key。和计划一样，用户说下一句话时让位 */
   activeTeamKey: string | null
   tokens: number
   /** 累计真正发出去的提示词。只增不减，压缩不会让它变小。 */
@@ -397,7 +396,7 @@ export class SessionStore {
     })
   }
 
-  /** 当前圆桌面板的 key。和 planKey 一个道理：面板多半不在队尾。 */
+  /** 当前流水线面板的 key。和 planKey 一个道理：面板多半不在队尾。 */
   private teamKey: string | null = null
 
   private updateTeam(update: (team: TeamData) => TeamData): void {
@@ -853,6 +852,24 @@ export class SessionStore {
         return
       }
 
+      case 'team_seats_added':
+        // 座位表长大了（规划拆出 workers、返工/重拟长出新工序）。
+        // 后端按执行顺序发，追加就是正确的顺序
+        this.updateTeam(team => ({
+          ...team,
+          seats: [
+            ...team.seats,
+            ...event.seats.map(seat => ({
+              id: seat.id,
+              role: seat.role,
+              roleTitle: seat.roleTitle,
+              summary: seat.summary,
+              status: seat.status,
+            })),
+          ],
+        }))
+        return
+
       case 'team_seat_started':
         this.updateTeam(team => ({ ...team, status: 'RUNNING' }))
         this.patchSeat(event.seatId, { status: 'RUNNING' })
@@ -867,15 +884,10 @@ export class SessionStore {
         })
         return
 
-      case 'team_synthesis_started':
-        this.updateTeam(team => ({ ...team, synthesizing: true }))
-        return
-
       case 'team_finished':
         this.updateTeam(team => ({
           ...team,
           status: event.status,
-          synthesizing: false,
           verdict: event.verdict ?? undefined,
           spoke: event.spoke,
           silent: event.silent,

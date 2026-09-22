@@ -6,15 +6,14 @@ import { labelColumns, padToColumns } from "../plan-layout.ts"
 import type { TeamData, TeamSeat } from "../store.ts"
 
 /**
- * 钉在输入框下边的圆桌面板。
+ * 钉在输入框下边的流水线面板。
  *
- * <p>和 {@link PlanPanel} 是两种形状，不能共用：计划要画的是一条链
- * （谁依赖谁、跑到第几步），圆桌要画的是<b>几个并列的视角加一份收口</b>——
- * 没有层、没有依赖、没有先后上的因果。硬套计划那套画法，会让人以为
- * 「审查」得等「调研」跑完才有意义，而它俩根本互不相干。
+ * <p>和 {@link PlanPanel} 是两种形状，不能共用：计划画的是一张依赖图，
+ * 流水线画的是**按执行顺序长大的座位表**——开场只有规划一席，
+ * workers、验收、返工/重拟的新工序随 team_seats_added 逐批追加，
+ * 数组顺序就是执行顺序，画一列就够了。
  *
- * <p>席位少（最多四位），所以不做计划面板那套三档降级——
- * 那套逻辑存在是因为十几步的计划能把对话区挤没，四行挤不没。
+ * <p>还没做行数降级：多轮返工能把座位表堆到十几行，真挤了再学计划面板那套。
  */
 
 const MARKS: Record<string, string> = {
@@ -28,19 +27,19 @@ const MARKS: Record<string, string> = {
 function headline(status: string): string {
   switch (status) {
     case "CREATED":
-      return "圆桌"
+      return "流水线"
     case "RUNNING":
-      return "圆桌进行中"
+      return "流水线进行中"
     case "COMPLETED":
-      return "圆桌结束"
+      return "验收通过"
     case "PARTIAL":
-      return "圆桌结束"
+      return "没过验收"
     case "FAILED":
-      return "圆桌没开成"
+      return "流水线没跑成"
     case "CANCELLED":
       return "已中断"
     default:
-      return "圆桌"
+      return "流水线"
   }
 }
 
@@ -76,17 +75,17 @@ export function TeamPanel(props: { team: TeamData; columns: number }) {
     }
   }
 
-  /** 一席的右半句：说完了、正在看、还是哑火的原因。 */
+  /** 一道工序的右半句：干完了、正在干、还是倒了的原因。 */
   const note = (seat: TeamSeat): string => {
     switch (seat.status) {
       case "SUCCEEDED":
-        return seat.durationMs ? `说完了  ${Math.round(seat.durationMs / 1000)}s` : "说完了"
+        return seat.durationMs ? `完成  ${Math.round(seat.durationMs / 1000)}s` : "完成"
       case "RUNNING":
-        return "正在看…"
+        return "进行中…"
       case "SKIPPED":
-        return "没轮到"
+        return seat.error ? seat.error : "没轮到"
       case "FAILED":
-        return seat.error ? `没说上话：${seat.error}` : "没说上话"
+        return seat.error ? `没跑成：${seat.error}` : "没跑成"
       default:
         return seat.summary
     }
@@ -106,7 +105,7 @@ export function TeamPanel(props: { team: TeamData; columns: number }) {
         <text fg={theme.heading} attributes={TextAttributes.BOLD}>
           {headline(props.team.status)}
         </text>
-        <text fg={theme.inactive}> {props.team.seats.length} 位 </text>
+        <text fg={theme.inactive}> {props.team.seats.length} 道工序 </text>
         <text fg={theme.text}>
           {truncate(props.team.goal, Math.max(10, props.columns - 24))}
         </text>
@@ -134,22 +133,19 @@ export function TeamPanel(props: { team: TeamData; columns: number }) {
         )}
       </Index>
 
-      <Show when={props.team.synthesizing}>
-        <text fg={theme.brand}>{"  ▸ 合议中…"}</text>
-      </Show>
-
-      {/* PARTIAL 必须说出来：少了一席的合议和全员到齐的长得一模一样，
-          不标的话用户会把两个人的共识当成三个人的共识 */}
+      {/* PARTIAL 必须说出来，而且分两种：打回（问题清单在 verdict 里）和验收没跑成
+          （verdict 为空）。两种都意味着工作区里有一批没人担保的改动——
+          混成一种，用户会把「发现了问题」误读成「审查没跑」 */}
       <Show when={props.team.status === "PARTIAL"}>
         <text fg={theme.warning}>
-          {"  ⚠ 缺席 "}
-          {props.team.silent ?? 0}
-          {" 席——下面这份合议少了那个视角"}
+          {props.team.verdict
+            ? "  ⚠ 验收打回——问题清单在上面验收那道工序的产出里，改动没回滚"
+            : "  ⚠ 验收没跑成——施工的改动还在，但没人担保它对"}
         </text>
       </Show>
 
       <Show when={props.team.status === "CANCELLED"}>
-        <text fg={theme.inactive}>{"  已中断，没有合议。说过话的那几席留着了。"}</text>
+        <text fg={theme.inactive}>{"  已中断。跑完的工序（和它们的改动）留着了。"}</text>
       </Show>
     </box>
   )

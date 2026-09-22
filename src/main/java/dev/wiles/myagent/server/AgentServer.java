@@ -41,9 +41,7 @@ import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.PlanStore;
 import dev.wiles.myagent.plan.AgentRole;
 import dev.wiles.myagent.plan.AgentRoles;
-import dev.wiles.myagent.team.Cast;
-import dev.wiles.myagent.team.ModelCastPicker;
-import dev.wiles.myagent.team.Roundtable;
+import dev.wiles.myagent.team.Pipeline;
 import dev.wiles.myagent.team.TeamListener;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.plan.Planner;
@@ -63,7 +61,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.time.LocalDate;
-import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -145,8 +142,8 @@ public final class AgentServer extends WebSocketServer {
      */
     private final PlanExecuteAgent planAgent;
 
-    /** 圆桌。没 API key 时是 null，和 planAgent 一样。 */
-    private final Roundtable roundtable;
+    /** 流水线。没 API key 时是 null，和 planAgent 一样。 */
+    private final Pipeline pipeline;
 
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
@@ -222,11 +219,10 @@ public final class AgentServer extends WebSocketServer {
                         workspace.root(), PlanStore.inUserHome())
                         .approval(plan -> planConfirm.confirm())
                         .listener(new ProtocolPlanView());
-        // 席位和挑人各用一个客户端：和规划器另起一个是同一个理由，
-        // 共用的话取消其中一个会把另一个也掐了
-        this.roundtable = config.hasApiKey()
-                ? new Roundtable(newClient(), tools, workspace.root(),
-                        new ModelCastPicker(newClient()))
+        // 给的是工厂：几个 worker 并行，各要各的客户端，取消才掐得准。
+        // 规划器和 /plan 共用一个实例——busy 闸保证同一时刻只有一件事在跑
+        this.pipeline = config.hasApiKey()
+                ? new Pipeline(this::newClient, tools, workspace.root(), planner)
                         .listener(new ProtocolTeamView())
                 : null;
     }
@@ -340,49 +336,49 @@ public final class AgentServer extends WebSocketServer {
         }
     }
 
-    /** 圆桌怎么发到线上。 */
     /** 任务 → 审批框上那行「谁在问」。 */
     private static ApprovalOrigin originOf(Task task) {
         return new ApprovalOrigin(task.id(), task.role().id(), task.role().title());
     }
 
+    /** 流水线怎么发到线上。 */
     private final class ProtocolTeamView implements TeamListener {
 
         @Override
-        public void onCastChosen(String goal, Cast cast) {
-            audit.note("team_cast", "goal", goal + " · " + String.join("+", cast.ids()));
-            publish(Protocol.encodeTeamStarted(goal, cast));
+        public void onStarted(String goal, String reason, List<Task> stages) {
+            audit.note("team_started", "goal", goal);
+            publish(Protocol.encodeTeamStarted(goal, reason, stages));
         }
 
         @Override
-        public void onSeatStarted(Task seat) {
-            audit.taskStarted(seat);
-            approval.origin(originOf(seat));     // 理由同计划任务
-            publish(Protocol.encodeSeatStarted(seat));
+        public void onStagesAdded(List<Task> stages) {
+            publish(Protocol.encodeStagesAdded(stages));
         }
 
         @Override
-        public void onSeatFinished(Task seat) {
-            audit.taskFinished(seat);
+        public void onStageStarted(Task stage) {
+            audit.taskStarted(stage);
+            approval.origin(originOf(stage));     // 理由同计划任务
+            publish(Protocol.encodeStageStarted(stage));
+        }
+
+        @Override
+        public void onStageFinished(Task stage) {
+            audit.taskFinished(stage);
             approval.origin(null);
-            publish(Protocol.encodeSeatFinished(seat));
+            publish(Protocol.encodeStageFinished(stage));
         }
 
         @Override
-        public void onSynthesisStarted(Task synthesis) {
-            publish(Protocol.encodeSynthesisStarted());
-        }
-
-        @Override
-        public void onAgentEvent(Task seat, AgentEvent event) {
+        public void onAgentEvent(Task stage, AgentEvent event) {
             // 同 ProtocolPlanView：不写全限定会解析到本类这个同名方法，自己递归调自己
-            AgentServer.this.onAgentEvent(seat, event);
+            AgentServer.this.onAgentEvent(stage, event);
         }
 
         @Override
         public void onFinished(TeamResult result) {
             audit.note("team_finished", "status",
-                    result.status() + " · " + result.spoke() + "/" + result.seats().size());
+                    result.status() + " · " + result.spoke() + "/" + result.stages().size());
             publish(Protocol.encodeTeamFinished(result));
         }
     }
@@ -580,48 +576,43 @@ public final class AgentServer extends WebSocketServer {
     }
 
     /**
-     * 开一场圆桌。
+     * 开一条流水线。
      *
-     * <p>和 {@code plan} 一样先占 busy 再丢后台：几席加合议是好几次完整的子循环，
+     * <p>和 {@code plan} 一样先占 busy 再丢后台：三道工序是好几次完整的子循环，
      * 期间再来一条 prompt 会把两段历史搅在一起。
      *
-     * <p><b>没有确认那一幕</b>。理由和终端那边一样：计划要确认的是「怎么拆」，
-     * 圆桌要确认的只是「派谁」，而名单在 {@code team_started} 那一帧就画出去了，
-     * 用户不满意按 Esc 就是了。
+     * <p><b>没有确认那一幕</b>。理由和计划不同：计划要确认的是「怎么拆」且拆完才执行；
+     * 流水线的拆法是执行的一部分（规划工序拆出 worker 就接着跑），
+     * 中途不满意按 Esc 就是了。
+     *
+     * <p>{@code roles} 字段已废弃：分工由规划工序决定（它给每个任务派角色）。
+     * 老界面传了就忽略——废弃字段报错等于把还没更新的界面锁在门外。
      */
     private void handleTeam(WebSocket conn, String goal, List<String> roleIds) {
-        if (roundtable == null) {
-            send(conn, error("没有配置 API key，无法开圆桌"));
+        if (pipeline == null) {
+            send(conn, error("没有配置 API key，无法开流水线"));
             return;
         }
         if (goal.isEmpty()) {
             return;
         }
-        List<AgentRole> named = new ArrayList<>();
-        for (String id : roleIds) {
-            AgentRole role = AgentRoles.find(id).orElse(null);
-            if (role == null) {
-                // 界面传了个不认识的 id：定向回给它一条错误，而不是默默当成没点人——
-                // 不然用户看到的是「我明明点了人，圆桌上却是别人」
-                send(conn, error("没有名为 " + id + " 的角色"));
-                return;
-            }
-            named.add(role);
+        if (!roleIds.isEmpty()) {
+            log.info("team 命令带了已废弃的 roles 字段，忽略: {}", roleIds);
         }
         if (!busy.compareAndSet(false, true)) {
             send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
-        worker.submit(() -> runTeam(goal, named));
+        worker.submit(() -> runTeam(goal));
     }
 
-    private void runTeam(String goal, List<AgentRole> named) {
+    private void runTeam(String goal) {
         long startedAt = System.currentTimeMillis();
         try {
-            roundtable.hold(goal, named, options.readOnly());
+            pipeline.run(goal);
         } catch (RuntimeException e) {
-            log.error("圆桌跑挂了", e);
+            log.error("流水线跑挂了", e);
             publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
         } finally {
             settleBusy(startedAt);
@@ -821,8 +812,8 @@ public final class AgentServer extends WebSocketServer {
         if (planAgent != null) {
             planAgent.cancel();
         }
-        if (roundtable != null) {
-            roundtable.cancel();                // 圆桌那三处（不再开席、掐当前席、掐挑人）归它管
+        if (pipeline != null) {
+            pipeline.cancel();                  // 流水线那两处（不开下一道工序、掐正在跑的）归它管
         }
         planConfirm.cancelPending();            // 卡在计划确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行
@@ -956,7 +947,7 @@ public final class AgentServer extends WebSocketServer {
     }
 
     /**
-     * 计划/圆桌里子任务的事件：标上任务号再播。
+     * 计划/流水线里子任务的事件：标上任务号再播。
      *
      * <p>并行的任务各自在发事件，不标出处的话，界面上两条线的动静会被
      * 当成同一条线上的先后两步。主对话走上面那个不带号的入口。

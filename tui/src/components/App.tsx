@@ -24,7 +24,6 @@ import {
   helpLines,
   matchCommand,
   resolve,
-  splitTeamArgs,
   type CommandContext,
   type CommandEntry,
 } from "../commands.ts"
@@ -97,7 +96,7 @@ export function App(props: AppProps) {
     return entry && entry.kind === "plan" ? entry.plan : null
   }
 
-  /** 当前那场圆桌。和计划面板一样从 transcript 里按 key 取，不另存一份。 */
+  /** 当前那条流水线。和计划面板一样从 transcript 里按 key 取，不另存一份。 */
   const activeTeam = () => {
     const key = state().activeTeamKey
     if (!key) return null
@@ -248,17 +247,11 @@ export function App(props: AppProps) {
       case "plan":
         session.plan(text)
         return
-      case "team": {
-        // 开头连着的角色名仍然算点名。斜杠命令没了，但「我想让审查和验证来看」
-        // 这个需求还在——这是它唯一的入口了
-        const { roles, goal } = splitTeamArgs(text, (state().ready?.roles ?? []).map(r => r.id))
-        if (goal.length === 0) {
-          session.notice("info", "只点了人还没说议题。把要议的事写在角色名后面。")
-          return
-        }
-        session.team(goal, roles)
+      case "team":
+        // 不再从输入里拆角色点名：分工由规划工序决定（协议里 roles 已废弃），
+        // 整句话原样就是目标——开头的「operator」现在是目标的一部分，不是指令
+        session.team(text, [])
         return
-      }
       default:
         session.prompt(text)
     }
@@ -794,7 +787,7 @@ export function App(props: AppProps) {
           )}
         </Show>
 
-        {/* 圆桌面板，和计划面板同一个位置——两者不会同时出现（后端一次只跑一件事） */}
+        {/* 流水线面板，和计划面板同一个位置——两者不会同时出现（后端一次只跑一件事） */}
         <Show when={activeTeam()}>
           {(team) => (
             <box flexShrink={0} paddingLeft={1} paddingRight={1}>

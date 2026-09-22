@@ -622,21 +622,23 @@ function CompactedEntry(props: { before: number; after: number; summarized: bool
 }
 
 /**
- * 转录里的圆桌痕迹。
+ * 转录里的流水线痕迹。
  *
- * <p>和面板是分工：面板是当下那场的活状态，这条是往回滚还能找到的历史。
- * <b>缺席几席要写在这儿</b>——往回翻的时候，这行是判断那份合议靠不靠谱的唯一线索。
+ * <p>和面板是分工：面板是当下那条线的活状态，这条是往回滚还能找到的历史。
+ * <b>PARTIAL 要在这儿也标出来</b>——往回翻的时候，这行是判断那批改动
+ * 有没有人担保过的唯一线索。
  */
 function TeamEntry(props: { goal: string; status: string; seats: number; silent: number }) {
   const theme = useTheme()
+  const unvouched = () => props.status === "PARTIAL"
   return (
     <box flexDirection="column" paddingTop={1} border={["left"]} borderColor={theme.border} paddingLeft={1}>
       <text fg={theme.heading} attributes={TextAttributes.BOLD}>
-        圆桌：{props.goal}
+        流水线：{props.goal}
       </text>
-      <text fg={props.silent > 0 ? theme.warning : theme.subtle}>
-        状态 {props.status} · {props.seats} 位
-        {props.silent > 0 ? ` · 缺席 ${props.silent}（合议少了那个视角）` : ""}
+      <text fg={unvouched() ? theme.warning : theme.subtle}>
+        状态 {props.status} · {props.seats} 道工序
+        {unvouched() ? "（没过验收——改动还在，但没人担保）" : ""}
       </text>
     </box>
   )
