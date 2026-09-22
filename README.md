@@ -53,16 +53,31 @@ cd 你要让它干活的目录
 
 ### 用手机连
 
+装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
+界面里敲 `/qr` 出配对二维码，扫一下就连上了。两种走法：
+
 ```bash
-./myagent-tui --lan        # 后端改绑 0.0.0.0，界面里敲 /qr 出配对二维码
+./myagent-tui --relay wss://relay.example.com/ws   # 任何网络：4G、公司网、咖啡馆
+./myagent-tui --lan                                        # 只在同一个局域网
 ```
 
-装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
-扫码即连。二维码的内容就是 `ws://<局域网IP>:<端口>/?token=<token>` 这个地址本身，
-所以手填和扫码是同一条路。
+**中继那条是怎么穿透的**：两端都**往外拨**，在一台公网机器上会合——
+从不在你机器上开入站端口，所以 NAT 和防火墙一律放行。
+形状和 Claude Code 的 Remote Control 一样；不同的是加密——
+**中继只看得见密文**，配对密钥放在配对 URL 的 `#` 之后，
+而 fragment 在协议层面永远不会被发到服务器。
 
-**明文 ws，只在可信网络用**——局域网里任何设备都摸得到那个端口，
-唯一的门禁是 token（随后端进程生灭）。出门要用得等中继那一步，见 `docs/protocol.md` 1.1。
+房间号和密钥存在 `~/.myagent/relay.json`，**跨重启保持**：扫一次码，以后一直能连。
+要换一套：`--relay-reset`。
+
+局域网那条是明文 ws，只在可信网络用。两种可以一起开，二维码优先给中继那个。
+细节见 [`docs/protocol.md`](docs/protocol.md) 1.1 / 1.3。
+
+自己架中继：同一个 jar 换个角色跑就是（那条路径不碰 API key、不起 agent）：
+
+```bash
+java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终结
+```
 
 配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
 
