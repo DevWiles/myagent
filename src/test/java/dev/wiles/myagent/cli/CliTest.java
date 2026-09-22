@@ -86,7 +86,7 @@ class CliTest {
     void usageListsExactlyWhatExists() {
         String usage = Cli.usage();
 
-        for (String flag : new String[]{"--serve", "--port", "--dir", "--model",
+        for (String flag : new String[]{"--serve", "--port", "--lan", "--dir", "--model",
                 "--readonly", "--unsafe", "--help"}) {
             assertTrue(usage.contains(flag), "帮助里漏了 " + flag);
         }
@@ -108,6 +108,13 @@ class CliTest {
     void portDefaultsToEphemeral() {
         assertEquals(0, Cli.parse(new String[]{"--serve"}).port());
         assertEquals(8123, Cli.parse(new String[]{"--serve", "--port", "8123"}).port());
+    }
+
+    @Test
+    @DisplayName("--lan 默认关——「只听 127.0.0.1」是安全边界，跨过去必须显式说")
+    void lanOffByDefault() {
+        assertFalse(Cli.parse(new String[]{"--serve"}).lan());
+        assertTrue(Cli.parse(new String[]{"--serve", "--lan"}).lan());
     }
 
     @Test

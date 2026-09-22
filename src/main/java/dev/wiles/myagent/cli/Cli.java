@@ -27,6 +27,7 @@ public final class Cli {
         boolean version = false;
         boolean serve = false;
         int port = 0;
+        boolean lan = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -38,6 +39,7 @@ public final class Cli {
                 case "-r", "--readonly", "-p", "--plan" -> readOnly = true;
                 case "--unsafe" -> unsafe = true;
                 case "--serve" -> serve = true;
+                case "--lan" -> lan = true;
                 case "--port" -> {
                     requireValue(args, i, arg);
                     port = parsePort(args[++i]);
@@ -58,7 +60,7 @@ public final class Cli {
                                 + "要对话请用 myagent-tui 起界面）");
             }
         }
-        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port);
+        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port, lan);
     }
 
     private static int parsePort(String value) {
@@ -94,6 +96,8 @@ public final class Cli {
                       --serve          起一个只监听 127.0.0.1 的 WebSocket 服务。
                                        握手信息（端口 + 一次性 token）以一行 JSON 打在 stdout
                       --port <端口>    监听端口，默认 0（系统分配，推荐）
+                      --lan            局域网模式：绑 0.0.0.0，手机等远程客户端可连。
+                                       明文 ws，只在可信网络用（见 docs/protocol.md 1.1）
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
                   -r, --readonly       只读模式：写文件和执行命令的工具压根不注册

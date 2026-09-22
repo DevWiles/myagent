@@ -170,7 +170,11 @@ public final class AgentServer extends WebSocketServer {
     private final CountDownLatch stopped = new CountDownLatch(1);
 
     public AgentServer(CliOptions options, int port) {
-        super(new InetSocketAddress(InetAddress.getLoopbackAddress(), port));
+        // 默认只听环回是安全边界；--lan 才绑 0.0.0.0，此时唯一的门禁是 token
+        // ——局域网里任何设备都摸得到端口（docs/protocol.md 1.1）
+        super(options.lan()
+                ? new InetSocketAddress(port)
+                : new InetSocketAddress(InetAddress.getLoopbackAddress(), port));
         setReuseAddr(true);
 
         this.options = options;
@@ -445,6 +449,15 @@ public final class AgentServer extends WebSocketServer {
         hello.put("port", getPort());
         hello.put("token", token);
         hello.put("protocol", Protocol.VERSION);
+        if (options.lan()) {
+            // 替客户端把「该连哪块网卡」挑好。挑不出（无网）就不打这个字段——
+            // 界面看不到 lan 字段自然不会摆出二维码入口，比给一个连不上的地址诚实
+            LanAddress.pick().ifPresentOrElse(
+                    addr -> hello.put("lan", addr),
+                    () -> log.warn("--lan 已开但找不到局域网地址，二维码配对不可用"));
+            log.warn("局域网模式：0.0.0.0:{} 对整个网络可见，门禁只有 token（明文 ws）",
+                    getPort());
+        }
         System.out.println(hello.toString());
         System.out.flush();
     }

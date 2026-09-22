@@ -20,6 +20,9 @@ import java.nio.file.Path;
  *                  「显式说明自己要什么」比「什么都不写就默认起服务」安全——
  *                  手滑敲一下 {@code java -jar myagent.jar} 不该在你的家目录上起一个服务
  * @param port      监听端口。0 表示让系统随便挑一个（推荐，端口号会打在 stdout）
+ * @param lan       局域网模式：绑 0.0.0.0 让手机等远程客户端能连进来。
+ *                  默认关——「只听 127.0.0.1」是安全边界，跨过去必须显式说
+ *                  （见 docs/protocol.md 1.1 节）
  */
 public record CliOptions(
         Path workspace,
@@ -29,6 +32,7 @@ public record CliOptions(
         boolean help,
         boolean version,
         boolean serve,
-        int port
+        int port,
+        boolean lan
 ) {
 }
