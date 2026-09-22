@@ -34,6 +34,9 @@ import dev.wiles.myagent.relay.Pairing;
 import dev.wiles.myagent.relay.RelayLink;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.GitBranch;
+import dev.wiles.myagent.skill.Skill;
+import dev.wiles.myagent.skill.SkillLibrary;
+import dev.wiles.myagent.skill.SkillTool;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.ToolRegistry;
@@ -237,6 +240,16 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
+
+        // 技能：用户自己写的说明书，标准 SKILL.md 格式。一份都没有就不注册这个工具——
+        // 清单挂在它的描述上，注册了就是每一轮的固定开销。只读模式照接：
+        // 技能本身只是一段文字，真正动手的是模型读完之后调的那些工具
+        SkillLibrary skills = SkillLibrary.load(workspace.root());
+        if (!skills.isEmpty()) {
+            tools.register(new SkillTool(skills));
+            log.info("接入 {} 份技能: {}", skills.all().size(),
+                    skills.all().stream().map(Skill::id).collect(java.util.stream.Collectors.joining(", ")));
+        }
 
         // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
         this.agent = config.hasApiKey()
