@@ -26,8 +26,10 @@ import java.util.Map;
  *       见 {@link #requireLiveDeps}</li>
  * </ul>
  *
- * <p>线程安全：<b>没有</b>。同层并发是后面的事，到时候要么把图的读写收进调度线程，
- * 要么给状态加锁。现在先不为还没发生的需求买单。
+ * <p>线程安全：<b>没有，也不需要</b>。同层并发选的是「把图的读写收进调度线程」那条路：
+ * {@code ready()} / {@code addSubTasks()} / {@code propagateFailure()} 全部只在
+ * {@code PlanExecutor} 的调度线程上被调，工作线程碰不到图。这比加锁便宜，
+ * 也让「图长大」和「失败传播」天然是原子的——不会有人在两步之间看到半截图。
  */
 public final class TaskGraph {
 

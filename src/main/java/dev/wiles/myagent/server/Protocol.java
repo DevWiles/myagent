@@ -110,14 +110,30 @@ public final class Protocol {
     }
 
     /**
+     * 把一个 agent 事件翻成线上报文，标上这是哪个任务的动静。
+     *
+     * <p>{@code taskId} 是计划/圆桌里发这个事件的任务（席位）号，主对话传 null。
+     * 并行的任务各自在发事件，不标出处的话，界面上「正在读 pom.xml」和
+     * 「正在读 README」会被当成同一条线上的先后两步。老界面不认识这个字段，
+     * 忽略即可（见 docs/protocol.md 第 2 节），所以不升协议版本。
+     */
+    public static ObjectNode encode(AgentEvent event, String taskId) {
+        ObjectNode node = encode(event);
+        if (taskId != null && !taskId.isBlank()) {
+            node.put("task", taskId);
+        }
+        return node;
+    }
+
+    /**
      * 把一个 agent 事件翻成线上报文。
      *
-     * <p>{@code toolSeq} 是服务端自己编的流水号：{@link AgentEvent.ToolStarted} 和
-     * {@link AgentEvent.ToolFinished} 本身不带 id，而前端要靠它把「开始」和「结束」
-     * 配成同一行来原地更新。Agent 的工具调用是严格串行的（见 Agent.run 里的 for 循环），
-     * 所以同一个流水号一定对应同一次调用。
+     * <p>工具事件的 {@code id} 直接取事件自带的流水号（{@link AgentEvent.ToolStarted#id}），
+     * 前端靠它把「开始」和「结束」配成同一行来原地更新。以前这个号是服务端看着
+     * 事件顺序补的——那套编号法建立在「工具严格串行」上；并行安全的调用凑批同时执行之后，
+     * 「开始」和「结束」在事件流里不再相邻，只有源头发的号才配得对。
      */
-    public static ObjectNode encode(AgentEvent event, int toolSeq) {
+    public static ObjectNode encode(AgentEvent event) {
         if (event instanceof AgentEvent.Thinking e) {
             ObjectNode n = event("thinking");
             n.put("step", e.step());
@@ -135,17 +151,21 @@ public final class Protocol {
         }
         if (event instanceof AgentEvent.ToolStarted e) {
             ObjectNode n = event("tool_started");
-            n.put("id", toolSeq);
+            n.put("id", e.id());
             n.put("tool", e.tool());
             n.put("arguments", e.arguments());
             return n;
         }
         if (event instanceof AgentEvent.ToolFinished e) {
             ObjectNode n = event("tool_finished");
-            n.put("id", toolSeq);
+            n.put("id", e.id());
             n.put("tool", e.tool());
             n.put("ok", e.ok());
             n.put("output", e.output());
+            // 空的就不发。每条工具结果都挂一个空字段，只是让报文变长、让界面多判一次
+            if (!e.diff().isEmpty()) {
+                n.put("diff", e.diff());
+            }
             return n;
         }
         if (event instanceof AgentEvent.CompactProgress e) {

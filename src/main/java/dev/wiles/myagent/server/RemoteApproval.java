@@ -82,8 +82,12 @@ public final class RemoteApproval implements ApprovalPolicy {
         this.origin = who;
     }
 
+    // synchronized：审批一次只能问一个。pendingId / offered / 容量 1 的 answers
+    // 全都按「同一时刻只有一问」设计；调度层的「写独占」规矩已经保证了几乎不会撞，
+    // 这把锁是兜底——万一真撞上（比如圆桌上 verifier 之外又坐进一个会动手的角色），
+    // 后到的排队等前一问答完，而不是把前一问的现场覆盖掉。
     @Override
-    public ApprovalVerdict decide(ApprovalRequest incoming) {
+    public synchronized ApprovalVerdict decide(ApprovalRequest incoming) {
         if (!hasClients.getAsBoolean()) {
             return ApprovalVerdict.no("当前没有界面连着，没人能确认这个动作。");
         }

@@ -48,7 +48,13 @@ public interface PlanListener {
     default void onReplanned(Task failed, List<Task> recovery) {
     }
 
-    /** 子任务里 ReAct 循环的动静：流式文本、工具调用。带着任务一起给，界面才知道是谁在动。 */
+    /**
+     * 子任务里 ReAct 循环的动静：流式文本、工具调用。带着任务一起给，界面才知道是谁在动。
+     *
+     * <p><b>会被多个线程同时调</b>——只读任务是并行执行的，各自的子循环各发各的事件。
+     * 实现要么本身线程安全（往并发队列里塞、发到线程安全的通道上），要么自己加锁。
+     * 其余回调都只在调度线程上来，不受此限。
+     */
     default void onAgentEvent(Task task, AgentEvent event) {
     }
 

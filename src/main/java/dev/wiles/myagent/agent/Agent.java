@@ -22,6 +22,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
@@ -34,7 +42,7 @@ import java.util.function.Consumer;
  *   │      ↓
  *   │   模型返回 tool_calls？
  *   │      ├─ 否 → 这就是最终答复，退出循环
- *   │      └─ 是 → 逐个执行工具               (Acting)
+ *   │      └─ 是 → 执行工具（只读的凑批并行，会动世界的串行） (Acting)
  *   │               ↓
  *   └────────── 把结果作为 tool 消息追加进历史  (Observation)
  * </pre>
@@ -67,6 +75,38 @@ public final class Agent {
      * 那时候继续干等还不如自己去撞一次，好歹能拿到明确的错误。
      */
     private static final long FORCE_WAIT_MILLIS = 20_000;
+
+    /**
+     * 一批并行安全的工具调用最多同时跑几个。
+     *
+     * <p>能进批的都是本地磁盘 I/O（读文件、搜索），四个已经把普通磁盘喂饱了；
+     * 再宽只是让一次读十个文件的模型把机器占满，收益早就平了。
+     */
+    private static final int MAX_PARALLEL_TOOLS = 4;
+
+    /**
+     * 一批并行调用<b>整批</b>的时限，毫秒。
+     *
+     * <p>能进批的都是本地磁盘 I/O，正常是毫秒级——60 秒不是给正常情况留的余量，
+     * 是给「网络文件系统上的 grep 挂住了」那种情况设的止损线。
+     * 没有它的话，一个卡死的调用会把整批、进而把整轮对话吊在那儿，
+     * 而界面上只有一个转着的圈。
+     *
+     * <p>计整批而不是每个调用各一份：批的意义就是「这几件事一起做完」，
+     * 逐个计时的话 4 个调用最坏能拖 4 倍，而在调用方眼里这仍然是「一步」。
+     */
+    public static final long DEFAULT_BATCH_TIMEOUT_MILLIS = 60_000;
+
+    /**
+     * 工具调用流水号，进程内全局。理由见 {@link #nextToolId()}。
+     */
+    private static final AtomicInteger TOOL_IDS = new AtomicInteger();
+
+    /** {@link #emit} 的锁。批内调用会从工作线程发事件，监听者只想看到一次一条。 */
+    private final Object emitLock = new Object();
+
+    /** 整批并行调用的时限。见 {@link #DEFAULT_BATCH_TIMEOUT_MILLIS}。 */
+    private long batchTimeoutMillis = DEFAULT_BATCH_TIMEOUT_MILLIS;
 
     private final LlmClient client;
     private final ToolRegistry tools;
@@ -135,7 +175,7 @@ public final class Agent {
     private final StreamListener stream = new StreamListener() {
         @Override
         public void onTextDelta(String delta) {
-            listener.accept(new AgentEvent.TextDelta(delta));
+            emit(new AgentEvent.TextDelta(delta));
         }
     };
 
@@ -169,10 +209,33 @@ public final class Agent {
         return this;
     }
 
+    /**
+     * 改整批并行调用的时限。传 0 或负数表示不限时——只在测试里用得上，
+     * 生产环境把它关掉等于把「一个卡死的工具吊住整轮对话」这条路重新打开。
+     */
+    public Agent withBatchTimeout(java.time.Duration timeout) {
+        this.batchTimeoutMillis = timeout == null || timeout.isZero() || timeout.isNegative()
+                ? Long.MAX_VALUE / 2_000_000      // 够大，且乘 1e6 不溢出
+                : timeout.toMillis();
+        return this;
+    }
+
     /** 告诉它哪些工具算「改了文件」，钉住块要用。 */
     public Agent withWritingTools(Set<String> writingTools) {
         this.writingTools = writingTools == null ? Set.of() : Set.copyOf(writingTools);
         return this;
+    }
+
+    /**
+     * 该收手了吗：用户按了 Ctrl-C，<b>或者跑着这个循环的线程被中断了</b>。
+     *
+     * <p>后一半是给上层的超时用的。计划和流水线超时时会 {@code Future.cancel(true)}，
+     * 那只是给工作线程设一个中断标志——不认它的话，一个已经被判超时、
+     * 下游都已跳过的任务还会接着发模型调用、接着写文件，纯属烧钱加添乱。
+     * 认了之后，它最多再走完手上这一步就收口。
+     */
+    private boolean shouldStop() {
+        return cancelled || Thread.currentThread().isInterrupted();
     }
 
     /**
@@ -308,10 +371,10 @@ public final class Agent {
 
         try {
             for (step = 1; step <= maxSteps; step++) {
-                if (cancelled) {
+                if (shouldStop()) {
                     return abort(userInput, step);
                 }
-                listener.accept(new AgentEvent.Thinking(step));
+                emit(new AgentEvent.Thinking(step));
 
                 List<ToolSpec> specs = tools.specs();
                 // 窗口在请求之前现场组装。此刻记录是自洽的（上一轮的工具结果都已回填），
@@ -332,28 +395,38 @@ public final class Agent {
                 if (!assistant.hasToolCalls()) {
                     String text = response.text();
                     unfinished = null;   // 这一轮走完了，「上一轮没做完」不再成立
-                    listener.accept(new AgentEvent.Done(text, step));
+                    emit(new AgentEvent.Done(text, step));
                     return text;
                 }
 
                 // 模型常常一边说「我先看看 pom.xml」一边发起调用，这句话就是 ReAct 的 Thought
                 if (assistant.content() != null && !assistant.content().isBlank()) {
-                    listener.accept(new AgentEvent.Thought(assistant.content()));
+                    emit(new AgentEvent.Thought(assistant.content()));
                 }
 
                 // 模型可能一次点好几个工具。必须全部执行、全部回传，
                 // 漏掉任何一个，那个 tool_call_id 就永远等不到结果，下轮请求必然报错。
-                for (ToolCall call : assistant.toolCallsOrEmpty()) {
-                    if (cancelled) {
+                //
+                // 连续的并行安全调用（读三个文件、搜两个词）凑成一批同时执行；
+                // 会动世界的调用（写文件、bash）保持串行，且作为批的边界——
+                // 「读 a → 改 a → 再读 a」这种序列里，顺序本身就是语义。
+                List<ToolCall> calls = assistant.toolCallsOrEmpty();
+                int next = 0;
+                while (next < calls.size()) {
+                    if (shouldStop()) {
                         return abort(userInput, step);
                     }
-                    listener.accept(new AgentEvent.ToolStarted(call.name(), call.argumentsJson()));
-
-                    ToolResult result = tools.execute(call);   // 它保证不抛异常
-
-                    listener.accept(new AgentEvent.ToolFinished(
-                            call.name(), result.ok(), result.content()));
-                    history.add(ChatMessage.toolResult(call.id(), result.content()));
+                    int end = next;
+                    while (end < calls.size() && tools.parallelSafe(calls.get(end).name())) {
+                        end++;
+                    }
+                    if (end - next >= 2) {
+                        executeBatch(calls.subList(next, end));
+                        next = end;
+                    } else {
+                        executeOne(calls.get(next));
+                        next++;
+                    }
                 }
             }
 
@@ -372,9 +445,132 @@ public final class Agent {
             // 回滚的代价是用户以为这一轮白干了，实际上白干的只是最后那个请求。
             seal("网络或模型调用失败（" + brief(e.getMessage()) + "）", userInput, step);
             log.error("模型调用失败，已把现场封口留在历史里", e);
-            listener.accept(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage()));
             return "调用模型失败: " + e.getMessage();
         }
+    }
+
+    /** 串行执行一次工具调用：发事件、执行、回填历史。 */
+    private void executeOne(ToolCall call) {
+        int id = nextToolId();
+        emit(new AgentEvent.ToolStarted(id, call.name(), call.argumentsJson()));
+        ToolResult result = tools.execute(call);   // 它保证不抛异常
+        emit(new AgentEvent.ToolFinished(
+                id, call.name(), result.ok(), result.content(), result.diff()));
+        history.add(ChatMessage.toolResult(call.id(), result.content()));
+    }
+
+    /**
+     * 把一批并行安全的调用同时执行掉。
+     *
+     * <h3>历史只在这个线程动</h3>
+     * 工作线程只负责「执行 + 发事件」，结果收回来之后由本线程<b>按点单顺序</b>回填。
+     * 两个原因：{@link #history} 没加锁，收在一个线程里就不用加；
+     * 回填顺序和 {@code tool_calls} 一致，回放这段历史的人不用先理解并发。
+     *
+     * <h3>取消不抢批内的调用</h3>
+     * 能进批的都是只读工具，快而且没有副作用，等它们跑完比中途弃掉更省心——
+     * 弃掉的那几个还得补占位消息，否则历史就残了。取消在批与批之间生效。
+     *
+     * <h3>整批共一个时限</h3>
+     * 预算是<b>整批</b>的，不是每个调用各一份：批的意义就是「这几件事一起做完」，
+     * 逐个计时的话 4 个调用最坏能拖 4 倍，而调用方眼里这仍然是「一步」。
+     * 超时的那个当场判失败、给它补一条结果，<b>剩下的照收</b>——
+     * 一个卡住的 grep 不该让另外三个已经读完的文件白读。
+     */
+    private void executeBatch(List<ToolCall> batch) {
+        ExecutorService pool = Executors.newFixedThreadPool(
+                Math.min(batch.size(), MAX_PARALLEL_TOOLS), r -> {
+                    Thread t = new Thread(r, "tool-batch");
+                    t.setDaemon(true);
+                    return t;
+                });
+        // 谁先把 id 放进去，谁负责发那条「结束」事件。主线程超时补发和工作线程
+        // 姗姗来迟地发，只能有一个作数——否则界面上同一行会被更新两次，后到的还是旧结果
+        Set<Integer> settled = ConcurrentHashMap.newKeySet();
+        try {
+            // 流水号在提交前就编好：超时的那个要由主线程补一条「结束」事件，
+            // 它得先知道号。事件本身仍由工作线程在**真正开跑**时发——
+            // 批比池大时后几个要排队，「开始」不该在提交那一刻就报出去
+            List<Integer> ids = new ArrayList<>(batch.size());
+            List<Future<ToolResult>> futures = new ArrayList<>(batch.size());
+            for (ToolCall call : batch) {
+                int id = nextToolId();
+                ids.add(id);
+                futures.add(pool.submit(() -> {
+                    emit(new AgentEvent.ToolStarted(id, call.name(), call.argumentsJson()));
+                    ToolResult result = tools.execute(call);
+                    if (settled.add(id)) {
+                        emit(new AgentEvent.ToolFinished(
+                                id, call.name(), result.ok(), result.content(), result.diff()));
+                    }
+                    return result;
+                }));
+            }
+            long deadline = System.nanoTime() + batchTimeoutMillis * 1_000_000L;
+            for (int i = 0; i < batch.size(); i++) {
+                ToolCall call = batch.get(i);
+                String content = settled(futures.get(i), deadline, call.name(), ids.get(i),
+                        settled);
+                history.add(ChatMessage.toolResult(call.id(), content));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * 等一个批内调用的结果。<b>每个 tool_call 都必须有条结果</b>，
+     * 所以这里把超时和等待中的意外统统翻译成一条错误内容，绝不让某条消息缺席。
+     *
+     * @param deadline 整批共用的截止时刻（{@code System.nanoTime()} 口径）
+     */
+    private String settled(Future<ToolResult> future, long deadline, String tool, int id,
+                           Set<Integer> settledIds) {
+        try {
+            long remaining = Math.max(0, deadline - System.nanoTime());
+            return future.get(remaining, TimeUnit.NANOSECONDS).content();
+        } catch (TimeoutException e) {
+            // 掐掉它，别让一个卡死的工具把线程占到会话结束。interrupt 能不能真的叫停
+            // 取决于工具实现（BashTool 会醒，卡在网络文件系统上的读不一定），
+            // 所以这只是止损：这一步的结果按超时算，后面的调用照收
+            future.cancel(true);
+            log.warn("工具 {} 超过整批 {} 毫秒的时限，按超时处理", tool, batchTimeoutMillis);
+            String message = "这一步超时了（整批并行调用的时限是 " + batchTimeoutMillis
+                    + " 毫秒）。如果这个工具本来就慢，换个更窄的范围再试。";
+            if (settledIds.add(id)) {
+                // 工作线程还没发过「结束」，界面上那一行正转着圈，得由这儿收尾
+                emit(new AgentEvent.ToolFinished(id, tool, false, message));
+            }
+            return ToolResult.error(message).content();
+        } catch (ExecutionException e) {
+            // execute() 承诺不抛异常，这里兜的是线程池本身的意外
+            log.error("并行工具调用炸在了池子里", e.getCause());
+            return ToolResult.error("并行执行失败: " + e.getCause()).content();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ToolResult.error("等待结果时被中断，这一步的结果没有拿到").content();
+        }
+    }
+
+    /**
+     * 事件的唯一出口。
+     *
+     * <p>批内的调用在工作线程上发事件，监听者（终端渲染、WebSocket 广播）
+     * 未必扛得住并发——收在一把锁后面，它们看到的世界仍然是一次一条。
+     */
+    private void emit(AgentEvent event) {
+        synchronized (emitLock) {
+            listener.accept(event);
+        }
+    }
+
+    /**
+     * 取一个工具调用流水号。<b>进程内全局</b>递增而不是每个 Agent 各数各的：
+     * 计划里几个子循环同时在跑，各数各的会撞号，界面把两次调用配成一行。
+     */
+    private static int nextToolId() {
+        return TOOL_IDS.incrementAndGet();
     }
 
     /** 当前窗口占用（含每轮都要重发的工具菜单）。拿到过实测值就按实测校准。 */
@@ -467,7 +663,7 @@ public final class Agent {
 
     private void onCompactProgress(String phase, int done, int total, int percent) {
         compactSteps = total;
-        listener.accept(new AgentEvent.CompactProgress(phase, done, total, percent));
+        emit(new AgentEvent.CompactProgress(phase, done, total, percent));
     }
 
     /**
@@ -475,7 +671,7 @@ public final class Agent {
      * 少发一次界面上那根条就永远停在 87% 不动。
      */
     private void finishCompactProgress() {
-        listener.accept(AgentEvent.CompactProgress.finished(compactSteps));
+        emit(AgentEvent.CompactProgress.finished(compactSteps));
         compactSteps = 0;
     }
 
@@ -575,7 +771,7 @@ public final class Agent {
             // 两头都用**窗口**的口径：tokensRaw 是不裁的窗口，tokensAfter 是实发的窗口。
             // 不能拿 tokensBefore 当「压缩前」——那是记录的大小，<b>不含 system</b>，
             // 而窗口含。两把尺子一比，短会话里会打出「1302 → 1598」这种越压越大的行
-            listener.accept(new AgentEvent.Compacted(
+            emit(new AgentEvent.Compacted(
                     result.tokensRaw(), result.tokensAfter(), false));
         }
     }
@@ -631,7 +827,7 @@ public final class Agent {
         // 摘要落地要报的是**压力**变化，所以两头都取 tokensRaw。
         // 取实发大小（tokensAfter）会得出荒唐的结论：阶梯本来就把实发压在软目标附近，
         // 落地前后都贴着那条线，于是一次把 8000 降到 2000 的压缩会显示成「2138 → 2160」
-        listener.accept(new AgentEvent.Compacted(
+        emit(new AgentEvent.Compacted(
                 before.tokensRaw(), after.tokensRaw(), true));
         return after;
     }
@@ -681,7 +877,7 @@ public final class Agent {
         // 而那是彻头彻尾的误导：撑破窗口的那条消息还在记录里（记录只追加），
         // 说一次「继续」就原地再撞一次同一堵墙，用户会一直循环下去。
         sealWithoutInterruption(reason);
-        listener.accept(new AgentEvent.Failed(reason));
+        emit(new AgentEvent.Failed(reason));
         return reason;
     }
 
@@ -695,7 +891,7 @@ public final class Agent {
      */
     private String abort(String userInput, int step) {
         seal("已取消", userInput, step);
-        listener.accept(new AgentEvent.Failed("已取消"));
+        emit(new AgentEvent.Failed("已取消"));
         return "已取消。";
     }
 
@@ -765,12 +961,12 @@ public final class Agent {
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
             unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
                     System.currentTimeMillis());
-            listener.accept(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾"));
+            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾"));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {
             history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
             seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
-            listener.accept(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage()));
             return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
         }
     }

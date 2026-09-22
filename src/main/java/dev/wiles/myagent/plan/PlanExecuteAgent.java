@@ -165,7 +165,8 @@ public final class PlanExecuteAgent {
         saveCheckpoint(plan);
         listener.onApproved(plan);
 
-        AgentTaskRunner taskRunner = new AgentTaskRunner(clients.get(), tools, workspaceRoot)
+        // 工厂整个交下去，不是 get() 一次：并行的任务各要各的客户端，理由见 AgentTaskRunner
+        AgentTaskRunner taskRunner = new AgentTaskRunner(clients, tools, workspaceRoot)
                 .withPlanner(planner)
                 .onEvent(listener::onAgentEvent);
         PlanExecutor planExecutor = new PlanExecutor(taskRunner)

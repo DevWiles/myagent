@@ -232,7 +232,9 @@ public final class AuditLog implements AutoCloseable {
         return node;
     }
 
-    private void write(ObjectNode node) {
+    // synchronized：并行的工具调用和子任务会同时来记账，
+    // BufferedWriter 不是线程安全的，两条记录会绞在同一行里
+    private synchronized void write(ObjectNode node) {
         if (writer == null) {
             return;
         }

@@ -16,7 +16,11 @@ class PlanExecutorTest {
         return new Task(id, "描述 " + id, TaskType.FILE_READ, List.of(deps));
     }
 
-    /** 记下执行顺序、以及每个任务拿到了哪些上游产出的假执行体。 */
+    /**
+     * 记下执行顺序、以及每个任务拿到了哪些上游产出的假执行体。
+     *
+     * <p>{@code run} 加锁：执行器默认并行，几个任务会同时来记账。
+     */
     static class RecordingRunner implements TaskRunner {
         final List<String> order = new ArrayList<>();
         final Map<String, List<String>> upstreamSeen = new HashMap<>();
@@ -24,7 +28,7 @@ class PlanExecutorTest {
         final List<String> failing = new ArrayList<>();
 
         @Override
-        public TaskOutcome run(Task task, List<Task> upstream) {
+        public synchronized TaskOutcome run(Task task, List<Task> upstream) {
             order.add(task.id());
             upstreamSeen.put(task.id(),
                     upstream.stream().map(u -> u.id() + "=" + u.result()).toList());
@@ -57,7 +61,14 @@ class PlanExecutorTest {
 
         PlanResult result = new PlanExecutor(runner).execute(plan);
 
-        assertEquals(List.of("n1", "n2", "n3", "n4"), runner.order);
+        // 并行执行后 n2/n3 谁先记账不定，能断言的是拓扑性质本身：下游在所有上游之后
+        assertEquals(4, runner.order.size(), runner.order.toString());
+        for (Task task : plan.graph().tasks()) {
+            for (String dep : task.dependencies()) {
+                assertTrue(runner.order.indexOf(dep) < runner.order.indexOf(task.id()),
+                        task.id() + " 跑在了上游 " + dep + " 之前: " + runner.order);
+            }
+        }
         assertEquals(PlanStatus.COMPLETED, plan.status());
         assertEquals(PlanStatus.COMPLETED, result.status());
         assertTrue(plan.durationMillis() >= 0);
@@ -92,6 +103,155 @@ class PlanExecutorTest {
         assertTrue(graph.get("n4").durationMillis() >= 0);
     }
 
+    // ── 并发 ────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("互不依赖的只读任务真的同时跑——两个任务互相等对方开跑，串行永远等不到")
+    void independentReadOnlyTasksRunConcurrently() {
+        java.util.concurrent.CountDownLatch aStarted = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch bStarted = new java.util.concurrent.CountDownLatch(1);
+        TaskRunner crossWaiting = (task, upstream) -> {
+            java.util.concurrent.CountDownLatch mine =
+                    task.id().equals("a") ? aStarted : bStarted;
+            java.util.concurrent.CountDownLatch other =
+                    task.id().equals("a") ? bStarted : aStarted;
+            mine.countDown();
+            try {
+                return other.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                        ? TaskOutcome.ok("等到了")
+                        : TaskOutcome.failed("等不到对方开跑——两个任务没有同时执行");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return TaskOutcome.failed("被中断");
+            }
+        };
+        TaskGraph graph = TaskGraph.of(List.of(t("a"), t("b")));
+
+        PlanResult result = new PlanExecutor(crossWaiting).execute(plan(graph));
+
+        assertEquals(2, result.succeeded(), () -> "a: " + graph.get("a").result()
+                + " / " + graph.get("a").error() + "; b: " + graph.get("b").error());
+    }
+
+    @Test
+    @DisplayName("会动世界的任务独占运行：它在场时，场上不许有第二个人")
+    void mutatingTasksRunExclusively() {
+        java.util.concurrent.atomic.AtomicInteger inFlight =
+                new java.util.concurrent.atomic.AtomicInteger();
+        List<String> violations = java.util.Collections.synchronizedList(new ArrayList<>());
+        TaskRunner counting = (task, upstream) -> {
+            int now = inFlight.incrementAndGet();
+            if (task.role().mutates() && now > 1) {
+                violations.add(task.id() + " 在跑时场上还有别人");
+            }
+            try {
+                Thread.sleep(10);   // 撑开一点时间窗，让「同时」有机会被看见
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            inFlight.decrementAndGet();
+            return TaskOutcome.ok("干完了");
+        };
+        // 两个读、一个写、再两个读，全都互不依赖——按图论它们能五个一起跑，
+        // 按「读共享写独占」的规矩，写那一下必须独占
+        TaskGraph graph = TaskGraph.of(List.of(
+                t("r1"), t("r2"),
+                new Task("w", "改文件", TaskType.FILE_WRITE, List.of()),
+                t("r3"), t("r4")));
+
+        PlanResult result = new PlanExecutor(counting).execute(plan(graph));
+
+        assertTrue(violations.isEmpty(), violations.toString());
+        assertEquals(5, result.succeeded());
+    }
+
+    // ── 超时 ────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("一个任务卡死：它按失败算，下游跳过，别的分支照跑完")
+    void stuckTaskTimesOutAndTheRestCarryOn() {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        TaskRunner oneStuck = (task, upstream) -> {
+            if (task.id().equals("stuck")) {
+                try {
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return TaskOutcome.ok("我终于醒了");
+            }
+            return TaskOutcome.ok(task.id() + " 干完了");
+        };
+        // stuck 卡着，downstream 等它（该跳过），other 和它无关（该跑完）
+        TaskGraph graph = TaskGraph.of(List.of(
+                t("stuck"), t("downstream", "stuck"), t("other")));
+
+        try {
+            PlanResult result = new PlanExecutor(oneStuck)
+                    .taskTimeout(java.time.Duration.ofMillis(300))
+                    .execute(plan(graph));
+
+            assertEquals(TaskStatus.FAILED, graph.get("stuck").status());
+            assertTrue(graph.get("stuck").error().contains("超时"), graph.get("stuck").error());
+            assertEquals(TaskStatus.SKIPPED, graph.get("downstream").status(),
+                    "超时和别的失败一样，下游要顺着 dependents 跳过");
+            assertEquals(TaskStatus.SUCCEEDED, graph.get("other").status(),
+                    "无关的分支不该被一个卡死的任务拖下水");
+            assertTrue(graph.isDone(), "超时之后也不能留下没了结的任务");
+            assertEquals(1, result.failed());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    @DisplayName("超时的任务迟到的结果要丢掉——它已经了结过，再落一次会撞状态机")
+    void lateResultFromATimedOutTaskIsIgnored() {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        TaskRunner lateFinisher = (task, upstream) -> {
+            if (task.id().equals("slow")) {
+                try {
+                    // 超时线是 200ms，这个 600ms 之后才回来——那时它已经被判失败了
+                    release.await(600, java.util.concurrent.TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return TaskOutcome.ok("迟到的成功");
+            }
+            return TaskOutcome.ok("干完了");
+        };
+        TaskGraph graph = TaskGraph.of(List.of(t("slow"), t("quick")));
+
+        PlanResult result = assertDoesNotThrow(() -> new PlanExecutor(lateFinisher)
+                .taskTimeout(java.time.Duration.ofMillis(200))
+                .execute(plan(graph)));
+
+        assertEquals(TaskStatus.FAILED, graph.get("slow").status(),
+                "迟到的成功不能把已经判掉的任务改回来");
+        assertNull(graph.get("slow").result());
+        assertEquals(1, result.failed());
+    }
+
+    @Test
+    @DisplayName("不限时的时候行为和以前一模一样——慢任务就是慢，不是错")
+    void withoutTimeoutSlowTasksJustFinishLate() {
+        TaskRunner slow = (task, upstream) -> {
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return TaskOutcome.ok("慢慢干完了");
+        };
+
+        PlanResult result = new PlanExecutor(slow)
+                .taskTimeout(null)                  // 不限时
+                .execute(diamondPlan());
+
+        assertEquals(PlanStatus.COMPLETED, result.status());
+        assertEquals(4, result.succeeded());
+    }
+
     // ── 上游产出传递 ────────────────────────────────────────────
 
     @Test
@@ -120,7 +280,8 @@ class PlanExecutorTest {
 
         assertEquals(PlanStatus.FAILED, plan.status());
 
-        assertEquals(List.of("n1", "n2", "n3"), runner.order, "n4 不该被执行");
+        assertEquals(java.util.Set.of("n1", "n2", "n3"), java.util.Set.copyOf(runner.order),
+                "n4 不该被执行: " + runner.order);
         assertEquals(TaskStatus.FAILED, graph.get("n2").status());
         assertEquals(TaskStatus.SUCCEEDED, graph.get("n3").status(), "兄弟分支不受连累");
         assertEquals(TaskStatus.SKIPPED, graph.get("n4").status());
@@ -482,6 +643,7 @@ class PlanExecutorTest {
         List<Boolean> sawRecovery = new ArrayList<>();
 
         new PlanExecutor(runner).withReplanner(replanner)
+                .parallelism(1)     // 断言第二个了结的是 n2，得按确定顺序跑
                 .onCheckpoint(plan -> sawRecovery.add(
                         plan.graph().tasks().stream().anyMatch(t -> t.id().equals("r1"))))
                 .execute(diamondPlan());
@@ -534,7 +696,7 @@ class PlanExecutorTest {
         // 第二程：从存档立起来接着跑
         RecordingRunner second = new RecordingRunner();
         Plan resumed = saved.toPlan();
-        PlanResult result = new PlanExecutor(second).execute(resumed);
+        PlanResult result = new PlanExecutor(second).parallelism(1).execute(resumed);
 
         assertFalse(second.order.contains("n1"), "已经做成的事不该重跑: " + second.order);
         assertEquals(List.of("n2", "n3", "n4"), second.order);

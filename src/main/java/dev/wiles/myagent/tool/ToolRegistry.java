@@ -50,6 +50,17 @@ public final class ToolRegistry {
         return tools.values();
     }
 
+    /**
+     * 这个名字的工具能不能和别的调用同时执行。
+     *
+     * <p>名字不存在时返回 false：不认识的调用走串行那条路，
+     * 让 {@link #execute} 用一条完整的错误信息去回复模型，而不是在并发批里挂掉。
+     */
+    public boolean parallelSafe(String name) {
+        Tool tool = tools.get(name);
+        return tool != null && tool.parallelSafe();
+    }
+
     /** 发给模型的完整菜单。 */
     public List<ToolSpec> specs() {
         List<ToolSpec> specs = new ArrayList<>(tools.size());

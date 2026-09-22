@@ -34,6 +34,58 @@ class WriteFileToolTest {
         return tool.execute(M.readTree(json));
     }
 
+    // ── 给界面看的 diff ────────────────────────────────────────
+
+    @Test
+    @DisplayName("覆盖已有文件时带上 diff——这是界面唯一能显示「改了什么」的来源")
+    void overwriteCarriesDiffForTheUi() throws Exception {
+        Files.writeString(tmp.resolve("a.txt"), "第一行\n第二行\n");
+
+        ToolResult r = call("{\"path\":\"a.txt\",\"content\":\"第一行\\n改过的第二行\\n\"}");
+
+        assertTrue(r.ok());
+        assertFalse(r.diff().isEmpty(), "覆盖写入必须带 diff");
+        // TextDiff 的格式是「符号 + 空格 + 正文」，上下文行前面是两个空格
+        assertTrue(r.diff().contains("- 第二行"), r.diff());
+        assertTrue(r.diff().contains("+ 改过的第二行"), r.diff());
+        assertTrue(r.diff().contains("@@"), "要有 hunk 抬头，界面靠它分段: " + r.diff());
+    }
+
+    @Test
+    @DisplayName("diff 不许混进 content——那是要发给模型的，它刚写完，再喂一遍是白花钱")
+    void diffStaysOutOfWhatTheModelSees() throws Exception {
+        Files.writeString(tmp.resolve("a.txt"), "旧内容\n");
+
+        ToolResult r = call("{\"path\":\"a.txt\",\"content\":\"新内容\\n\"}");
+
+        assertFalse(r.content().contains("旧内容"), "content 里不该有 diff: " + r.content());
+        assertFalse(r.content().contains("@@"), "content 里不该有 diff: " + r.content());
+        assertTrue(r.content().startsWith("已写入 a.txt"), r.content());
+    }
+
+    @Test
+    @DisplayName("新建文件的 diff 是整份内容的新增——新建一个工程时，这才是最该看的")
+    void brandNewFileShowsEverythingAsAdded() throws Exception {
+        ToolResult r = call("{\"path\":\"新的.txt\",\"content\":\"第一行\\n第二行\\n\"}");
+
+        assertTrue(r.ok());
+        // 空串的话，「写入 7 个文件」旁边一个字都看不到，而这些文件是凭空出现的
+        assertTrue(r.diff().contains("+ 第一行"), r.diff());
+        assertTrue(r.diff().contains("+ 第二行"), r.diff());
+        assertFalse(r.diff().contains("- "), "新建文件不该有删除行: " + r.diff());
+    }
+
+    @Test
+    @DisplayName("内容没变时 diff 是空的——没改动却画一个空 diff 框，只会让人以为改了")
+    void unchangedContentProducesNoDiff() throws Exception {
+        Files.writeString(tmp.resolve("a.txt"), "一模一样\n");
+
+        ToolResult r = call("{\"path\":\"a.txt\",\"content\":\"一模一样\\n\"}");
+
+        assertTrue(r.ok());
+        assertEquals("", r.diff());
+    }
+
     @Test
     @DisplayName("写入新文件")
     void writesNewFile() throws Exception {

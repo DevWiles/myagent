@@ -23,7 +23,7 @@ class ProtocolTest {
     @Test
     @DisplayName("文本增量原样带过去，一个字符都不能丢")
     void textDelta() {
-        ObjectNode n = Protocol.encode(new AgentEvent.TextDelta("你好 world\n"), 0);
+        ObjectNode n = Protocol.encode(new AgentEvent.TextDelta("你好 world\n"));
         assertEquals("text_delta", n.get("t").asText());
         assertEquals("你好 world\n", n.get("text").asText());
     }
@@ -31,8 +31,10 @@ class ProtocolTest {
     @Test
     @DisplayName("工具的开始和结束带同一个流水号，界面才能把两条配成一行")
     void toolPairsShareId() {
-        ObjectNode started = Protocol.encode(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a\"}"), 7);
-        ObjectNode finished = Protocol.encode(new AgentEvent.ToolFinished("read_file", true, "内容"), 7);
+        // 流水号由事件自带（Agent 在发起调用时编的），不再由服务端看顺序补——
+        // 并行的调用开始和结束会交错到达，只有源头发的号才配得对
+        ObjectNode started = Protocol.encode(new AgentEvent.ToolStarted(7, "read_file", "{\"path\":\"a\"}"));
+        ObjectNode finished = Protocol.encode(new AgentEvent.ToolFinished(7, "read_file", true, "内容"));
 
         assertEquals("tool_started", started.get("t").asText());
         assertEquals("tool_finished", finished.get("t").asText());
@@ -45,7 +47,7 @@ class ProtocolTest {
     @DisplayName("工具失败要带上 ok=false 和输出——界面只显示一个叉是没法排查的")
     void toolFailureCarriesOutput() {
         ObjectNode n = Protocol.encode(
-                new AgentEvent.ToolFinished("bash", false, "command not found: foo"), 1);
+                new AgentEvent.ToolFinished(1, "bash", false, "command not found: foo"));
         assertFalse(n.get("ok").asBoolean());
         assertEquals("command not found: foo", n.get("output").asText());
     }
@@ -53,7 +55,7 @@ class ProtocolTest {
     @Test
     @DisplayName("压缩事件要把前后 token 数都带上，用户有权知道丢了多少")
     void compacted() {
-        ObjectNode n = Protocol.encode(new AgentEvent.Compacted(50000, 12000, true), 0);
+        ObjectNode n = Protocol.encode(new AgentEvent.Compacted(50000, 12000, true));
         assertEquals("compacted", n.get("t").asText());
         assertEquals(50000, n.get("tokensBefore").asInt());
         assertEquals(12000, n.get("tokensAfter").asInt());
@@ -67,17 +69,45 @@ class ProtocolTest {
                 new AgentEvent.Thinking(1),
                 new AgentEvent.TextDelta("x"),
                 new AgentEvent.Thought("x"),
-                new AgentEvent.ToolStarted("t", "{}"),
-                new AgentEvent.ToolFinished("t", true, "x"),
+                new AgentEvent.ToolStarted(1, "t", "{}"),
+                new AgentEvent.ToolFinished(1, "t", true, "x"),
                 new AgentEvent.Compacted(1, 1, false),
                 new AgentEvent.Done("x", 1),
                 new AgentEvent.Failed("x"),
         };
         for (AgentEvent event : all) {
-            ObjectNode n = assertDoesNotThrow(() -> Protocol.encode(event, 0),
+            ObjectNode n = assertDoesNotThrow(() -> Protocol.encode(event),
                     () -> event.getClass().getSimpleName() + " 没有对应的报文");
             assertTrue(n.hasNonNull("t"));
         }
+    }
+
+    @Test
+    @DisplayName("写文件的 diff 随 tool_finished 一起发，界面靠它画出改了哪几行")
+    void toolFinishedCarriesDiff() {
+        ObjectNode n = Protocol.encode(new AgentEvent.ToolFinished(
+                3, "write_file", true, "已写入 a.java (12 字节, 2 行)", "@@ -1 +1 @@\n- 旧\n+ 新"));
+
+        assertTrue(n.get("diff").asText().contains("+ 新"), n.toString());
+        assertEquals("已写入 a.java (12 字节, 2 行)", n.get("output").asText());
+    }
+
+    @Test
+    @DisplayName("没有 diff 就不发这个字段——每条工具结果都挂个空串只是让报文变长")
+    void noDiffMeansNoField() {
+        ObjectNode n = Protocol.encode(new AgentEvent.ToolFinished(3, "read_file", true, "内容"));
+
+        assertFalse(n.has("diff"));
+    }
+
+    @Test
+    @DisplayName("子任务的事件标上任务号，主对话的不标——并行时界面靠它分流")
+    void taskTagTellsWhoseEventItIs() {
+        ObjectNode tagged = Protocol.encode(new AgentEvent.TextDelta("嗯"), "t3");
+        ObjectNode plain = Protocol.encode(new AgentEvent.TextDelta("嗯"));
+
+        assertEquals("t3", tagged.get("task").asText());
+        assertFalse(plain.has("task"), "主对话的事件不该背一个空任务号");
     }
 
     @Test

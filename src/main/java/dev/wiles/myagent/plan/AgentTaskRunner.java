@@ -10,7 +10,10 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
 /**
  * 真正干活的执行体：<b>每个任务开一个独立的 ReAct 子循环</b>。
@@ -42,7 +45,15 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     public static final int DEFAULT_MAX_STEPS = 0;
 
-    private final LlmClient client;
+    /**
+     * 客户端工厂，<b>每个任务现造一个</b>，不是所有子循环共用一个。
+     *
+     * <p>{@code DeepSeekClient} 带可变状态（尤其是 {@code volatile Call currentCall}，
+     * {@code cancel()} 靠它掐请求）。几个子循环同时跑时共用一个实例，
+     * 谁最后发请求谁占着 {@code currentCall}，取消就只掐得断它一个——
+     * 其余的照跑不误，用户按了停却像没按。和 {@code Precompute} 要独立客户端是同一个理由。
+     */
+    private final Supplier<LlmClient> clients;
     private final ToolRegistry allTools;
     private final Path workspaceRoot;
     /**
@@ -71,16 +82,32 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     private boolean verdictContract = true;
 
-    /** 当前正在跑的子循环，取消时要掐它。volatile：置位的是监听 Ctrl-C 的那个线程。 */
-    private volatile Agent current;
+    /**
+     * 所有正在跑的子循环，取消时要一个不漏地掐掉。
+     *
+     * <p>以前是一个 {@code volatile Agent current}——那时任务串行，同一时刻最多一个。
+     * 并行之后一个字段装不下：任务 A 跑完清掉字段，正在跑的 B 就成了掐不断的孤儿。
+     */
+    private final Set<Agent> running = ConcurrentHashMap.newKeySet();
 
+    /** 单客户端的便捷入口：串行场景和测试用。并行调用它的话取消会漏，见 {@link #clients}。 */
     public AgentTaskRunner(LlmClient client, ToolRegistry allTools, Path workspaceRoot) {
-        this(client, allTools, workspaceRoot, DEFAULT_MAX_STEPS);
+        this(() -> client, allTools, workspaceRoot, DEFAULT_MAX_STEPS);
     }
 
     public AgentTaskRunner(LlmClient client, ToolRegistry allTools, Path workspaceRoot,
                            int maxSteps) {
-        this.client = client;
+        this(() -> client, allTools, workspaceRoot, maxSteps);
+    }
+
+    public AgentTaskRunner(Supplier<LlmClient> clients, ToolRegistry allTools,
+                           Path workspaceRoot) {
+        this(clients, allTools, workspaceRoot, DEFAULT_MAX_STEPS);
+    }
+
+    public AgentTaskRunner(Supplier<LlmClient> clients, ToolRegistry allTools, Path workspaceRoot,
+                           int maxSteps) {
+        this.clients = clients;
         this.allTools = allTools;
         this.workspaceRoot = workspaceRoot;
         this.maxSteps = maxSteps;
@@ -109,10 +136,9 @@ public final class AgentTaskRunner implements TaskRunner {
         return this;
     }
 
-    /** 掐断当前子循环（连带它正在进行的 HTTP 请求）。 */
+    /** 掐断所有正在跑的子循环（连带它们正在进行的 HTTP 请求）。 */
     public void cancel() {
-        Agent agent = current;
-        if (agent != null) {
+        for (Agent agent : running) {
             agent.cancel();
         }
     }
@@ -121,7 +147,7 @@ public final class AgentTaskRunner implements TaskRunner {
     public TaskOutcome run(Task task, List<Task> upstream) {
         AgentRole role = task.role();
         Agent agent = new Agent(
-                client,
+                clients.get(),
                 toolsFor(role),
                 TaskPrompt.system(task, workspaceRoot),
                 stepsFor(role));
@@ -136,12 +162,12 @@ public final class AgentTaskRunner implements TaskRunner {
             listener.accept(task, event);
         });
 
-        current = agent;
+        running.add(agent);
         String text;
         try {
             text = agent.run(TaskPrompt.user(task, upstream));
         } finally {
-            current = null;
+            running.remove(agent);
         }
 
         if (failure[0] != null) {

@@ -3,8 +3,8 @@ package dev.wiles.myagent.prompt;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 从 classpath 读提示词片段。
@@ -33,7 +33,13 @@ public final class PromptRepository implements PromptSource {
     /** 资源根目录。改它等于换一整套提示词。 */
     static final String ROOT = "/prompts/";
 
-    private final Map<String, String> cache = new HashMap<>();
+    /**
+     * ConcurrentHashMap 而不是 HashMap：装配发生在每次构造 Agent 时，
+     * 而并行的子任务会<b>同时</b>构造各自的 Agent——普通 HashMap 的
+     * computeIfAbsent 撞上并发直接抛 ConcurrentModificationException，
+     * 症状是「任务偶发失败，重跑又好了」，这种最难查。
+     */
+    private final Map<String, String> cache = new ConcurrentHashMap<>();
 
     public static PromptRepository createDefault() {
         return new PromptRepository();

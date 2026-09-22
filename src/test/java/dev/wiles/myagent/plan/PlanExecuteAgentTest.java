@@ -37,8 +37,9 @@ class PlanExecuteAgentTest {
         int taskCalls;
         boolean cancelled;
 
+        // synchronized：任务并行之后，几个子循环会同时来点这个假模型
         @Override
-        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+        public synchronized ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
             String system = messages.get(0).content();
             String reply;
             if (system.contains("任务规划器") || system.contains("补救")) {
@@ -75,9 +76,9 @@ class PlanExecuteAgentTest {
         return sb.append("]}").toString();
     }
 
-    /** 记下 listener 收到的每一件事。 */
+    /** 记下 listener 收到的每一件事。事件表要线程安全：onAgentEvent 从并行的子循环里来。 */
     static final class Recording implements PlanListener {
-        final List<String> events = new ArrayList<>();
+        final List<String> events = java.util.Collections.synchronizedList(new ArrayList<>());
         Plan created;
         PlanResult finished;
 

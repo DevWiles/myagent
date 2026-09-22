@@ -29,12 +29,32 @@ public sealed interface AgentEvent {
     record Thought(String text) implements AgentEvent {
     }
 
-    /** 开始执行某个工具。 */
-    record ToolStarted(String tool, String arguments) implements AgentEvent {
+    /**
+     * 开始执行某个工具。
+     *
+     * @param id 这一次调用的流水号，进程内全局唯一（见 {@link Agent#nextToolId()}）。
+     *           并行安全的调用会同时执行，「开始」和「结束」在事件流里不再相邻，
+     *           界面只能靠它把两头配成同一行。以前这个号是服务端看着事件顺序补的，
+     *           那套编号法建立在「工具严格串行」上，并发一开就配错对
+     */
+    record ToolStarted(int id, String tool, String arguments) implements AgentEvent {
     }
 
-    /** 工具执行完毕，相当于 ReAct 里的 Observation。 */
-    record ToolFinished(String tool, boolean ok, String output) implements AgentEvent {
+    /**
+     * 工具执行完毕，相当于 ReAct 里的 Observation。id 和对应的 {@link ToolStarted} 一致。
+     *
+     * @param diff <b>只给界面看的</b>那份改动（统一 diff），没有就是空串。
+     *             它不进对话历史——模型刚写完那段内容，再喂它一遍 diff 是白花钱；
+     *             而用户没看过，「改了什么」正是他唯一想知道的事。
+     *             见 {@link dev.wiles.myagent.tool.ToolResult#diff()}
+     */
+    record ToolFinished(int id, String tool, boolean ok, String output, String diff)
+            implements AgentEvent {
+
+        /** 不带 diff 的那种，绝大多数工具都是。 */
+        public ToolFinished(int id, String tool, boolean ok, String output) {
+            this(id, tool, ok, output, "");
+        }
     }
 
     /**

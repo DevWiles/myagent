@@ -264,6 +264,77 @@ class AgentTaskRunnerTest {
         assertTrue(outcome.output().contains("取消"), outcome.output());
     }
 
+    @Test
+    @DisplayName("cancel 要掐断所有并行的子循环——只掐得断一个的取消等于没有取消")
+    void cancelKillsEveryRunningSubLoop() throws Exception {
+        // 两个任务各拿一个会阻塞的假客户端，模拟两个子循环同时在等模型。
+        // cancel() 该让两边都以「取消」收场——以前用单字段记「当前那个」，
+        // 并行时先跑完的会把字段清掉，另一个就成了掐不断的孤儿
+        class BlockingLlm implements LlmClient {
+            final java.util.concurrent.CountDownLatch entered =
+                    new java.util.concurrent.CountDownLatch(1);
+            final java.util.concurrent.CountDownLatch released =
+                    new java.util.concurrent.CountDownLatch(1);
+
+            @Override
+            public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+                entered.countDown();
+                try {
+                    if (!released.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new LlmException("等太久了");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new LlmException("请求已被取消");
+            }
+
+            @Override
+            public void cancel() {
+                released.countDown();   // 真客户端掐断 HTTP，这里放行并让 chat 抛异常
+            }
+
+            @Override
+            public String modelName() {
+                return "blocking";
+            }
+        }
+        List<BlockingLlm> clients = java.util.Collections.synchronizedList(new ArrayList<>());
+        AgentTaskRunner runner = new AgentTaskRunner(() -> {
+            BlockingLlm made = new BlockingLlm();
+            clients.add(made);
+            return made;
+        }, fullSet(), ROOT);
+
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var f1 = pool.submit(() -> runner.run(task("n1", TaskType.FILE_READ), List.of()));
+            var f2 = pool.submit(() -> runner.run(task("n2", TaskType.FILE_READ), List.of()));
+            waitForTwo(clients);
+            for (BlockingLlm client : List.copyOf(clients)) {
+                assertTrue(client.entered.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                        "两个子循环都该已经在等模型了");
+            }
+
+            runner.cancel();
+
+            assertFalse(f1.get(5, java.util.concurrent.TimeUnit.SECONDS).ok(), "n1 没被掐断");
+            assertFalse(f2.get(5, java.util.concurrent.TimeUnit.SECONDS).ok(), "n2 没被掐断");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** 等到两个客户端都被造出来。工厂在子循环的线程上被调，主线程只能轮询。 */
+    private static void waitForTwo(List<?> clients) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (clients.size() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(2, clients.size(), "两个任务该各造一个客户端");
+    }
+
     // ── 事件 ────────────────────────────────────────────────────
 
     @Test

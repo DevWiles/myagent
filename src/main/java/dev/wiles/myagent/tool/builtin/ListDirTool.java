@@ -44,6 +44,12 @@ public final class ListDirTool implements Tool {
         this.workspace = workspace;
     }
 
+    /** 只读，不弹审批，怎么跑都无所谓——允许和别的调用同时执行。 */
+    @Override
+    public boolean parallelSafe() {
+        return true;
+    }
+
     @Override
     public String name() {
         return "list_dir";

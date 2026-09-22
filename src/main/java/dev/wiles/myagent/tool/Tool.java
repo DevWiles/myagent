@@ -32,6 +32,23 @@ public interface Tool {
      */
     ToolResult execute(JsonNode args);
 
+    /**
+     * 能不能和别的调用<b>同时</b>执行。
+     *
+     * <p>模型一次响应里常常点好几个工具（「我先把这三个文件都读了」），
+     * 互相之间没有依赖的话串行执行纯属浪费。但「没有依赖」这件事模型不会声明，
+     * 只能由工具自己保证：<b>只有怎么跑都无所谓的工具才许说 true</b>——
+     * 也就是不改文件、不跑命令、不弹审批框的那些（读文件、列目录、搜索）。
+     *
+     * <p>默认 false 是刻意的：写文件和 bash 的执行顺序就是语义的一部分
+     * （读 a → 改 a → 再读 a，乱序就是另一段程序），审批框也只能一次弹一个。
+     * 新工具忘了覆盖这个方法，代价只是慢一点；反过来默认 true 的话，
+     * 忘了覆盖的代价是文件写坏——两种默认值错的成本差着量级。
+     */
+    default boolean parallelSafe() {
+        return false;
+    }
+
     /** 转成协议要求的工具说明书格式。 */
     default ToolSpec toSpec() {
         return ToolSpec.of(name(), description(), parametersSchema());

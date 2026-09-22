@@ -69,11 +69,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 无头模式：把 agent 挂到一个只监听本机的 WebSocket 上，界面由外部进程负责。
@@ -159,10 +159,13 @@ public final class AgentServer extends WebSocketServer {
     });
 
     private final AtomicBoolean busy = new AtomicBoolean(false);
-    /** 工具调用流水号，用来把 tool_started / tool_finished 配成一对。 */
-    private final AtomicInteger toolSeq = new AtomicInteger(0);
-    /** 上一个 tool_started 的参数，等 tool_finished 到了一起写进审计。见 recordToAudit。 */
-    private volatile String pendingToolArgs;
+    /**
+     * 每个 tool_started 的参数，按流水号存着，等对应的 tool_finished 到了一起写进审计。
+     *
+     * <p>以前是一个 volatile 字段——那时工具严格串行，「上一个开始的」就是「这次结束的」。
+     * 并行安全的调用凑批同时跑之后，开始和结束会交错到达，只有按号建表才配得对。
+     */
+    private final Map<Integer, String> pendingToolArgs = new ConcurrentHashMap<>();
     private final CountDownLatch stopped = new CountDownLatch(1);
 
     public AgentServer(CliOptions options, int port) {
@@ -326,8 +329,8 @@ public final class AgentServer extends WebSocketServer {
 
         @Override
         public void onAgentEvent(Task task, AgentEvent event) {
-            // 必须写全限定的外部类，否则解析到的是本类那个同名的两参方法，自己递归调自己
-            AgentServer.this.onAgentEvent(event);
+            // 必须写全限定的外部类，否则解析到的是本类这个同名方法，自己递归调自己
+            AgentServer.this.onAgentEvent(task, event);
         }
 
         @Override
@@ -372,8 +375,8 @@ public final class AgentServer extends WebSocketServer {
 
         @Override
         public void onAgentEvent(Task seat, AgentEvent event) {
-            // 同 ProtocolPlanView：不写全限定会解析到本类那个同名方法，自己递归调自己
-            AgentServer.this.onAgentEvent(event);
+            // 同 ProtocolPlanView：不写全限定会解析到本类这个同名方法，自己递归调自己
+            AgentServer.this.onAgentEvent(seat, event);
         }
 
         @Override
@@ -948,26 +951,32 @@ public final class AgentServer extends WebSocketServer {
     // ---------------------------------------------------------------- 发事件
 
     private void onAgentEvent(AgentEvent event) {
-        int seq = event instanceof AgentEvent.ToolStarted
-                ? toolSeq.incrementAndGet()
-                : toolSeq.get();
         recordToAudit(event);
-        publish(Protocol.encode(event, seq));
+        publish(Protocol.encode(event));
+    }
+
+    /**
+     * 计划/圆桌里子任务的事件：标上任务号再播。
+     *
+     * <p>并行的任务各自在发事件，不标出处的话，界面上两条线的动静会被
+     * 当成同一条线上的先后两步。主对话走上面那个不带号的入口。
+     */
+    private void onAgentEvent(Task task, AgentEvent event) {
+        recordToAudit(event);
+        publish(Protocol.encode(event, task.id()));
     }
 
     /**
      * 把工具调用记进审计。
      *
      * 参数只在 ToolStarted 上有、结果只在 ToolFinished 上有，所以得把参数暂存一手
-     * 等结果到了再一起落盘。
-     * 工具调用是严格串行的，所以一个字段就够，不需要按流水号建表。
+     * 等结果到了再一起落盘，按流水号配对（并行的调用开始和结束会交错到达）。
      */
     private void recordToAudit(AgentEvent event) {
         if (event instanceof AgentEvent.ToolStarted t) {
-            pendingToolArgs = t.arguments();
+            pendingToolArgs.put(t.id(), t.arguments());
         } else if (event instanceof AgentEvent.ToolFinished t) {
-            audit.toolCall(null, t.tool(), pendingToolArgs, t.ok(), t.output());
-            pendingToolArgs = null;
+            audit.toolCall(null, t.tool(), pendingToolArgs.remove(t.id()), t.ok(), t.output());
         }
     }
 

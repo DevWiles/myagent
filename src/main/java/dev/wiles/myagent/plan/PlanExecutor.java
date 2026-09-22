@@ -3,18 +3,29 @@ package dev.wiles.myagent.plan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
- * 计划执行器：拿一张图，按依赖顺序把任务一个个推到终态。
+ * 计划执行器：拿一张图，按依赖顺序把任务推到终态，互不依赖的<b>同时</b>推。
  *
  * <pre>
  *   while (图还没跑完) {
- *       ready = 图里所有依赖已满足的任务
- *       取一个 → start() → 交给 TaskRunner → succeed() 或 fail()
+ *       把就绪的任务放进池子（只读的并行，会动世界的独占）
+ *       等一个跑完 → succeed() / fail()
  *       失败了 → 顺着 dependents 把下游全标 SKIPPED
  *       是 PLANNING 且拆出了子任务 → 塞进图里，下一轮就能调度到
  *   }
@@ -24,8 +35,21 @@ import java.util.function.Consumer;
  * 因为 PLANNING 任务会让图在执行过程中长大，预先算好的层次会立刻过期。
  * 每轮重算的代价是扫一遍几十个任务，可以忽略。
  *
- * <p>目前<b>串行</b>执行：同一层的任务也是一个个来。DAG 此刻只用来定顺序，
- * 并发是后面的事——那之前得先解决两个 FILE_WRITE 任务改同一个文件的隐式冲突。
+ * <h3>并发的规矩：读共享，写独占</h3>
+ * 就绪不等于能一起跑。两个 {@code coder} 任务改同一个文件的隐式冲突，图上看不出来
+ * （依赖是模型填的，它只声明「谁要谁的产出」，不声明「谁碰哪个文件」），
+ * 所以并发按角色分流：{@link AgentRole#mutates()} 的任务<b>独占</b>运行——
+ * 它在跑时不放任何新任务，别的任务在跑时它也不进场；只读的任务随便一起跑，
+ * 它们怎么跑都不会互相踩。这条规矩顺带保住了两件事：
+ * <ul>
+ *   <li>审批框一次只弹一个——会开口要审批的只有 mutates 角色手里的工具</li>
+ *   <li>审批的「是谁在问」不会张冠李戴——独占意味着弹框那一刻场上只有它一个</li>
+ * </ul>
+ *
+ * <h3>状态只在调度线程改</h3>
+ * {@link Task} 和 {@link TaskGraph} 都没加锁，靠的是纪律：工作线程只干
+ * {@code runner.run()} 这一件事，start/succeed/fail/传播/扩图/存档全部发生在调度线程上。
+ * 交回结果那一下由 {@code Future.get()} 提供 happens-before，两边不会看到半截状态。
  *
  * <p>这个类有一条硬性要求：<b>跑完之后图里不能留下非终态的任务</b>。
  * 失败、异常、取消，每条路都得给所有任务一个交代，否则界面上会挂着一个永远转圈的任务。
@@ -34,7 +58,38 @@ public final class PlanExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(PlanExecutor.class);
 
+    /**
+     * 只读任务默认最多同时跑几个。
+     *
+     * <p>一个任务是一整个 ReAct 子循环，几步模型调用起步——瓶颈在模型服务的限流，
+     * 不在本机。三个已经能把「五个调研任务排队等」的时间砍掉大半；
+     * 再宽先撞上的是 429，反而更慢。
+     */
+    public static final int DEFAULT_PARALLELISM = 3;
+
+    /**
+     * 一个任务最多跑多久，毫秒。
+     *
+     * <p>十分钟是按<b>最慢的角色</b>算的：coder 有 12 步预算，每步一次模型调用
+     * （读超时 5 分钟）外加若干工具。正常跑完远用不到，所以这不是性能阈值，
+     * 是止损线——它防的是「某一步卡死，调度线程跟着吊住，
+     * 已经跑完的任务连存档都推不进去」。
+     *
+     * <p>并发之后这条线才真正要紧：串行时一个任务卡住只卡它自己，
+     * 现在卡的是整个调度循环。
+     */
+    public static final long DEFAULT_TASK_TIMEOUT_MILLIS = 600_000;
+
+    /** 没人跑完时，多久回头扫一次超时。扫一遍是几个元素的遍历，这个间隔的开销可以忽略。 */
+    private static final long SWEEP_INTERVAL_MILLIS = 200;
+
     private final TaskRunner runner;
+
+    /** 并发宽度。1 就是原来的串行行为，测试要确定顺序时用它。 */
+    private int parallelism = DEFAULT_PARALLELISM;
+
+    /** 单个任务的时限。{@code <= 0} 表示不限时。 */
+    private long taskTimeoutMillis = DEFAULT_TASK_TIMEOUT_MILLIS;
 
     private Consumer<Task> onStarted = task -> {
     };
@@ -123,9 +178,27 @@ public final class PlanExecutor {
         return this;
     }
 
-    /** 叫停。当前正在跑的那个任务停不下来（那是执行体自己的事），但不会再开新的。 */
+    /** 叫停。正在跑的那些任务停不下来（那是执行体自己的事），但不会再开新的。 */
     public void cancel() {
         cancelled = true;
+    }
+
+    /** 调多宽。小于 1 一律按 1 算——0 个并发的调度器什么都跑不了。 */
+    public PlanExecutor parallelism(int n) {
+        this.parallelism = Math.max(1, n);
+        return this;
+    }
+
+    /**
+     * 单个任务的时限，从它<b>进场</b>那一刻算起。
+     *
+     * <p>传 null 或非正值表示不限时，行为退回到「一直等」——只在测试里用得上。
+     * 生产环境关掉它，等于把「一个卡死的任务吊住整个调度循环」这条路重新打开。
+     */
+    public PlanExecutor taskTimeout(Duration timeout) {
+        this.taskTimeoutMillis = timeout == null || timeout.isZero() || timeout.isNegative()
+                ? 0 : timeout.toMillis();
+        return this;
     }
 
     public PlanResult execute(Plan plan) {
@@ -133,32 +206,196 @@ public final class PlanExecutor {
         plan.start();
         TaskGraph graph = plan.graph();
 
-        while (!graph.isDone()) {
-            if (cancelled) {
-                // 顺序要紧：**先存档，再把剩下的了结掉**。
-                // 存档要能续，靠的是里面那些任务还停在 PENDING、计划还停在 RUNNING；
-                // 等 skipAllPending 跑完再存，落盘的就是一份「全都了结了」的死图，
-                // 续无可续。而 Ctrl-C 恰恰是最常见的中断方式——这一行决定了
-                // 断点续跑到底是真能用，还是只在进程被 kill 时才用得上。
+        // 守护线程：存档在调度线程上、每了结一个存一次，进程退出时最多丢正在跑的那几个
+        ExecutorService pool = Executors.newFixedThreadPool(parallelism, r -> {
+            Thread t = new Thread(r, "plan-task");
+            t.setDaemon(true);
+            return t;
+        });
+        CompletionService<Finished> finish = new ExecutorCompletionService<>(pool);
+        // 正在池子里的任务。只有调度线程碰它，所以不用加锁
+        Map<String, Running> inFlight = new LinkedHashMap<>();
+
+        try {
+            while (true) {
+                if (!cancelled) {
+                    launchReady(graph, finish, inFlight);
+                }
+                if (inFlight.isEmpty()) {
+                    if (cancelled) {
+                        // 顺序要紧：**先存档，再把剩下的了结掉**。
+                        // 存档要能续，靠的是里面那些任务还停在 PENDING、计划还停在 RUNNING；
+                        // 等 skipAllPending 跑完再存，落盘的就是一份「全都了结了」的死图，
+                        // 续无可续。而 Ctrl-C 恰恰是最常见的中断方式——这一行决定了
+                        // 断点续跑到底是真能用，还是只在进程被 kill 时才用得上。
+                        checkpoint(plan);
+                        skipAllPending(graph, "已取消");
+                        break;
+                    }
+                    if (graph.isDone()) {
+                        break;
+                    }
+                    // 图没跑完、池子空着、也没人能进场——只可能是失败扩散漏了谁。
+                    // 与其在这儿静默死循环，不如把剩下的了结掉并留个日志。
+                    log.error("调度停滞：图没跑完却没有就绪任务，剩余 {} 个", pendingCount(graph));
+                    skipAllPending(graph, "调度停滞，没有可执行的上游");
+                    break;
+                }
+
+                Future<Finished> ready;
+                try {
+                    // 有时限就轮着等，好腾出手去扫超时；不限时就老老实实挂在 take() 上
+                    ready = taskTimeoutMillis > 0
+                            ? finish.poll(SWEEP_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+                            : finish.take();
+                } catch (InterruptedException e) {
+                    // 调度线程自己被中断了。没法再等池子里的结果，按取消收场：
+                    // 存档留在「还能续」的状态，正在跑的那几个由 settle() 记一条调度漏账
+                    Thread.currentThread().interrupt();
+                    cancelled = true;
+                    checkpoint(plan);
+                    skipAllPending(graph, "已取消");
+                    break;
+                }
+                if (ready == null) {
+                    // 这一轮没人跑完。看看有没有谁超时了——超时的当场判失败，
+                    // 别的任务照跑；不扫的话，一个卡死的任务会把调度线程吊住，
+                    // 连带已经跑完的那些**结果收不回来、存档也推不进去**
+                    if (sweepOverdue(plan, graph, inFlight)) {
+                        checkpoint(plan);
+                    }
+                    continue;
+                }
+                Finished done = resolve(ready);
+                if (done == null) {
+                    continue;   // 被超时扫描掐掉的，那边已经了结过它了
+                }
+                inFlight.remove(done.task().id());
+                settleOne(plan, graph, done.task(), done.outcome());
                 checkpoint(plan);
-                skipAllPending(graph, "已取消");
-                break;
             }
-
-            List<Task> ready = graph.ready();
-            if (ready.isEmpty()) {
-                // 图没跑完却没人能跑——只可能是失败扩散漏了谁。
-                // 与其在这儿静默死循环，不如把剩下的了结掉并留个日志。
-                log.error("调度停滞：图没跑完却没有就绪任务，剩余 {} 个", pendingCount(graph));
-                skipAllPending(graph, "调度停滞，没有可执行的上游");
-                break;
-            }
-
-            runOne(plan, graph, ready.get(0));
-            checkpoint(plan);
+        } finally {
+            pool.shutdownNow();
         }
 
         return settle(plan);
+    }
+
+    /**
+     * 把当前能进场的任务放进池子。
+     *
+     * <p>规矩见类注释：会动世界的任务（{@link AgentRole#mutates()}）独占——
+     * 场上空着才进，进了别人就得等；只读任务共享，受 {@link #parallelism} 封顶。
+     * 只读任务可以越过一个在等的写任务先跑（图是有限的，写任务不会饿死），
+     * 反过来不行——写任务永远等到场上清空。
+     *
+     * <p>{@code start()} 和 {@code onStarted} 都在调度线程上做完<b>再</b>提交，
+     * 状态迁移不出调度线程，这是全类不加锁的前提。
+     */
+    private void launchReady(TaskGraph graph, CompletionService<Finished> finish,
+                             Map<String, Running> inFlight) {
+        boolean mutatingInFlight = inFlight.values().stream()
+                .anyMatch(r -> r.task().role().mutates());
+        for (Task task : graph.ready()) {
+            if (inFlight.containsKey(task.id())) {
+                continue;
+            }
+            if (task.role().mutates()) {
+                if (!inFlight.isEmpty()) {
+                    continue;       // 等场上清空，独占进场
+                }
+            } else if (mutatingInFlight || inFlight.size() >= parallelism) {
+                continue;
+            }
+
+            task.start();
+            onStarted.accept(task);
+            List<Task> upstream = upstreamOf(graph, task);   // 在调度线程上取好再交出去
+            Future<Finished> future =
+                    finish.submit(() -> new Finished(task, runSafely(task, upstream)));
+            // 计时从**进场**算起，不是从任务被规划出来算起：排队等在外面的时间
+            // 不是这一步的成本，算进去的话，宽度调小一点就会开始有任务凭空超时
+            inFlight.put(task.id(), new Running(task, future,
+                    System.nanoTime() + taskTimeoutMillis * 1_000_000L));
+
+            if (task.role().mutates()) {
+                return;             // 独占：这一轮不再放任何人
+            }
+        }
+    }
+
+    /**
+     * 把超时的任务判掉。
+     *
+     * <h3>为什么超时是「这一步失败」，而不是「整个计划失败」</h3>
+     * 失败是图上已有的语义：下游顺着 dependents 跳过、重规划还有机会补救、
+     * 存档照常推进。超时只是失败的一个新来源，不该另起一套收场方式。
+     *
+     * <h3>掐得干净吗：不保证</h3>
+     * {@code cancel(true)} 只给工作线程设一个中断标志。{@link dev.wiles.myagent.agent.Agent}
+     * 认这个标志（见它的 {@code shouldStop}），所以子循环最多再走完手上这一步就收口——
+     * 但那一步里如果正卡在 HTTP 读上（最长 5 分钟）或者一条 bash 上（最长 5 分钟），
+     * 它还会跑一会儿，期间<b>甚至可能还会写文件</b>。
+     *
+     * <p>这是刻意接受的：硬杀一个正在写文件的线程，留下的半截文件比多跑一会儿更糟。
+     * 保证的是<b>调度这边不再等它</b>——下游已经跳过，它的产出不会被任何人采信。
+     *
+     * @return 有没有判掉谁（判掉了就该存一次档）
+     */
+    private boolean sweepOverdue(Plan plan, TaskGraph graph, Map<String, Running> inFlight) {
+        long now = System.nanoTime();
+        List<Running> overdue = inFlight.values().stream()
+                .filter(r -> now - r.deadline() >= 0)
+                .toList();
+        for (Running r : overdue) {
+            log.warn("任务 {} 超过 {} 毫秒还没跑完，按失败处理", r.task().id(), taskTimeoutMillis);
+            r.future().cancel(true);
+            inFlight.remove(r.task().id());
+            settleOne(plan, graph, r.task(), TaskOutcome.failed(
+                    "这一步超时了（上限 " + taskTimeoutMillis + " 毫秒），没能在时限内收口"));
+        }
+        return !overdue.isEmpty();
+    }
+
+    /**
+     * 在工作线程上跑一个任务。<b>只跑，不动状态</b>——状态迁移是调度线程的事。
+     *
+     * <p>执行体是外部实现，可能没兜住异常。绝不能让它把整个计划打穿——
+     * 和 ToolRegistry 对工具的态度一样：翻译成一次失败，接着调度别的腿。
+     */
+    private TaskOutcome runSafely(Task task, List<Task> upstream) {
+        try {
+            return runner.run(task, upstream);
+        } catch (RuntimeException e) {
+            log.error("任务 {} 的执行体抛出异常", task.id(), e);
+            return TaskOutcome.failed(e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * 取一个已经跑完的结果。<b>返回 null 表示这个结果不用管了</b>——
+     * 它是被超时扫描掐掉的那个，任务在那边已经了结过，再settle一次会撞状态机。
+     */
+    private static Finished resolve(Future<Finished> ready) {
+        try {
+            return ready.get();
+        } catch (CancellationException e) {
+            return null;                    // 超时扫描掐的，那边已经判过了
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException e) {
+            // runSafely 把 RuntimeException 都翻译掉了，能到这儿的只有 Error 级的意外
+            throw new IllegalStateException("任务执行线程出了兜不住的意外", e.getCause());
+        }
+    }
+
+    /** 一个任务的了结现场：谁、跑成什么样。 */
+    private record Finished(Task task, TaskOutcome outcome) {
+    }
+
+    /** 池子里正跑着的一个任务：是谁、怎么掐它、什么时候算超时。 */
+    private record Running(Task task, Future<Finished> future, long deadline) {
     }
 
     /**
@@ -210,19 +447,8 @@ public final class PlanExecutor {
         }
     }
 
-    private void runOne(Plan plan, TaskGraph graph, Task task) {
-        task.start();
-        onStarted.accept(task);
-        TaskOutcome outcome;
-        try {
-            outcome = runner.run(task, upstreamOf(graph, task));
-        } catch (RuntimeException e) {
-            // 执行体是外部实现，可能没兜住异常。绝不能让它把整个计划打穿——
-            // 和 ToolRegistry 对工具的态度一样：翻译成一次失败，接着调度别的腿。
-            log.error("任务 {} 的执行体抛出异常", task.id(), e);
-            outcome = TaskOutcome.failed(e.getClass().getSimpleName() + ": " + e.getMessage());
-        }
-
+    /** 把一个跑完的任务了结掉。只在调度线程上调——它会动任务状态、动图、动计划。 */
+    private void settleOne(Plan plan, TaskGraph graph, Task task, TaskOutcome outcome) {
         if (!outcome.ok()) {
             failAndPropagate(plan, graph, task, outcome.output());
             return;
