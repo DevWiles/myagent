@@ -26,6 +26,13 @@ class SessionStore {
     private var keySeq = 0
     private fun nextKey(prefix: String) = "$prefix-${++keySeq}"
 
+    /**
+     * 本连接的 id，随机、每次进程启动重新生成（协议 3.15）。
+     * 发命令时带上，收到自己那条 user_message 回显就跳过——本地已经即时回显过了。
+     * **不持久化**：持久化的话，重启后自己以前说过的话会被当成「本地已有」而整段消失。
+     */
+    val clientId: String = (1..8).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("")
+
     /** 当前那根压缩进度条 / 计划面板 / 流水线面板的 key。语义同 TUI（多半不在队尾）。 */
     private var compactingKey: String? = null
     private var planKey: String? = null
@@ -202,6 +209,15 @@ class SessionStore {
                         contextLimit = event.contextLimit ?: it.contextLimit,
                         lastDurationMs = event.durationMs ?: it.lastDurationMs,
                     )
+                }
+            }
+
+            is ServerEvent.UserMessage -> {
+                // 只画别的界面说的话；自己那条在按发送时就画过了
+                if (event.cid != clientId) {
+                    _state.update {
+                        it.copy(entries = it.entries + Entry.User(nextKey("user"), event.text))
+                    }
                 }
             }
 

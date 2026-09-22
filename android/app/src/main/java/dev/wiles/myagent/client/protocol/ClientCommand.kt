@@ -35,9 +35,9 @@ object ClientCommand {
      */
     fun hello(since: Long) = cmd("hello", "since" to since.toInt())
 
-    fun prompt(text: String) = cmd("prompt", "text" to text)
-    fun plan(goal: String) = cmd("plan", "goal" to goal)
-    fun team(goal: String) = cmd("team", "goal" to goal)
+    fun prompt(text: String, cid: String) = cmd("prompt", "text" to text, "cid" to cid)
+    fun plan(goal: String, cid: String) = cmd("plan", "goal" to goal, "cid" to cid)
+    fun team(goal: String, cid: String) = cmd("team", "goal" to goal, "cid" to cid)
     fun resumePlan() = cmd("resume_plan")
     fun continueSession() = cmd("continue")
     fun planConfirmReply(id: Int, approved: Boolean) =

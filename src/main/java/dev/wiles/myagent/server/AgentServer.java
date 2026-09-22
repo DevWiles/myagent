@@ -157,10 +157,11 @@ public final class AgentServer extends WebSocketServer {
     /**
      * 广播事件的流水账（编号 + 留底），断线重连补发用（协议 1.2 节）。
      *
-     * <p>容量按「一轮长回答」估：text_delta 一轮上千条，4096 大约兜得住
-     * 最近两三轮。手机过个电梯是几十秒，够；睡一觉回来就该走 /continue 了。
+     * <p>按字节封顶（8MB），不按条数——一轮长回答的 text_delta 就有几千条，
+     * 按条数留 4096 的话，手机重连拿到的永远只有最新一轮。8MB 大约兜得住
+     * 几十轮对话；补发时连续 delta 会合并，实际发出去远小于这个数。
      */
-    private final EventLog events = new EventLog(4096);
+    private final EventLog events = new EventLog(8 * 1024 * 1024);
 
     /**
      * 中继连接。没加 {@code --relay} 时是 null，那时一切和以前一模一样。
@@ -596,14 +597,16 @@ public final class AgentServer extends WebSocketServer {
         }
         String type = Protocol.str(cmd, "t", "");
         switch (type) {
-            case "prompt" -> handlePrompt(peer, Protocol.str(cmd, "text", "").trim());
+            case "prompt" -> handlePrompt(peer, Protocol.str(cmd, "text", "").trim(),
+                    Protocol.str(cmd, "cid", ""));
             case "cancel" -> handleCancel();
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"),
                     Protocol.strings(cmd, "rules"), Protocol.str(cmd, "feedback", ""));
-            case "plan" -> handlePlan(peer, Protocol.str(cmd, "goal", "").trim());
+            case "plan" -> handlePlan(peer, Protocol.str(cmd, "goal", "").trim(),
+                    Protocol.str(cmd, "cid", ""));
             case "team" -> handleTeam(peer, Protocol.str(cmd, "goal", "").trim(),
-                    Protocol.strings(cmd, "roles"));
+                    Protocol.strings(cmd, "roles"), Protocol.str(cmd, "cid", ""));
             // resume 是老名字（那会儿只有计划能续）。终端那边已经改叫 /resume-plan，
             // 协议这边两个都认：改名不该让还没更新的界面连不上
             case "resume", "resume_plan" -> handleResume(peer);
@@ -622,7 +625,7 @@ public final class AgentServer extends WebSocketServer {
         }
     }
 
-    private void handlePrompt(Peer peer, String text) {
+    private void handlePrompt(Peer peer, String text, String cid) {
         if (agent == null) {
             peer.send(error("没有配置 API key，无法对话。设置环境变量 DEEPSEEK_API_KEY "
                     + "或写进 ~/.myagent/config.json"));
@@ -635,6 +638,9 @@ public final class AgentServer extends WebSocketServer {
             peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
+        // 先播「用户说了这句话」，再播 busy——顺序就是屏幕上该出现的顺序。
+        // 少了这一条，另一块屏上会凭空冒出一段回答（协议 3.15）
+        publish(Protocol.encodeUserMessage(text, "normal", cid));
         publish(Protocol.event("busy").put("busy", true));
 
         // 看一眼这句话该不该改走规划。**ASK 在这儿并到 PLAN**：无头模式问不了，
@@ -675,7 +681,7 @@ public final class AgentServer extends WebSocketServer {
      * 编排本身归 {@link PlanExecuteAgent}，这儿只负责把过程翻译成事件发出去，
      * 以及用 {@link PlanConfirmation} 等界面回一句「跑不跑」。
      */
-    private void handlePlan(Peer peer, String goal) {
+    private void handlePlan(Peer peer, String goal, String cid) {
         if (planner == null) {
             peer.send(error("没有配置 API key，无法规划"));
             return;
@@ -687,6 +693,7 @@ public final class AgentServer extends WebSocketServer {
             peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
+        publish(Protocol.encodeUserMessage(goal, "plan", cid));
         publish(Protocol.event("busy").put("busy", true));
         worker.submit(() -> runPlan(goal));
     }
@@ -704,7 +711,7 @@ public final class AgentServer extends WebSocketServer {
      * <p>{@code roles} 字段已废弃：分工由规划工序决定（它给每个任务派角色）。
      * 老界面传了就忽略——废弃字段报错等于把还没更新的界面锁在门外。
      */
-    private void handleTeam(Peer peer, String goal, List<String> roleIds) {
+    private void handleTeam(Peer peer, String goal, List<String> roleIds, String cid) {
         if (pipeline == null) {
             peer.send(error("没有配置 API key，无法开流水线"));
             return;
@@ -719,6 +726,7 @@ public final class AgentServer extends WebSocketServer {
             peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
+        publish(Protocol.encodeUserMessage(goal, "team", cid));
         publish(Protocol.event("busy").put("busy", true));
         worker.submit(() -> runTeam(goal));
     }

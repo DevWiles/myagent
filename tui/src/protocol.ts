@@ -225,6 +225,13 @@ export type ServerEvent =
     }
   | { t: 'reset_done' }
   /**
+   * 用户说了一句话（协议 3.15）。**广播给所有界面**，不只是发起方。
+   *
+   * `cid` 是发起方的连接 id：自己那条要跳过，因为本地已经即时回显过了。
+   * 没有这条的话，另一块屏上会凭空冒出一段回答。
+   */
+  | { t: 'user_message'; text: string; mode: 'normal' | 'plan' | 'team'; cid?: string }
+  /**
    * 这个工作区的会话历史，只回给问的那个连接。
    *
    * 不在 ready 帧里：一个工作区能攒几十段，而首帧每次连上来都要发。
@@ -338,8 +345,9 @@ export type ServerEvent =
 export type ApprovalDecision = 'yes' | 'no' | 'always'
 
 export type ClientCommand =
-  | { t: 'prompt'; text: string }
-  | { t: 'plan'; goal: string }
+  /** `cid` 是本连接的 id，用来在收到回显时认出「这是我自己刚说的」（协议 3.15）。 */
+  | { t: 'prompt'; text: string; cid?: string }
+  | { t: 'plan'; goal: string; cid?: string }
   /**
    * 开一条流水线（feature: `team`）：拟方案 → 并行施工 → 验收，
    * 打回可重新执行或重新规划。
@@ -347,7 +355,7 @@ export type ClientCommand =
    * `roles` 字段**已废弃**：分工由规划工序决定（它给每个任务派角色）。
    * 服务端收到会忽略，界面一律传空数组。
    */
-  | { t: 'team'; goal: string; roles?: string[] }
+  | { t: 'team'; goal: string; roles?: string[]; cid?: string }
   /**
    * 接着跑上次没跑完的计划。没有存档时后端回 error。
    *

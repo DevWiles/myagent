@@ -149,3 +149,23 @@ class SessionStoreTest {
         assertTrue(notice.text.contains("5"))
     }
 }
+
+class UserEchoTest {
+
+    @Test
+    fun `别的界面说的话要画出来`() {
+        val s = SessionStore()
+        s.apply(parseServerEvent("""{"t":"user_message","text":"终端里说的","mode":"normal","cid":"tui-1"}""")!!)
+        val entry = s.state.value.entries.single() as Entry.User
+        assertEquals("终端里说的", entry.text)
+    }
+
+    @Test
+    fun `自己那条跳过——本地已即时回显`() {
+        val s = SessionStore()
+        s.submitPrompt("我说的")
+        s.apply(parseServerEvent(
+            """{"t":"user_message","text":"我说的","mode":"normal","cid":"${s.clientId}"}""")!!)
+        assertEquals(1, s.state.value.entries.size)
+    }
+}

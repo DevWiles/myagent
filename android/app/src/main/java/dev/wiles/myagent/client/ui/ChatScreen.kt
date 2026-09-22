@@ -74,11 +74,12 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
         val text = draft.trim()
         if (text.isEmpty() || state.busy) return
         client.store.submitPrompt(text)
+        val cid = client.store.clientId
         client.send(
             when (state.mode) {
-                Mode.NORMAL -> ClientCommand.prompt(text)
-                Mode.PLAN -> ClientCommand.plan(text)
-                Mode.TEAM -> ClientCommand.team(text)
+                Mode.NORMAL -> ClientCommand.prompt(text, cid)
+                Mode.PLAN -> ClientCommand.plan(text, cid)
+                Mode.TEAM -> ClientCommand.team(text, cid)
             },
         )
         draft = ""

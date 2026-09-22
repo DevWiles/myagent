@@ -232,6 +232,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `pong` | — | 对 `ping` 的回应 |
 | `reset_done` | — | `/clear` 成功。**不删存档**，见 3.9 |
 | `session_list` | `sessions[]` `currentId` | 会话历史，只回给问的那个连接，见 3.9 |
+| `user_message` | `text` `mode` `cid` | **用户说了一句话**。广播给所有界面，见 3.15 |
 
 `ready` 的完整字段：
 
@@ -849,12 +850,46 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 
 ---
 
+### 3.15 用户说的话也要广播（feature: `user_echo`）
+
+有第二块屏之后，最先露馅的是这个：**用户消息从来没进过协议**。
+两个界面各自把「我刚说的那句」写进自己的转录，然后发一条 `prompt` 给后端——
+于是手机上说的话，终端里只会凭空冒出一段回答；反过来也一样。
+
+所以后端在接受 `prompt` / `plan` / `team` 时**广播一条 `user_message`**：
+
+```json
+{"t":"user_message","seq":42,"text":"把 README 补全","mode":"plan","cid":"a3f9"}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `text` | 用户原话 |
+| `mode` | `normal` / `plan` / `team`，这句话是按哪种方式跑的 |
+| `cid` | **发起方的连接 id**（客户端连上时自己生成的随机串） |
+
+#### `cid` 是干什么的
+
+发起方**已经在本地即时回显过**了——按下回车到后端回第一个事件之间，
+屏幕上不能是空的，那会让人以为按键丢了（终端版早就是这么做的）。
+所以发起方收到自己那条 `user_message` 时要**跳过**，靠的就是 `cid` 对得上。
+
+**`cid` 必须每次连接重新生成，不能持久化。** 重连之后补发历史时，
+老的那些 `user_message` 带的是上一个 `cid`——对不上，于是照常显示。
+持久化的话，客户端重启后会把自己以前说过的每一句话都当成「本地已经有了」而跳过，
+转录就缺一半，而且缺得毫无征兆。
+
+客户端发 `prompt` / `plan` / `team` 时带上自己的 `cid`；不带也能用，
+只是发起方会看到自己那句话显示两遍（一次本地、一次回显）。
+
+---
+
 ## 4. 界面 → 服务端
 
 | `t` | 字段 | 说明 |
 |---|---|---|
-| `prompt` | `text` | 普通一轮对话 |
-| `plan` | `goal` | 先规划后执行 |
+| `prompt` | `text` `cid?` | 普通一轮对话。`cid` 见 3.15 |
+| `plan` | `goal` `cid?` | 先规划后执行 |
 | `team` | `goal` | 开一条流水线（feature: `team`），见 3.14。`roles` 字段已废弃，传了会被忽略 |
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always`，`rules[]`（可选），`feedback`（可选） | 回应 `approval_request`。见 3.3 |

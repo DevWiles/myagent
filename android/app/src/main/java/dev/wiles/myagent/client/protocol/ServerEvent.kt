@@ -156,6 +156,14 @@ sealed interface ServerEvent {
     ) : ServerEvent
 
     data class ResetDone(override val seq: Long?) : ServerEvent
+
+    /**
+     * 用户说了一句话（协议 3.15）。广播给所有界面——手机上要能看见终端里说的话。
+     * `cid` 是发起方的连接 id，自己那条要跳过（本地已即时回显）。
+     */
+    data class UserMessage(
+        override val seq: Long?, val text: String, val mode: String, val cid: String,
+    ) : ServerEvent
     data class SessionList(
         override val seq: Long?, val currentId: String, val sessions: List<SessionRow>,
     ) : ServerEvent
@@ -358,6 +366,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
         )
 
         "reset_done" -> ServerEvent.ResetDone(seq)
+        "user_message" -> ServerEvent.UserMessage(seq, o.str("text"), o.str("mode"), o.str("cid"))
 
         "session_list" -> ServerEvent.SessionList(seq, o.str("currentId"), o.objects("sessions").map {
             SessionRow(

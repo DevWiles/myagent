@@ -229,18 +229,18 @@ export function createSession(options: BackendOptions): Session {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了
       store.submitPrompt(text)
-      send({ t: "prompt", text })
+      send({ t: "prompt", text, cid: store.clientId })
     },
     plan(goal) {
       // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
       // 常驻模式标识回答，而转录里紧跟着就是计划面板。
       // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
       store.submitPrompt(goal)
-      send({ t: "plan", goal })
+      send({ t: "plan", goal, cid: store.clientId })
     },
     team(goal, roles) {
       store.submitPrompt(roles.length === 0 ? goal : `${roles.join(" ")} ${goal}`)
-      send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
+      send({ t: "team", goal, cid: store.clientId, ...(roles.length > 0 ? { roles } : {}) })
     },
     cycleMode() {
       store.cycleMode()
