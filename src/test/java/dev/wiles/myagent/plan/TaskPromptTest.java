@@ -43,6 +43,27 @@ class TaskPromptTest {
     }
 
     @Test
+    @DisplayName("别的角色收到的是完成行，不是结论行——两句话问的不是一件事")
+    void otherRolesGetTheCompletionContract() {
+        Task task = new Task("n1", "填个表单", TaskType.COMMAND, List.of());
+
+        String prompt = TaskPrompt.system(task, ROOT);
+
+        assertTrue(prompt.contains(TaskPrompt.DONE_YES));
+        assertTrue(prompt.contains(TaskPrompt.DONE_NO));
+        assertFalse(prompt.contains(TaskPrompt.VERDICT_PASS),
+                "结论行是「被验的东西过了吗」，别的角色收到它只会跑去评价东西好不好");
+    }
+
+    @Test
+    @DisplayName("验证角色反过来：只收结论行，不收完成行")
+    void verifierDoesNotGetTheCompletionContract() {
+        Task task = new Task("n1", "跑测试", TaskType.VERIFICATION, List.of());
+
+        assertFalse(TaskPrompt.system(task, ROOT).contains(TaskPrompt.DONE_YES));
+    }
+
+    @Test
     @DisplayName("分析任务被告知没有工具，别去尝试调用")
     void analysisPromptSaysNoTools() {
         Task task = new Task("n1", "总结一下", TaskType.ANALYSIS, List.of());

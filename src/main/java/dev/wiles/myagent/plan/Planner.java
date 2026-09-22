@@ -136,7 +136,7 @@ public final class Planner {
      */
     public List<Task> planSubTasks(Task parent, String findings) {
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(ChatMessage.system(PlanPrompt.subPlanSystem(readOnly)));
+        messages.add(ChatMessage.system(PlanPrompt.subPlanSystem(readOnly, context)));
         messages.add(ChatMessage.user(PlanPrompt.subPlanUser(parent, findings)));
 
         return attempt(messages, "子规划", reply -> {
@@ -158,7 +158,7 @@ public final class Planner {
      */
     public List<Task> replan(Plan plan, Task failed, String error) {
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(ChatMessage.system(PlanPrompt.replanSystem(readOnly)));
+        messages.add(ChatMessage.system(PlanPrompt.replanSystem(readOnly, context)));
         messages.add(ChatMessage.user(PlanPrompt.replanUser(plan, failed, error)));
 
         return attempt(messages, "重规划", reply -> {

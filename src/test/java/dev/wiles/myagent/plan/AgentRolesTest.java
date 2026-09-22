@@ -38,12 +38,22 @@ class AgentRolesTest {
     }
 
     @Test
-    @DisplayName("每个角色写的工具名都真的存在——打错一个字母就是少一件工具，而且不报错")
+    @DisplayName("每个角色写的内置工具名都真的存在——打错一个字母就是少一件工具，而且不报错")
     void everyRoleReferencesRealTools(@TempDir Path workspace) {
         Set<String> real = realToolNames(workspace);
 
         for (AgentRole role : AgentRoles.all()) {
             for (String name : role.tools()) {
+                if (name.startsWith("mcp__")) {
+                    // 外挂工具在运行时才存在，这里对不上表是正常的。
+                    // 但它必须是通配写法——写死全名等于假设用户的 mcp.json
+                    // 里那个 server 一定叫某个名字，而那个 key 是用户自己起的
+                    assertTrue(name.endsWith("*"),
+                            "角色 " + role.id() + " 把外挂工具写成了全名 " + name
+                                    + "：server 那一截是用户在 mcp.json 里自己起的 key，"
+                                    + "写死等于假设所有人都叫这个名字");
+                    continue;
+                }
                 assertTrue(real.contains(name),
                         "角色 " + role.id() + " 要的工具 " + name + " 在内置工具里不存在");
             }
@@ -72,7 +82,10 @@ class AgentRolesTest {
             if (!role.mutates()) {
                 continue;
             }
-            assertTrue(role.tools().stream().anyMatch(DANGEROUS::contains),
+            // 外挂工具一律算危险：远端那头做什么我们无从判断，
+            // 它叫 query 也可能在写库——和 McpTool 不覆盖 parallelSafe 是同一条理由
+            assertTrue(role.tools().stream()
+                            .anyMatch(name -> DANGEROUS.contains(name) || name.startsWith("mcp__")),
                     "角色 " + role.id() + " 声明 mutates=true 却一件危险工具都没有，"
                             + "白白在只读模式下被过滤掉");
         }
@@ -113,24 +126,58 @@ class AgentRolesTest {
     }
 
     @Test
-    @DisplayName("验证角色的提示词里写着那两行结论——判定成败全靠它")
-    void verifierPromptDeclaresTheVerdictLines() {
-        String rules = AgentRoles.VERIFIER.rules();
-
-        assertTrue(rules.contains(TaskPrompt.VERDICT_PASS), "缺了「" + TaskPrompt.VERDICT_PASS
-                + "」，模型不会这么收尾，AgentTaskRunner 只能判它失败");
-        assertTrue(rules.contains(TaskPrompt.VERDICT_FAIL));
-        assertTrue(AgentRoles.VERIFIER.requiresVerdict(),
-                "提示词要求了结论行，代码却不检查，等于要求了个寂寞");
+    @DisplayName("验证角色要结论行，而且代码真的会去检查它")
+    void verifierDemandsTheVerdictLines() {
+        // 那两行的字面量已经不在 verifier.md 里了——改由 TaskPrompt 从常量拼进
+        // modes/task.md 的占位符，所以「提示词要的」和「代码判的」必然同源。
+        // 这里只钉住标志位：提示词要求了结论行、代码却不检查，等于要求了个寂寞
+        assertTrue(AgentRoles.VERIFIER.requiresVerdict());
+        assertFalse(AgentRoles.VERIFIER.rules().contains(TaskPrompt.VERDICT_PASS),
+                "结论行的措辞该只有一处出处（TaskPrompt），角色正文里再写一遍就会两处对不上");
     }
 
     @Test
-    @DisplayName("只有验证角色要结论行——别的角色被这么判会莫名其妙全成功")
+    @DisplayName("只有验证角色收「结论行」——别的角色收的是「完成行」，问的不是一件事")
     void onlyVerifierRequiresAVerdict() {
         List<AgentRole> withVerdict = AgentRoles.all().stream()
                 .filter(AgentRole::requiresVerdict).toList();
 
         assertEquals(List.of(AgentRoles.VERIFIER), withVerdict);
+    }
+
+    @Test
+    @DisplayName("白名单里的通配只对上 MCP 工具，一个内置工具都不许漏进来")
+    void wildcardOnlyReachesMcpTools() {
+        AgentRole browser = AgentRoles.BROWSER;
+
+        assertTrue(browser.matches("mcp__chrome__click"));
+        assertTrue(browser.matches("mcp__chrome-devtools__take_snapshot"),
+                "server 那一截是用户自己起的 key，chrome 开头的都该认");
+        assertFalse(browser.matches("bash"));
+        assertFalse(browser.matches("write_file"));
+        assertFalse(browser.matches("mcp__fs__write_file"),
+                "别家 server 的工具不该跟着浏览器角色进来");
+        assertFalse(browser.matches(null));
+    }
+
+    @Test
+    @DisplayName("非 MCP 的条目不许写通配——放开了，一个「b*」就能把 bash 递给只读角色")
+    void wildcardIsRefusedForBuiltinTools() {
+        IllegalArgumentException boom = assertThrows(IllegalArgumentException.class,
+                () -> new AgentRole("sloppy", "手滑", "随便写写",
+                        TaskType.FILE_READ, List.of("b*"), 5, false, false));
+
+        assertTrue(boom.getMessage().contains("b*"));
+        assertTrue(boom.getMessage().contains("mcp__"), "报错要说清哪种条目才许用 *");
+    }
+
+    @Test
+    @DisplayName("精确条目还是精确的——通配是加进来的能力，不是把匹配整个放松了")
+    void exactEntriesStayExact() {
+        assertTrue(AgentRoles.OPERATOR.matches("bash"));
+        assertFalse(AgentRoles.OPERATOR.matches("bash_extra"));
+        assertFalse(AgentRoles.OPERATOR.matches("mcp__chrome__click"),
+                "执行角色不该顺手拿到浏览器——那是另一种姿势，见 BROWSER 的注释");
     }
 
     @Test

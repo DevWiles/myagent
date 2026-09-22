@@ -52,7 +52,7 @@ public final class PlanPrompt {
         return ASSEMBLER.assemble(PromptMode.PLANNER, PromptContext.builder()
                 .variable("minTasks", String.valueOf(PlanLimits.MIN_TASKS))
                 .variable("maxTasks", String.valueOf(PlanLimits.MAX_TASKS))
-                .variable("roles", roleMenu(AgentRoles.runnable(readOnly)))
+                .variable("roles", roleMenu(staffed(AgentRoles.runnable(readOnly), context)))
                 .build())
                 + readOnlyRule(readOnly) + forbiddenRule(context) + situation(context);
     }
@@ -77,9 +77,36 @@ public final class PlanPrompt {
     }
 
     /** 第二层和补救都不许再摸底，所以菜单里拿掉规划角色。 */
-    private static List<AgentRole> nonPlanningRoles(boolean readOnly) {
-        return AgentRoles.runnable(readOnly).stream()
+    private static List<AgentRole> nonPlanningRoles(boolean readOnly, PlanContext context) {
+        return staffed(AgentRoles.runnable(readOnly), context).stream()
                 .filter(role -> role.taskType() != TaskType.PLANNING)
+                .toList();
+    }
+
+    /**
+     * 剔掉「要工具却一个也没有」的角色。
+     *
+     * <h3>为什么这一步非做不可</h3>
+     * 角色的白名单是<b>写死的名册</b>，而工具是<b>现场注册的</b>——两边对不上时，
+     * 规划器照样会把这个角色派出去，执行器却给它一份空菜单。实测过一次代价：
+     * 计划写得完美（七步全用 {@code mcp__chrome__*}），执行时每一步都回
+     * 「我的工具集里没有这个工具」，而计划收在 {@code COMPLETED ok=7 fail=0}。
+     * 界面全绿，一步没做。
+     *
+     * <p>判据是「要了却没兑现」：{@code analyst} 本来就一个工具都不要
+     * （它该基于上游材料想），那不是没兑现，不能剔。
+     *
+     * <p>{@link PlanContext#none()} 这种没带现场信息的调用<b>一个都不剔</b>：
+     * 不知道注册了什么，就不该替调用方下判断——那会把「没告诉我」当成「没有」。
+     */
+    private static List<AgentRole> staffed(List<AgentRole> roles, PlanContext context) {
+        if (context == null || !context.hasTools()) {
+            return roles;
+        }
+        List<String> available = context.tools().stream().map(PlanContext.ToolBrief::name).toList();
+        return roles.stream()
+                .filter(role -> role.tools().isEmpty()
+                        || available.stream().anyMatch(role::matches))
                 .toList();
     }
 
@@ -144,9 +171,13 @@ public final class PlanPrompt {
     }
 
     public static String subPlanSystem(boolean readOnly) {
+        return subPlanSystem(readOnly, PlanContext.none());
+    }
+
+    public static String subPlanSystem(boolean readOnly, PlanContext context) {
         return ASSEMBLER.assemble(PromptMode.PLANNER_SUB, PromptContext.builder()
                 .variable("maxSubTasks", String.valueOf(PlanLimits.MAX_SUB_TASKS))
-                .variable("roles", roleMenu(nonPlanningRoles(readOnly)))
+                .variable("roles", roleMenu(nonPlanningRoles(readOnly, context)))
                 .build())
                 + readOnlyRule(readOnly);
     }
@@ -170,9 +201,13 @@ public final class PlanPrompt {
     }
 
     public static String replanSystem(boolean readOnly) {
+        return replanSystem(readOnly, PlanContext.none());
+    }
+
+    public static String replanSystem(boolean readOnly, PlanContext context) {
         return ASSEMBLER.assemble(PromptMode.PLANNER_REPLAN, PromptContext.builder()
                 .variable("maxReplanTasks", String.valueOf(PlanLimits.MAX_REPLAN_TASKS))
-                .variable("roles", roleMenu(nonPlanningRoles(readOnly)))
+                .variable("roles", roleMenu(nonPlanningRoles(readOnly, context)))
                 .build())
                 + readOnlyRule(readOnly);
     }

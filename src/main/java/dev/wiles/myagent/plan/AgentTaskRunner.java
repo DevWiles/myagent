@@ -172,9 +172,9 @@ public final class AgentTaskRunner implements TaskRunner {
             log.info("任务 {} 的子循环没能收口: {}", task.id(), failure[0]);
             return TaskOutcome.failed(compose(failure[0], text));
         }
-        if (verdictContract && role.requiresVerdict() && !passed(text)) {
-            // 验证不通过必须落成失败，才能顺着 dependents 把下游跳过。
-            // 记成「成功但其实没过」是最糟的——后面每一步都建立在一个假前提上。
+        if (verdictContract && !finished(role, text)) {
+            // 没做到必须落成失败，才能顺着 dependents 把下游跳过。
+            // 记成「成功但其实没做」是最糟的——后面每一步都建立在一个假前提上。
             return TaskOutcome.failed(text);
         }
         if (task.type() == TaskType.PLANNING && planner != null) {
@@ -192,15 +192,15 @@ public final class AgentTaskRunner implements TaskRunner {
      *
      * <p>注册表里没有的名字直接跳过：全量注册表长什么样由上层决定
      * （只读模式、审批策略不同，工具实例就不同），这里不该假设它一定齐全。
+     *
+     * <p><b>遍历的是注册表而不是白名单</b>：白名单里的条目可能是通配
+     * （{@code mcp__chrome*}），一条要对上好几个工具，见 {@link AgentRole#matches}。
      */
     private ToolRegistry toolsFor(AgentRole role) {
         ToolRegistry narrowed = new ToolRegistry();
-        for (String name : role.tools()) {
-            for (Tool tool : allTools.all()) {
-                if (tool.name().equals(name)) {
-                    narrowed.register(tool);
-                    break;
-                }
+        for (Tool tool : allTools.all()) {
+            if (role.matches(tool.name())) {
+                narrowed.register(tool);
             }
         }
         return narrowed;
@@ -249,13 +249,46 @@ public final class AgentTaskRunner implements TaskRunner {
      * <p>不整段搜「不通过」是因为模型很爱在过程里写「之前那版不通过」这种话，
      * 整段搜必然误判。只认最后一行，规矩明确，提示词里也是这么要求它的。
      */
-    private static boolean passed(String text) {
+    /**
+     * 这一步算不算做到了。
+     *
+     * <h3>两种角色问的不是同一个问题</h3>
+     * 验证角色收的是 {@code 结论: 通过/不通过}（被验的东西过了吗），
+     * 别的角色收的是 {@code 完成: 是/否}（你这一步做到了吗）。
+     * 常量和提示词都在 {@link TaskPrompt}，这里只负责读最后一行。
+     *
+     * <h3>两种角色的宽严是反的，这是故意的</h3>
+     * <b>完成行少了算做到了</b>：收不到它绝大多数是模型忘了写，而把「忘了说」
+     * 判成失败，代价是顺着 dependents 把一串本来做成了的步骤全跳过——
+     * 一次措辞疏忽毁掉半个计划。明说的失败必须当真，没说的不替它当真。
+     *
+     * <p><b>结论行少了算没通过</b>：验证角色的整个产出<i>就是</i>那一行，
+     * 没有它就等于没验，而「没验」和「验过了」之间不该有默认值——
+     * 下游每一步都建立在「验过了」这个前提上。{@code verifier.md} 里也是这么
+     * 告诉模型的（少了会被当成失败），这里必须和那句话一致：
+     * <b>提示词承诺的判法和代码真的判法对不上，是最难查的一类 bug</b>。
+     */
+    private static boolean finished(AgentRole role, String text) {
+        String last = lastLine(text);
+        if (role.requiresVerdict()) {
+            // 认的是「通过」两个字而不是整行常量：模型写成全角冒号（结论：通过）
+            // 是常事，为一个标点判掉一次真的验证不值当。「不通过」先排除，
+            // 它把「通过」整个含在里面
+            return last.contains(PASS) && !last.contains(FAIL);
+        }
+        return !last.contains(TaskPrompt.DONE_NO);
+    }
+
+    /** 判据里认的那两个词，从 {@link TaskPrompt} 的常量里切出来——措辞只有一处出处。 */
+    private static final String PASS = TaskPrompt.VERDICT_PASS.substring("结论: ".length());
+    private static final String FAIL = TaskPrompt.VERDICT_FAIL.substring("结论: ".length());
+
+    private static String lastLine(String text) {
         if (text == null || text.isBlank()) {
-            return false;
+            return "";
         }
         String[] lines = text.strip().split("\\R");
-        String last = lines[lines.length - 1].strip();
-        return !last.contains("不通过");
+        return lines[lines.length - 1].strip();
     }
 
     /** 失败时也把已经说出来的过程带上，不然用户只看到一句「已取消」，什么线索都没有。 */

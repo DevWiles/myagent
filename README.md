@@ -158,7 +158,12 @@ agent 自己找代码用两件工具，不走 shell：
 ```json
 {
   "servers": {
-    "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"] }
+    "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"] },
+    "chrome": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--isolated", "--no-usage-statistics"],
+      "exclude": ["take_screenshot", "emulate", "lighthouse_audit"]
+    }
   }
 }
 ```
@@ -167,6 +172,24 @@ agent 自己找代码用两件工具，不走 shell：
 命名注册进菜单（防和内置工具、别家 server 撞名），agent 那侧完全不知道 MCP 的存在。
 没配这个文件就是零成本。只读模式**不接** MCP——远端工具做什么无从判断，
 而只读模式承诺的是不改任何东西，兑现不了的承诺不开口子。
+
+`tools`（白名单）和 `exclude`（黑名单）是可选的，用来挑工具。为什么要挑：
+**每个工具都常驻在每一次请求的菜单里**，而 ReAct 每走一步都要把整个窗口重发一遍。
+chrome-devtools 一家 29 个工具就把基线窗口从 3.3k 顶到 9.9k token，
+这笔钱不管这一轮用不用得上浏览器都得付。名字写 server 那边的原名。
+
+### 操作浏览器
+
+接上 `chrome-devtools-mcp` 之后，agent 能打开页面、点按钮、填表单、读 JS 动态生成的内容——
+`curl` 和读源码看不到的那部分。规划模式下这类活会派给 **`browser` 角色**：
+它的工具白名单是 `mcp__chrome*`（server 那一截是你在 mcp.json 里自己起的 key，
+所以 chrome / chromium / chrome-devtools 都认），提示词教的是浏览器的姿势——
+先取快照拿 uid 再动手、页面一变快照就作废。**没配浏览器 server 的机器上，
+这个角色会从规划菜单里整个消失**，不会被派出去然后两手空空。
+
+`--isolated` 是建议默认：每次开临时 profile，agent 碰不到你 Chrome 里已登录的
+任何账号。代价是它也操作不了需要登录的站——要那个就去掉这个参数，
+但那等于把浏览器里的全部身份交给模型，想清楚再给。
 
 | 按键 / 输入 | 作用 |
 |---|---|

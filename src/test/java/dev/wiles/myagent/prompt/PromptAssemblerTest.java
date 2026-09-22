@@ -124,6 +124,7 @@ class PromptAssemblerTest {
                 .variable("workspace", "/tmp/proj")
                 .variable("role", "编码")
                 .variable("taskRules", "你有写工具。")
+                .variable("completionContract", "最后一行写完成: 是 或 完成: 否。")
                 .build());
 
         assertTrue(agent.contains("ReAct"));

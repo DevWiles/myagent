@@ -89,9 +89,23 @@ public final class McpServers implements AutoCloseable {
         }
         try {
             client.initialize();
+            List<McpClient.RemoteTool> offered = client.listTools();
             List<Tool> tools = new ArrayList<>();
-            for (McpClient.RemoteTool remote : client.listTools()) {
-                tools.add(new McpTool(client, remote));
+            List<String> dropped = new ArrayList<>();
+            for (McpClient.RemoteTool remote : offered) {
+                if (spec.wants(remote.name())) {
+                    tools.add(new McpTool(client, remote));
+                } else {
+                    dropped.add(remote.name());
+                }
+            }
+            // 筛掉了什么必须说出来：配置里打错一个工具名的症状是「模型就是不用那个工具」，
+            // 而菜单上少一个和这个工具压根不存在，在事件流里长得一模一样
+            if (spec.picky()) {
+                log.info("MCP server {} 提供 {} 个工具，按配置留下 {} 个，筛掉: {}",
+                        name, offered.size(), tools.size(),
+                        dropped.isEmpty() ? "（一个都没筛掉，检查配置里的名字有没有写错）"
+                                : String.join(" ", dropped));
             }
             return new Started(client, tools);
         } catch (RuntimeException e) {
