@@ -11,7 +11,7 @@
 
 import type { KeyEvent } from "@opentui/core"
 import { useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
-import { armedAfter, decideCtrlC } from "../interrupt.ts"
+import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
@@ -149,10 +149,13 @@ export function App(props: AppProps) {
    * 「再按一次 Ctrl-C 就退出」此刻成立吗。
    *
    * 它和输入框下面那行提示是<b>同一件事</b>：提示亮着 ⟺ 再按一下真的会退。
-   * 所以这里没有超时——加了超时，提示还在屏幕上、按下去却只是重新武装，
-   * 那行字就开始说谎了。解除交给「按了别的键」。
+   * 所以解除武装和收起提示必须是同一个动作——这正是超时敢加的前提
+   * （理由写在 {@link createArmState} 那一侧）。三种解除：按了别的键、超时、退出。
    */
   const [exitArmed, setExitArmed] = createSignal(false)
+  /** 定时器记账在 {@link createArmState} 里面，<b>所有</b>改 exitArmed 的地方都得走 arm.set。 */
+  const arm = createArmState(setExitArmed)
+  onCleanup(() => arm.dispose())
 
   /**
    * 刚复制完那一下的提示，几秒后自己消失。
@@ -422,7 +425,7 @@ export function App(props: AppProps) {
       draft: draft(),
       armed: exitArmed(),
     })
-    setExitArmed(armedAfter(action))
+    arm.set(armedAfter(action))
 
     switch (action.kind) {
       case "decline-approval": {
@@ -472,7 +475,7 @@ export function App(props: AppProps) {
     }
     // 按了别的键就解除武装。和终端版 consecutiveInterrupts 被下一次成功读行
     // 清零是同一套语义——「连按两次」说的是连按，中间插了别的就不算
-    if (exitArmed()) setExitArmed(false)
+    if (exitArmed()) arm.set(false)
 
     const approval = state().approval
     if (approval) {
@@ -791,7 +794,7 @@ export function App(props: AppProps) {
             混进转录里就成了一条永远留在那儿的假消息 */}
         <Show when={exitArmed()}>
           <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-            <text fg={dark.warning}>再按一次 Ctrl-C 退出（按别的键就当没按过）</text>
+            <text fg={dark.warning}>再按一次 Ctrl-C 退出</text>
           </box>
         </Show>
 

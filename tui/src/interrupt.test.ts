@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { armedAfter, decideCtrlC, type CtrlCContext } from "./interrupt.ts"
+import {
+  armedAfter,
+  ARM_TIMEOUT_MS,
+  createArmState,
+  decideCtrlC,
+  type CtrlCContext,
+} from "./interrupt.ts"
 
 const idle: CtrlCContext = {
   hasApproval: false,
@@ -68,5 +74,68 @@ describe("「再按一次就退出」什么时候亮着", () => {
     const afterInterrupt = decideCtrlC(ctx({ busy: true }))
     expect(armedAfter(afterInterrupt)).toBe(false)
     expect(decideCtrlC(ctx({ armed: false }))).toEqual({ kind: "arm" })
+  })
+})
+
+describe("武装状态的有效期", () => {
+  /** 定时器测试统一用这个刻度：够短跑得快，够长不会被调度抖动冲掉。 */
+  const TICK = 20
+  const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
+
+  test("武装之后没人动，到点自己解除", async () => {
+    // 只靠「按了别的键」解除的话，武装能无限期挂着：
+    // 人走开再回来想中断点什么，按下去的却是退出
+    const seen: boolean[] = []
+    const arm = createArmState((on) => seen.push(on), TICK)
+
+    arm.set(true)
+    expect(seen).toEqual([true])
+
+    await sleep(TICK * 3)
+    expect(seen).toEqual([true, false])
+    arm.dispose()
+  })
+
+  test("重新武装要重新计时，旧定时器不许掐灭新提示", async () => {
+    // 忘了先 clear 的话：第一根定时器在第二次武装期间到点，
+    // 把刚亮起来的提示掐灭——表现是「提示闪一下就没了」，肉眼极难复现
+    const seen: boolean[] = []
+    const arm = createArmState((on) => seen.push(on), TICK * 4)
+
+    arm.set(true)
+    await sleep(TICK * 3)     // 第一根还差一点到点
+    arm.set(true)             // 重新武装，第一根必须被掐掉
+    await sleep(TICK * 3)     // 第一根若还活着，会在这段里到点
+
+    expect(seen).toEqual([true, true])
+    arm.dispose()
+  })
+
+  test("手动解除之后定时器不再回调——否则会多报一次 false", async () => {
+    const seen: boolean[] = []
+    const arm = createArmState((on) => seen.push(on), TICK)
+
+    arm.set(true)
+    arm.set(false)            // 按了别的键
+    await sleep(TICK * 3)
+
+    expect(seen).toEqual([true, false])
+    arm.dispose()
+  })
+
+  test("dispose 之后彻底安静——界面都没了，别再回调", async () => {
+    const seen: boolean[] = []
+    const arm = createArmState((on) => seen.push(on), TICK)
+
+    arm.set(true)
+    arm.dispose()
+    await sleep(TICK * 3)
+
+    expect(seen).toEqual([true])
+  })
+
+  test("默认有效期是 4 秒", () => {
+    // 「刻意连按两下」和「隔了一会儿又按一下」之间的分界
+    expect(ARM_TIMEOUT_MS).toBe(4000)
   })
 })
