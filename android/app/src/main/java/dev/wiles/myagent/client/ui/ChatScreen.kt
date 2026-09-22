@@ -30,8 +30,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +51,7 @@ import dev.wiles.myagent.client.state.Entry
 import dev.wiles.myagent.client.state.Link
 import dev.wiles.myagent.client.state.Mode
 import dev.wiles.myagent.client.state.SessionState
+import kotlinx.coroutines.launch
 
 /**
  * 会话页：终端的另一块屏。
@@ -61,18 +66,58 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
     var menuOpen by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
-    // 新内容来了跟到底部；用户往上翻的时候别抢
-    LaunchedEffect(state.entries.size, (state.entries.lastOrNull() as? Entry.Assistant)?.text?.length) {
-        val last = state.entries.size - 1
-        if (last >= 0 && !listState.isScrollInProgress) {
-            val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: last
-            if (visible >= last - 1) listState.animateScrollToItem(last)
+    val scope = rememberCoroutineScope()
+
+    /**
+     * 自动跟随：流式输出时钉在底部。**用户一上滑就让位**——
+     * 他正在读上面的东西，这时候抢滚动条比不滚动糟得多。
+     * 判据分两半：用户手势（drag）关掉跟随，自己滚回底部又打开。
+     */
+    var autoFollow by remember { mutableStateOf(true) }
+    // 只有用户的手指会发 DragInteraction；程序滚动不发——
+    // 所以这里天然分得清「用户在翻」和「我们在跟」，不用猜
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect {
+            if (it is DragInteraction.Start) autoFollow = false
+        }
+    }
+    val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
+    LaunchedEffect(atBottom) {
+        if (atBottom) autoFollow = true
+    }
+    // 跟随本体。滚到「底部锚点」而不是最后一条内容——最后一条正在长个儿，
+    // 滚到它的开头看不见新字，锚点在它后面，滚到锚点就是滚到底
+    LaunchedEffect(state.entries.size, (state.entries.lastOrNull() as? Entry.Assistant)?.text?.length, autoFollow) {
+        if (autoFollow) {
+            val last = listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) listState.scrollToItem(last)
+        }
+    }
+
+    /**
+     * 「回到刚才」：发新指令会强制跳到底部，但用户可能正读到一半——
+     * 给一个能跳回去的按钮，3 秒不点自动消失。存的是发送那一刻的滚动位置。
+     */
+    var returnSpot by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    LaunchedEffect(returnSpot) {
+        if (returnSpot != null) {
+            kotlinx.coroutines.delay(3000)
+            returnSpot = null
         }
     }
 
     fun submit() {
         val text = draft.trim()
         if (text.isEmpty() || state.busy) return
+        // 用户正在上面读东西？记下位置再跳底，给他一条回去的路
+        returnSpot = if (listState.canScrollForward) {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        } else null
+        autoFollow = true
+        scope.launch {
+            val last = listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) listState.scrollToItem(last)
+        }
         client.store.submitPrompt(text)
         val cid = client.store.clientId
         client.send(
@@ -95,6 +140,15 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
                     .imePadding()
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
+                returnSpot?.let { (index, offset) ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = {
+                            returnSpot = null
+                            autoFollow = false      // 回去是为了继续读，别立刻又被拽下来
+                            scope.launch { listState.scrollToItem(index, offset) }
+                        }) { Text("↑ 回到刚才的位置") }
+                    }
+                }
                 ModeChips(state, onMode = { client.store.setMode(it) })
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     androidx.compose.foundation.layout.Box {
@@ -139,6 +193,9 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
                 .padding(horizontal = 12.dp),
         ) {
             items(state.entries, key = { it.key }) { entry -> EntryView(entry) }
+            // 底部锚点：0 高度，只为让「滚到底」有一个确定的目标——
+            // 最后一条内容在流式期间不断长个儿，滚到它的开头看不见新字
+            item(key = "bottom-anchor") { Spacer(Modifier.height(1.dp)) }
             // 首连没有历史时给一句引导，别让人对着全空的屏幕猜
             if (state.entries.isEmpty() && state.link == Link.CONNECTED) {
                 item {

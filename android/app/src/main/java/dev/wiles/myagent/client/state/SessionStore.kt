@@ -212,6 +212,15 @@ class SessionStore {
                 }
             }
 
+            is ServerEvent.ApprovalResolved -> _state.update {
+                // 别的屏答掉了。id 对不上不乱收——那可能是上一道题的迟到回执
+                if (it.approval?.id == event.id) it.copy(approval = null) else it
+            }
+
+            is ServerEvent.PlanConfirmResolved -> _state.update {
+                if (it.planConfirm == event.id) it.copy(planConfirm = null) else it
+            }
+
             is ServerEvent.UserMessage -> {
                 // 只画别的界面说的话；自己那条在按发送时就画过了
                 if (event.cid != clientId) {

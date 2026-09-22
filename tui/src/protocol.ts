@@ -190,6 +190,12 @@ export type ServerEvent =
     }
   | { t: 'done'; text: string; steps: number }
   | { t: 'failed'; reason: string }
+  /**
+   * 某个审批已经被**某块屏**答掉了（可能不是这块）。所有界面收到后立刻收框，
+   * id 对不上就忽略——自己答的那块屏，框早就本地收掉了（协议 3.3）。
+   */
+  | { t: 'approval_resolved'; id: number }
+  | { t: 'plan_confirm_resolved'; id: number }
   /** 需要用户确认某个危险动作。回 approval_reply 之前后端是卡住的。 */
   | {
       t: 'approval_request'

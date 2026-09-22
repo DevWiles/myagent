@@ -600,9 +600,15 @@ public final class AgentServer extends WebSocketServer {
             case "prompt" -> handlePrompt(peer, Protocol.str(cmd, "text", "").trim(),
                     Protocol.str(cmd, "cid", ""));
             case "cancel" -> handleCancel();
-            case "approval_reply" -> approval.reply(
-                    Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"),
-                    Protocol.strings(cmd, "rules"), Protocol.str(cmd, "feedback", ""));
+            case "approval_reply" -> {
+                int id = Protocol.num(cmd, "id", -1);
+                if (approval.reply(id, Protocol.str(cmd, "decision", "no"),
+                        Protocol.strings(cmd, "rules"), Protocol.str(cmd, "feedback", ""))) {
+                    // 谁答的都行，但**所有**界面都得立刻收框——手机上点了同意，
+                    // 终端上的框却挂到整轮结束，看起来就是「问题还在等我」（协议 3.3）
+                    publish(Protocol.event("approval_resolved").put("id", id));
+                }
+            }
             case "plan" -> handlePlan(peer, Protocol.str(cmd, "goal", "").trim(),
                     Protocol.str(cmd, "cid", ""));
             case "team" -> handleTeam(peer, Protocol.str(cmd, "goal", "").trim(),
@@ -613,8 +619,12 @@ public final class AgentServer extends WebSocketServer {
             case "continue" -> handleContinue(peer);
             case "sessions" -> handleSessions(peer);
             case "session_resume" -> handleSessionResume(peer, Protocol.str(cmd, "id", ""));
-            case "plan_confirm_reply" -> planConfirm.reply(
-                    Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
+            case "plan_confirm_reply" -> {
+                int id = Protocol.num(cmd, "id", -1);
+                if (planConfirm.reply(id, Protocol.bool(cmd, "approved", false))) {
+                    publish(Protocol.event("plan_confirm_resolved").put("id", id));
+                }
+            }
             case "compact" -> handleCompact(peer);
             case "memory" -> handleMemory(peer, Protocol.str(cmd, "action", "list"));
             case "reset" -> handleReset(peer);

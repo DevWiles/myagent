@@ -137,6 +137,10 @@ sealed interface ServerEvent {
     data class Done(override val seq: Long?, val text: String, val steps: Int) : ServerEvent
     data class Failed(override val seq: Long?, val reason: String) : ServerEvent
 
+    /** 某个审批被某块屏答掉了。id 对得上就收框（协议 3.3）。 */
+    data class ApprovalResolved(override val seq: Long?, val id: Int) : ServerEvent
+    data class PlanConfirmResolved(override val seq: Long?, val id: Int) : ServerEvent
+
     data class ApprovalRequest(
         override val seq: Long?,
         val id: Int,
@@ -366,6 +370,8 @@ fun parseServerEvent(raw: String): ServerEvent? {
         )
 
         "reset_done" -> ServerEvent.ResetDone(seq)
+        "approval_resolved" -> ServerEvent.ApprovalResolved(seq, o.int("id", -1))
+        "plan_confirm_resolved" -> ServerEvent.PlanConfirmResolved(seq, o.int("id", -1))
         "user_message" -> ServerEvent.UserMessage(seq, o.str("text"), o.str("mode"), o.str("cid"))
 
         "session_list" -> ServerEvent.SessionList(seq, o.str("currentId"), o.objects("sessions").map {

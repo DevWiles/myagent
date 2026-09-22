@@ -1338,3 +1338,28 @@ describe('用户消息回显（协议 3.15）', () => {
     expect(store.getSnapshot().entries).toHaveLength(2)
   })
 })
+
+describe('审批被别的屏答掉（协议 3.3）', () => {
+  test('approval_resolved 立刻收框——不收会挂到整轮结束', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'approval_request', id: 7, action: 'x', detail: 'y', reason: 'z' })
+    expect(store.getSnapshot().approval).not.toBeNull()
+
+    store.apply({ t: 'approval_resolved', id: 7 })
+    expect(store.getSnapshot().approval).toBeNull()
+  })
+
+  test('id 对不上不乱收——那可能是上一道题的迟到回执', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'approval_request', id: 8, action: 'x', detail: 'y', reason: 'z' })
+    store.apply({ t: 'approval_resolved', id: 7 })
+    expect(store.getSnapshot().approval?.id).toBe(8)
+  })
+
+  test('计划确认同理', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'plan_confirm_request', id: 3 })
+    store.apply({ t: 'plan_confirm_resolved', id: 3 })
+    expect(store.getSnapshot().planConfirm).toBeNull()
+  })
+})

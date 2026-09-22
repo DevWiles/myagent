@@ -822,6 +822,22 @@ export class SessionStore {
         })
         return
 
+      case 'approval_resolved': {
+        // 别的屏答掉了这道题。框还挂着且 id 对得上就收——
+        // 不收的话它会一直杵到整轮结束，看起来像「问题还在等我」
+        if (this.state.approval?.id === event.id) {
+          this.set({ approval: null, approvalStage: ASK_STAGE })
+        }
+        return
+      }
+
+      case 'plan_confirm_resolved': {
+        if (this.state.planConfirm?.id === event.id) {
+          this.set({ planConfirm: null })
+        }
+        return
+      }
+
       case 'user_message': {
         // 自己那条早在按回车时就画过了（submitPrompt），这里只画**别的界面**说的话。
         // cid 每次连接重新生成，所以重连后补发的老消息 cid 对不上、照常显示——

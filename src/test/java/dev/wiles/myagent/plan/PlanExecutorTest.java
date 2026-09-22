@@ -699,7 +699,14 @@ class PlanExecutorTest {
         PlanResult result = new PlanExecutor(second).parallelism(1).execute(resumed);
 
         assertFalse(second.order.contains("n1"), "已经做成的事不该重跑: " + second.order);
-        assertEquals(List.of("n2", "n3", "n4"), second.order);
+        // n2/n3 互不依赖且是只读任务，**并行执行**——谁先进 order 看线程调度。
+        // 断言语义而不是断言运气：n1 不重来、n2 n3 都跑了、n4 压轴。
+        // 原来写死 [n2,n3,n4]，单跑几乎全绿，全量跑（CPU 有争抢）偶发翻车——
+        // 顺序是串行时代送的免费午餐，并发之后就不能再当承诺
+        assertEquals(3, second.order.size());
+        assertFalse(second.order.contains("n1"), "做成的那步不该重来");
+        assertTrue(second.order.subList(0, 2).containsAll(List.of("n2", "n3")), second.order.toString());
+        assertEquals("n4", second.order.get(2));
         assertEquals(PlanStatus.COMPLETED, result.status());
         assertEquals("n1 干完了", resumed.graph().get("n1").result(), "上一程的产出要还在");
     }
@@ -759,7 +766,14 @@ class PlanExecutorTest {
         RecordingRunner second = new RecordingRunner();
         PlanResult resumed = new PlanExecutor(second).execute(last.toPlan());
 
-        assertEquals(List.of("n2", "n3", "n4"), second.order);
+        // n2/n3 互不依赖且是只读任务，**并行执行**——谁先进 order 看线程调度。
+        // 断言语义而不是断言运气：n1 不重来、n2 n3 都跑了、n4 压轴。
+        // 原来写死 [n2,n3,n4]，单跑几乎全绿，全量跑（CPU 有争抢）偶发翻车——
+        // 顺序是串行时代送的免费午餐，并发之后就不能再当承诺
+        assertEquals(3, second.order.size());
+        assertFalse(second.order.contains("n1"), "做成的那步不该重来");
+        assertTrue(second.order.subList(0, 2).containsAll(List.of("n2", "n3")), second.order.toString());
+        assertEquals("n4", second.order.get(2));
         assertEquals(PlanStatus.COMPLETED, resumed.status());
     }
 }
