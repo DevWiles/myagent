@@ -2,6 +2,7 @@ package dev.wiles.myagent;
 
 import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
+import dev.wiles.myagent.relay.RelayServer;
 import dev.wiles.myagent.server.AgentServer;
 
 
@@ -32,6 +33,10 @@ public final class Main {
             System.out.println("myagent " + Cli.VERSION);
             return;
         }
+        if (options.relayServe()) {
+            relayServe(options);     // 公网那台机器上的角色：只对接两条连接，不起 agent
+            return;
+        }
         if (!options.serve()) {
             // 不默认起服务：手滑敲一下 java -jar 不该在当前目录上悄悄开一个能读写文件、
             // 能跑命令的服务。要什么就说什么
@@ -43,6 +48,29 @@ public final class Main {
             return;
         }
         serve(options);          // 日志走 stderr，由外部界面自己收
+    }
+
+    /**
+     * 中继服务端。**同一个 jar 的第二个角色**，部署在公网机器上。
+     *
+     * <p>这条路径上不读 API key、不注册任何工具、不起 agent——
+     * 它只把两条出站连接对上，连内容都看不懂（协议 1.3）。
+     */
+    private static void relayServe(CliOptions options) {
+        RelayServer relay = new RelayServer(options.port());
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                relay.stop(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        relay.start();
+        try {
+            relay.awaitStop();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** 无头模式。前台挂住，收到 SIGINT/SIGTERM 时把服务停干净。 */

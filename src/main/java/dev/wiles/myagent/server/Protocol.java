@@ -68,7 +68,8 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact", "memory", "roles", "team");
+                    "session", "sessions", "compact", "memory", "roles", "team",
+                    "events_resume", "user_echo");
 
     /**
      * 角色名册，进首帧。
@@ -100,6 +101,23 @@ public final class Protocol {
 
     public static ObjectMapper mapper() {
         return MAPPER;
+    }
+
+    /**
+     * 用户说的那句话，广播给所有界面（协议 3.15）。
+     *
+     * <p>存在的理由：用户消息原来<b>从没进过协议</b>——每个界面自己把「我刚说的」
+     * 写进转录再发命令。一块屏时看不出问题，两块屏时的症状是
+     * 「手机上说的话，终端里只会凭空冒出一段回答」。
+     *
+     * <p>{@code cid} 是发起方的连接 id：它本地已经即时回显过了，收到自己这条要跳过。
+     */
+    public static ObjectNode encodeUserMessage(String text, String mode, String cid) {
+        ObjectNode node = event("user_message");
+        node.put("text", text);
+        node.put("mode", mode);
+        node.put("cid", cid == null ? "" : cid);
+        return node;
     }
 
     public static ObjectNode event(String type) {

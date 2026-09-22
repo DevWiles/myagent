@@ -30,6 +30,10 @@ Claude Code 早期就是 embedding + 本地向量库，后来整套拆掉换成�
 - **前后端是真的分开的。** 后端 `--serve` 起一个 WebSocket 服务，界面是个纯客户端。
   两边照 [`docs/protocol.md`](docs/protocol.md) 各自开工——那份文档是契约，改协议先改它。
 
+界面现在有两块屏：终端里的 TUI，和 [`android/`](android/) 里的手机端。
+**agent 始终跑在电脑上**，手机连的是同一个后端、同一份会话——
+它存在的理由是那个最常见的场景：任务跑了十分钟、卡在等你授权，而你早就不在电脑前了。
+
 ## 快速开始
 
 需要 JDK 17+、Maven、[Bun](https://bun.sh)，以及一个 DeepSeek API key。
@@ -46,6 +50,34 @@ cd 你要让它干活的目录
 敲好，连上的瞬间自动发出。
 两件事都带新鲜度判断，没改动就直接跳过，启动和裸跑界面一样快。
 敲命令时所在的目录就是 agent 的工作区。
+
+### 用手机连
+
+装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
+界面里敲 `/qr` 出配对二维码，扫一下就连上了。两种走法：
+
+```bash
+./myagent-tui --relay wss://relay.example.com/ws   # 任何网络：4G、公司网、咖啡馆
+./myagent-tui --lan                                        # 只在同一个局域网
+```
+
+**中继那条是怎么穿透的**：两端都**往外拨**，在一台公网机器上会合——
+从不在你机器上开入站端口，所以 NAT 和防火墙一律放行。
+形状和 Claude Code 的 Remote Control 一样；不同的是加密——
+**中继只看得见密文**，配对密钥放在配对 URL 的 `#` 之后，
+而 fragment 在协议层面永远不会被发到服务器。
+
+房间号和密钥存在 `~/.myagent/relay.json`，**跨重启保持**：扫一次码，以后一直能连。
+要换一套：`--relay-reset`。
+
+局域网那条是明文 ws，只在可信网络用。两种可以一起开，二维码优先给中继那个。
+细节见 [`docs/protocol.md`](docs/protocol.md) 1.1 / 1.3。
+
+自己架中继：同一个 jar 换个角色跑就是（那条路径不碰 API key、不起 agent）：
+
+```bash
+java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终结
+```
 
 配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
 
@@ -141,7 +173,7 @@ agent 自己找代码用两件工具，不走 shell：
 | `Shift+Tab` | 切换模式 |
 | `/resume` | 从会话历史里挑一段接着聊（`/resume-plan` 接着跑没跑完的计划） |
 | `Esc` | 中断当前这一轮 |
-| `Ctrl-O` | 展开工具调用详情 |
+| 鼠标点工具摘要行 | 展开/收起这一组调用的明细（▸/▾） |
 | `↑` `↓` / 数字键 | 确认框：挪光标选 / 直选一项，`Enter` 确认、`Esc` 拒绝（见下） |
 | `Ctrl-C` | 跑着就中断、有字就清行、空行连按两次才退（隔 4 秒不算连按），退出时留一行会话摘要 |
 

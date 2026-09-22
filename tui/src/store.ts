@@ -313,6 +313,13 @@ export class SessionStore {
   private readonly listeners = new Set<() => void>()
   private seq = 0
 
+  /**
+   * 本连接的 id，随机、**每次进程启动重新生成**（协议 3.15）。
+   *
+   * 发命令时带上它，收到自己那条 `user_message` 回显就跳过。
+   */
+  readonly clientId = Math.random().toString(36).slice(2, 10)
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
@@ -814,6 +821,31 @@ export class SessionStore {
           startedAt: event.busy ? (this.state.startedAt ?? Date.now()) : null,
         })
         return
+
+      case 'approval_resolved': {
+        // 别的屏答掉了这道题。框还挂着且 id 对得上就收——
+        // 不收的话它会一直杵到整轮结束，看起来像「问题还在等我」
+        if (this.state.approval?.id === event.id) {
+          this.set({ approval: null, approvalStage: ASK_STAGE })
+        }
+        return
+      }
+
+      case 'plan_confirm_resolved': {
+        if (this.state.planConfirm?.id === event.id) {
+          this.set({ planConfirm: null })
+        }
+        return
+      }
+
+      case 'user_message': {
+        // 自己那条早在按回车时就画过了（submitPrompt），这里只画**别的界面**说的话。
+        // cid 每次连接重新生成，所以重连后补发的老消息 cid 对不上、照常显示——
+        // 持久化 cid 的话，重启后自己以前说过的话会被当成「本地已有」而整段消失
+        if (event.cid && event.cid === this.clientId) return
+        this.append({ kind: 'user', key: this.nextKey('user'), text: event.text })
+        return
+      }
 
       case 'reset_done':
         this.clearTranscript()

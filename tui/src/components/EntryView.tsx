@@ -42,6 +42,10 @@ export type EntryViewProps = {
    * 得靠补空格撑开——补多少只有上层知道。给个保守的默认值，省得每个调用方都传。
    */
   columns?: number
+  /** 工具组的明细是否展开。状态在 store，这里只画。 */
+  expanded?: boolean
+  /** 点了摘要行。上层拿它去改 store 里的展开集合。 */
+  onToggle?: () => void
 }
 
 export function EntryView(props: EntryViewProps) {
@@ -57,7 +61,14 @@ export function EntryView(props: EntryViewProps) {
         {(entry) => <ThoughtEntry text={entry().text} />}
       </Match>
       <Match when={props.entry.kind === "tools" ? props.entry : null}>
-        {(entry) => <ToolsEntry calls={entry().calls} columns={props.columns ?? 80} />}
+        {(entry) => (
+          <ToolsEntry
+            calls={entry().calls}
+            columns={props.columns ?? 80}
+            expanded={props.expanded ?? false}
+            onToggle={props.onToggle}
+          />
+        )}
       </Match>
       <Match when={props.entry.kind === "notice" ? props.entry : null}>
         {(entry) => <NoticeEntry level={entry().level} text={entry().text} />}
@@ -389,7 +400,7 @@ function ThoughtEntry(props: { text: string }) {
  * - **有失败**：单独标出来。失败会改变后面所有事情的含义，
  *   只说「执行 1 条命令」而不说它失败了，用户会以为事情办成了
  *
- * 明细留给将来的 Ctrl-O 展开。
+ * 明细点摘要行展开。
  *
  * <h3>唯一的例外：改了文件要把 diff 摊开</h3>
  * 「工具名和参数是内部动作」这条对读文件、搜索都成立，唯独对<b>写文件</b>不成立——
@@ -400,7 +411,12 @@ function ThoughtEntry(props: { text: string }) {
  * 用惯之后绝大多数写入会被 `~/.myagent/policy.json` 里的规则直接放行，
  * 于是屏幕上从头到尾看不到任何改动内容——这正是要修的。
  */
-function ToolsEntry(props: { calls: ToolCall[]; columns: number }) {
+function ToolsEntry(props: {
+  calls: ToolCall[]
+  columns: number
+  expanded: boolean
+  onToggle?: () => void
+}) {
   const theme = useTheme()
   const running = () => props.calls.some((call) => call.running)
   const failed = () => props.calls.filter((call) => call.ok === false).length
@@ -409,23 +425,105 @@ function ToolsEntry(props: { calls: ToolCall[]; columns: number }) {
 
   return (
     <box flexDirection="column" paddingTop={1}>
+      <Show
+        when={props.expanded}
+        fallback={
+          <>
+            {/* 摘要行可点：▸ 点开换成整块明细 */}
+            <box flexDirection="row" onMouseDown={() => props.onToggle?.()}>
+              <text fg={theme.subtle}>
+                {"▸ "}
+                {summarizeTools(props.calls)}
+                {running() ? "…" : ""}
+              </text>
+              <Show when={failed() > 0}>
+                <text fg={theme.error}> · {failed()} 个失败</text>
+              </Show>
+            </box>
+            {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
+            <For each={changes()}>
+              {(call) => (
+                <ToolDiff
+                  call={call}
+                  budget={diffBudgetFor(changes().length)}
+                  columns={props.columns}
+                />
+              )}
+            </For>
+          </>
+        }
+      >
+        {/* 展开态：摘要行让位，换成一整块带底色的明细（对齐 Claude Code 的样式）。
+            点块内**任意一处**收回去——鼠标事件会从子节点冒泡到这个容器上，
+            所以 handler 只挂这一个，text 子节点不用各自接 */}
+        <box
+          flexDirection="column"
+          backgroundColor={theme.panel}
+          padding={1}
+          onMouseDown={() => props.onToggle?.()}
+        >
+          <For each={props.calls}>
+            {(call) => (
+              <box flexDirection="column">
+                <ToolDetail call={call} columns={props.columns - 2} />
+                <Show when={call.diff && call.diff.length > 0}>
+                  <ToolDiff
+                    call={call}
+                    budget={diffBudgetFor(changes().length)}
+                    columns={props.columns - 2}
+                  />
+                </Show>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
+    </box>
+  )
+}
+
+/**
+ * 展开后的一条调用明细：状态记号 + 工具名 + 参数一行 + 输出前几行。
+ *
+ * <p>输出只给前几行且变暗——展开是为了「查验」，不是把审计日志搬上屏幕。
+ * 带 diff 的调用不再重复输出（diff 在摘要行下面一直摊着，那才是主角）。
+ */
+function ToolDetail(props: { call: ToolCall; columns: number }) {
+  const theme = useTheme()
+  const mark = () =>
+    props.call.running ? "●" : props.call.ok === false ? "✗" : "✓"
+  const markColor = () =>
+    props.call.running ? theme.warning : props.call.ok === false ? theme.error : theme.success
+  const argsLine = () => {
+    const flat = props.call.args.replace(/\s+/g, " ")
+    const room = Math.max(8, props.columns - props.call.tool.length - 4)
+    return flat.length > room ? flat.slice(0, room - 1) + "…" : flat
+  }
+  /** 输出预览：前 12 行。有 diff 的不给——diff 已经摊在下面了。 */
+  const preview = () => {
+    if (props.call.diff && props.call.diff.length > 0) return []
+    const output = (props.call.output ?? "").trimEnd()
+    if (output.length === 0) return []
+    const lines = output.split("\n")
+    const shown = lines.slice(0, 12).map((line) =>
+      line.length > props.columns - 4 ? line.slice(0, props.columns - 5) + "…" : line,
+    )
+    if (lines.length > 12) shown.push(`… 还有 ${lines.length - 12} 行`)
+    return shown
+  }
+
+  return (
+    <box flexDirection="column">
       <box flexDirection="row">
-        <text fg={theme.subtle}>
-          {summarizeTools(props.calls)}
-          {running() ? "…" : ""}
-        </text>
-        <Show when={failed() > 0}>
-          <text fg={theme.error}> · {failed()} 个失败</text>
-        </Show>
+        <text fg={markColor()}>{mark()} </text>
+        <text fg={theme.text}>{props.call.tool} </text>
+        <text fg={theme.subtle}>{argsLine()}</text>
       </box>
-      {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
-      <For each={changes()}>
-        {(call) => (
-          <ToolDiff
-            call={call}
-            budget={diffBudgetFor(changes().length)}
-            columns={props.columns}
-          />
+      <For each={preview()}>
+        {(line) => (
+          <box paddingLeft={2}>
+            <text fg={theme.subtle}>{line}</text>
+          </box>
         )}
       </For>
     </box>

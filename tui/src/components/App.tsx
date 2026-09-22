@@ -9,7 +9,7 @@
  * 事件规约逻辑两版共用，这里只管画。
  */
 
-import type { KeyEvent } from "@opentui/core"
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
 import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
@@ -28,6 +28,7 @@ import {
   type CommandEntry,
 } from "../commands.ts"
 import { askChoices, digitIndex, PLAN_CHOICES, type AskChoice } from "../approval.ts"
+import { qrText } from "../qr.ts"
 import { copyToClipboard } from "../clipboard.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
@@ -201,6 +202,39 @@ export function App(props: AppProps) {
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
   let inputControls: { setValue: (value: string) => void } | undefined
 
+  /** 对话区的滚动容器。展开/收起工具明细时要按住它的滚动位置（见 toggleToolEntry）。 */
+  let transcriptScroll: ScrollBoxRenderable | undefined
+
+  /**
+   * 展开/收起一组工具明细，**不让屏幕跳**。
+   *
+   * <p>抖动的真凶不是哪一行被顶替，是 scrollbox 的 stickyStart="bottom"：
+   * 只要当前贴着底，内容高度一变它就重新钉底——展开在转录中间加了一块高度，
+   * 重新钉底等于把整屏往上顶那么多行；收起再弹回来。摘要行钉不钉住都没用，
+   * 动的是滚动位置本身。
+   *
+   * <p>所以在切换前关掉 sticky、记下 scrollTop，布局重排后原样按回去——
+   * 上方内容纹丝不动，明细块只朝下长。下一帧再把 sticky 打开：
+   * 此刻已经不在底部，sticky 的「贴底才钉」判定不会再抢。
+   */
+  const toggleToolEntry = (key: string): void => {
+    const sb = transcriptScroll
+    if (!sb) {
+      session.toggleEntry(key)
+      return
+    }
+    const keep = sb.scrollTop
+    sb.stickyScroll = false
+    session.toggleEntry(key)
+    // 布局在渲染循环的下一帧里重排，restore 必须排在它**后面**——
+    // setTimeout(0) 会抢在渲染帧之前，sticky 恢复太早，重排时又被钉底。
+    // 50ms ≈ 两三帧，窗口内 sticky 一直关着，重排怎么排都动不了 scrollTop
+    setTimeout(() => {
+      sb.scrollTop = keep
+      sb.stickyScroll = true
+    }, 50)
+  }
+
   /**
    * 一条命令能不能用，取决于后端宣告了什么、有没有存档。
    *
@@ -349,6 +383,27 @@ export function App(props: AppProps) {
       case "clear":
         session.reset()
         return
+      case "qr": {
+        const url = session.pairingUrl()
+        if (url === null) {
+          session.notice(
+            "warn",
+            "没有配对地址。手机要连进来，后端得先挂到中继上、或者开局域网模式：\n" +
+              "  ./myagent-tui --relay wss://relay.example.com/ws   # 任何网络都能连\n" +
+              "  ./myagent-tui --lan                                        # 只在同一个局域网\n" +
+              "（见 docs/protocol.md 1.1 / 1.3）",
+          )
+          return
+        }
+        // 说清这个码能用在什么网络下。中继那个到哪儿都行，局域网那个出门就废——
+        // 不写明的话，用户会拿着一个在家扫的码到公司去扫，然后以为是 app 坏了
+        const where =
+          session.pairingKind() === "relay"
+            ? "任何网络都能连（经中继，端到端加密）"
+            : "只在同一个局域网内有效"
+        session.notice("info", `手机扫码连入（或手填下面的地址）——${where}：\n\n${qrText(url)}\n\n${url}`)
+        return
+      }
     }
   }
 
@@ -476,6 +531,7 @@ export function App(props: AppProps) {
     // 按了别的键就解除武装。和终端版 consecutiveInterrupts 被下一次成功读行
     // 清零是同一套语义——「连按两次」说的是连按，中间插了别的就不算
     if (exitArmed()) arm.set(false)
+
 
     const approval = state().approval
     if (approval) {
@@ -650,7 +706,13 @@ export function App(props: AppProps) {
             scrollbox 是 OpenTUI 的原生滚动容器——Ink 版这里要自己算视口切片，
             这套不用，滚动在原生层做。 */}
         <box flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
-          <scrollbox stickyScroll stickyStart="bottom">
+          <scrollbox
+            stickyScroll
+            stickyStart="bottom"
+            ref={(r: ScrollBoxRenderable) => {
+              transcriptScroll = r
+            }}
+          >
             {/* 欢迎框在**滚动容器里面**，是对话流的第一项而不是固定页头。
                 钉在顶上的话，聊到第十轮它还占着五分之一个屏幕，
                 而那时它显示的信息（版本、工具数）早就没人看了。
@@ -683,6 +745,8 @@ export function App(props: AppProps) {
                   entry={entry()}
                   streaming={state().busy && index === state().entries.length - 1}
                   columns={dimensions().width - 2}
+                  expanded={state().expanded.has(entry().key)}
+                  onToggle={() => toggleToolEntry(entry().key)}
                 />
               )}
             </Index>

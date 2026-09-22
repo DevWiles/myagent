@@ -85,6 +85,16 @@ export type Session = {
    */
   notice: (level: "info" | "warn" | "error", text: string) => void
   /**
+   * 手机配对 URL。null 的两种情况要区分给用户听：
+   * 后端还没起来（等一下再试），或不是 --lan 启动（要重启才有）。
+   * 这里只回答「有没有」，怎么措辞归命令层。
+   */
+  pairingUrl: () => string | null
+  /** 这个配对地址能用在什么网络下。null = 没有配对地址。 */
+  pairingKind: () => 'relay' | 'lan' | null
+  /** 点开/收起某一组工具调用的明细（鼠标点摘要行）。 */
+  toggleEntry: (key: string) => void
+  /**
    * 显式关掉后端。
    *
    * 正常卸载走 onCleanup，这里再暴露一份是给退出路径用的：入口的 shutdown()
@@ -215,22 +225,27 @@ export function createSession(options: BackendOptions): Session {
 
   return {
     state,
+    pairingUrl: () => backend?.pairingUrl ?? null,
+    pairingKind: () => backend?.pairingKind ?? null,
+    toggleEntry(key) {
+      store.toggleEntry(key)
+    },
     prompt(text) {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了
       store.submitPrompt(text)
-      send({ t: "prompt", text })
+      send({ t: "prompt", text, cid: store.clientId })
     },
     plan(goal) {
       // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
       // 常驻模式标识回答，而转录里紧跟着就是计划面板。
       // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
       store.submitPrompt(goal)
-      send({ t: "plan", goal })
+      send({ t: "plan", goal, cid: store.clientId })
     },
     team(goal, roles) {
       store.submitPrompt(roles.length === 0 ? goal : `${roles.join(" ")} ${goal}`)
-      send({ t: "team", goal, ...(roles.length > 0 ? { roles } : {}) })
+      send({ t: "team", goal, cid: store.clientId, ...(roles.length > 0 ? { roles } : {}) })
     },
     cycleMode() {
       store.cycleMode()

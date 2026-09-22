@@ -1311,3 +1311,55 @@ describe('模式可用性（纯函数）', () => {
     expect(nextMode('plan', [])).toBe('normal')
   })
 })
+
+describe('用户消息回显（协议 3.15）', () => {
+  test('别的界面说的话要画出来——手机上说的，终端里不能只冒出一段回答', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'user_message', text: '手机上说的', mode: 'normal', cid: 'phone-42' })
+
+    const entries = store.getSnapshot().entries
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ kind: 'user', text: '手机上说的' })
+  })
+
+  test('自己那条跳过——本地在按回车时已经即时回显过了', () => {
+    const store = new SessionStore()
+    store.submitPrompt('我自己说的')
+    store.apply({ t: 'user_message', text: '我自己说的', mode: 'normal', cid: store.clientId })
+
+    expect(store.getSnapshot().entries).toHaveLength(1)
+  })
+
+  test('不带 cid 的回显照常显示——老后端/残缺帧宁可重复也别丢', () => {
+    const store = new SessionStore()
+    store.submitPrompt('一句话')
+    store.apply({ t: 'user_message', text: '一句话', mode: 'normal' })
+
+    expect(store.getSnapshot().entries).toHaveLength(2)
+  })
+})
+
+describe('审批被别的屏答掉（协议 3.3）', () => {
+  test('approval_resolved 立刻收框——不收会挂到整轮结束', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'approval_request', id: 7, action: 'x', detail: 'y', reason: 'z' })
+    expect(store.getSnapshot().approval).not.toBeNull()
+
+    store.apply({ t: 'approval_resolved', id: 7 })
+    expect(store.getSnapshot().approval).toBeNull()
+  })
+
+  test('id 对不上不乱收——那可能是上一道题的迟到回执', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'approval_request', id: 8, action: 'x', detail: 'y', reason: 'z' })
+    store.apply({ t: 'approval_resolved', id: 7 })
+    expect(store.getSnapshot().approval?.id).toBe(8)
+  })
+
+  test('计划确认同理', () => {
+    const store = new SessionStore()
+    store.apply({ t: 'plan_confirm_request', id: 3 })
+    store.apply({ t: 'plan_confirm_resolved', id: 3 })
+    expect(store.getSnapshot().planConfirm).toBeNull()
+  })
+})
