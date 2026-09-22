@@ -425,35 +425,35 @@ function ToolsEntry(props: {
 
   return (
     <box flexDirection="column" paddingTop={1}>
+      {/* 摘要行**钉在原地**，展开只是在它下面长出一块——
+          原来是整行被明细块顶替，被点的那一行自己也动了，
+          加上滚动区贴底，看起来就是上下两头一起弹（用户的原话：抖）。
+          锚点不动，展开就只朝一个方向长 */}
+      <box flexDirection="row" onMouseDown={() => props.onToggle?.()}>
+        <text fg={theme.subtle}>
+          {props.expanded ? "▾ " : "▸ "}
+          {summarizeTools(props.calls)}
+          {running() ? "…" : ""}
+        </text>
+        <Show when={failed() > 0}>
+          <text fg={theme.error}> · {failed()} 个失败</text>
+        </Show>
+      </box>
       <Show
         when={props.expanded}
         fallback={
-          <>
-            {/* 摘要行可点：▸ 点开换成整块明细 */}
-            <box flexDirection="row" onMouseDown={() => props.onToggle?.()}>
-              <text fg={theme.subtle}>
-                {"▸ "}
-                {summarizeTools(props.calls)}
-                {running() ? "…" : ""}
-              </text>
-              <Show when={failed() > 0}>
-                <text fg={theme.error}> · {failed()} 个失败</text>
-              </Show>
-            </box>
-            {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
-            <For each={changes()}>
-              {(call) => (
-                <ToolDiff
-                  call={call}
-                  budget={diffBudgetFor(changes().length)}
-                  columns={props.columns}
-                />
-              )}
-            </For>
-          </>
+          <For each={changes()}>
+            {(call) => (
+              <ToolDiff
+                call={call}
+                budget={diffBudgetFor(changes().length)}
+                columns={props.columns}
+              />
+            )}
+          </For>
         }
       >
-        {/* 展开态：摘要行让位，换成一整块带底色的明细（对齐 Claude Code 的样式）。
+        {/* 整块带底色的明细（对齐 Claude Code 的样式）。
             点块内**任意一处**收回去——鼠标事件会从子节点冒泡到这个容器上，
             所以 handler 只挂这一个，text 子节点不用各自接 */}
         <box
