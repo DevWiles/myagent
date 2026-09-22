@@ -152,6 +152,14 @@ public final class AgentServer extends WebSocketServer {
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
 
+    /**
+     * 广播事件的流水账（编号 + 留底），断线重连补发用（协议 1.2 节）。
+     *
+     * <p>容量按「一轮长回答」估：text_delta 一轮上千条，4096 大约兜得住
+     * 最近两三轮。手机过个电梯是几十秒，够；睡一觉回来就该走 /continue 了。
+     */
+    private final EventLog events = new EventLog(4096);
+
     /** agent.run() 的跑道。单线程：同一时刻只允许一轮对话。 */
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "agent-run");
@@ -473,7 +481,39 @@ public final class AgentServer extends WebSocketServer {
             conn.close(1008, "bad token");
             return;
         }
-        conn.send(ready().toString());
+        // since = 客户端上次看到的 seq：0 是「把留底全给我」（手机首连），
+        // 不带就是「只要新的」（终端每次都是全新会话，补发只会搅乱它）
+        long since = parseSince(queryParam(handshake.getResourceDescriptor(), "since"));
+        // 锁住流水账再发 ready + 补发：这期间不许有新广播插队，
+        // 否则「ready 里的 lastSeq」和补发内容之间会漏帧。
+        // 补发完释放锁，新事件照常广播到这条连接上，正好接上
+        synchronized (events) {
+            conn.send(ready().toString());
+            if (since >= 0) {
+                EventLog.Replay replay = events.replay(since);
+                if (replay.gap()) {
+                    // 如实报缺口，别静默跳过——转录豁了口子还看不出来，没人查得动
+                    conn.send(Protocol.event("replay_gap")
+                            .put("from", replay.gapFrom())
+                            .put("to", replay.gapTo()).toString());
+                }
+                for (String line : replay.events()) {
+                    conn.send(line);
+                }
+            }
+        }
+    }
+
+    /** since 参数：不带或不是数字 = -1（不补发）。 */
+    private static long parseSince(String raw) {
+        if (raw == null) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     @Override
@@ -1013,6 +1053,8 @@ public final class AgentServer extends WebSocketServer {
         // 能力清单：界面据此决定要不要放出「先规划后执行」的入口
         ArrayNode features = n.putArray("features");
         Protocol.FEATURES.forEach(features::add);
+        // 到此刻为止的最后一个事件号。重连的客户端拿它和自己看到的比对
+        n.put("lastSeq", events.lastSeq());
         n.put("busy", busy.get());
         if (agent != null) {
             n.put("tokens", agent.estimatedTokens());
@@ -1065,8 +1107,17 @@ public final class AgentServer extends WebSocketServer {
         return Protocol.event("error").put("message", message);
     }
 
+    /**
+     * 广播，带编号留底。
+     *
+     * <p>锁把「编号 + 播出」箍成一步：编号顺序必须等于发送顺序，
+     * 不然重连补发出去的序列和当时播的对不上。锁内只有内存操作和
+     * 往各连接的发送队列里塞一条（java-websocket 的 send 不等网络），占不了多久。
+     */
     private void publish(ObjectNode node) {
-        broadcast(node.toString());
+        synchronized (events) {
+            broadcast(events.stamp(node));
+        }
     }
 
     private void send(WebSocket conn, ObjectNode node) {

@@ -247,6 +247,7 @@ class ProtocolTest {
         assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("team"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("events_resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
     }
 

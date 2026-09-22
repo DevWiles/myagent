@@ -68,7 +68,8 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact", "memory", "roles", "team");
+                    "session", "sessions", "compact", "memory", "roles", "team",
+                    "events_resume");
 
     /**
      * 角色名册，进首帧。
