@@ -109,6 +109,29 @@ describe('工具分组', () => {
     expect(entry.calls[1]).toMatchObject({ id: 2, running: false, ok: false, output: '炸了' })
   })
 
+  test('写文件带回来的 diff 要存进那一条——界面唯一能显示「改了什么」的来源', () => {
+    const store = new SessionStore()
+    feed(store,
+      { t: 'tool_started', id: 1, tool: 'write_file', arguments: '{"path":"a.java"}' },
+      { t: 'tool_finished', id: 1, tool: 'write_file', ok: true, output: '已写入 a.java',
+        diff: '@@ -1 +1 @@\n- 旧\n+ 新' })
+
+    const entry = store.getSnapshot().entries[0]
+    if (entry?.kind !== 'tools') throw new Error('应该是工具组')
+    expect(entry.calls[0]?.diff).toContain('+ 新')
+  })
+
+  test('没带 diff 的工具就是没有——不该凭空造一个空串出来', () => {
+    const store = new SessionStore()
+    feed(store,
+      { t: 'tool_started', id: 1, tool: 'read_file', arguments: '{}' },
+      { t: 'tool_finished', id: 1, tool: 'read_file', ok: true, output: '内容' })
+
+    const entry = store.getSnapshot().entries[0]
+    if (entry?.kind !== 'tools') throw new Error('应该是工具组')
+    expect(entry.calls[0]?.diff).toBeUndefined()
+  })
+
   test('没有对应工具组时收到 tool_finished 不该崩', () => {
     const store = new SessionStore()
     expect(() =>

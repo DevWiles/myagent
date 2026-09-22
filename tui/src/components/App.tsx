@@ -10,9 +10,9 @@
  */
 
 import type { KeyEvent } from "@opentui/core"
-import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
+import { useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
 import { armedAfter, decideCtrlC } from "../interrupt.ts"
-import { createEffect, createSignal, Index, Show, type Accessor } from "solid-js"
+import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
 import { tildify } from "../path.ts"
@@ -28,6 +28,7 @@ import {
   type CommandContext,
   type CommandEntry,
 } from "../commands.ts"
+import { copyToClipboard } from "../clipboard.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { CommandMenu } from "./CommandMenu.tsx"
@@ -36,7 +37,7 @@ import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
 import { TeamPanel } from "./TeamPanel.tsx"
 import { ModeLine } from "./ModeLine.tsx"
-import { PromptInput } from "./PromptInput.tsx"
+import { isNewlineKey, PromptInput } from "./PromptInput.tsx"
 import { SessionPicker } from "./SessionPicker.tsx"
 import { StatusLine } from "./StatusLine.tsx"
 import { Welcome } from "./Welcome.tsx"
@@ -152,6 +153,48 @@ export function App(props: AppProps) {
    * 那行字就开始说谎了。解除交给「按了别的键」。
    */
   const [exitArmed, setExitArmed] = createSignal(false)
+
+  /**
+   * 刚复制完那一下的提示，几秒后自己消失。
+   *
+   * <p>和「再按一次 Ctrl-C」一样<b>不进转录</b>：它说的是刚刚发生的一个动作，
+   * 不是会话的内容。进了转录，滚上去还能看见「已复制 42 个字符」，纯属噪音。
+   *
+   * <p>成功也要报一声。这件事本来就是「看起来是好的」那一类——
+   * 选区一直画得好好的，只有粘贴的时候才发现没进剪贴板。一行确认，
+   * 用户才知道这回是真的进去了。
+   */
+  const [copied, setCopied] = createSignal<{ ok: boolean; text: string } | null>(null)
+  let copyHintTimer: ReturnType<typeof setTimeout> | undefined
+
+  function flashCopyHint(ok: boolean, text: string): void {
+    clearTimeout(copyHintTimer)
+    setCopied({ ok, text })
+    copyHintTimer = setTimeout(() => setCopied(null), ok ? 1600 : 4000)
+  }
+
+  /**
+   * 拖选完把文字送进系统剪贴板。
+   *
+   * <p><b>为什么必须自己做</b>：界面开着鼠标上报（滚轮要用），终端因此把拖选交给了程序，
+   * 原生的「选中 + Cmd-C」不再生效。OpenTUI 接手后自己画选区、自己算选中了什么，
+   * 但它只画不 copy——屏幕上一块高亮，Cmd-C 却什么都拿不到。
+   *
+   * <p>只在<b>拖完</b>那一下复制（`isDragging` 为 false），不在拖的过程中：
+   * 拖一次会经过几十个中间状态，每个都去起一次 pbcopy 是在自找卡顿。
+   */
+  useSelectionHandler((selection) => {
+    if (selection.isDragging) return
+    const text = selection.getSelectedText()
+    if (!text) return
+    void copyToClipboard(text).then((ok) => {
+      flashCopyHint(ok, ok
+        ? `已复制 ${[...text].length} 个字符`
+        : "复制失败：没找到 pbcopy/xclip/wl-copy，终端也不支持 OSC 52")
+    })
+  })
+
+  onCleanup(() => clearTimeout(copyHintTimer))
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
   let inputControls: { setValue: (value: string) => void } | undefined
 
@@ -543,7 +586,10 @@ export function App(props: AppProps) {
       }
       // 回车 = 就选高亮这条。必须消费掉：不消费的话输入框会把敲了一半的
       // 「/c」当成一句话提交，而那句话对模型毫无意义
-      if (key.name === "return") {
+      //
+      // 但**带修饰键的回车要放过去**：那是换行（见 PromptInput 的 BINDINGS）。
+      // 不分开的话，菜单一开着就再也换不了行，而菜单是打一个 / 就弹出来的
+      if (key.name === "return" && !isNewlineKey(key)) {
         consume()
         acceptHighlighted()
         return
@@ -609,6 +655,7 @@ export function App(props: AppProps) {
                 <EntryView
                   entry={entry()}
                   streaming={state().busy && index === state().entries.length - 1}
+                  columns={dimensions().width - 2}
                 />
               )}
             </Index>
@@ -722,6 +769,15 @@ export function App(props: AppProps) {
           <box flexShrink={0} paddingLeft={1} paddingRight={1}>
             <text fg={dark.warning}>再按一次 Ctrl-C 退出（按别的键就当没按过）</text>
           </box>
+        </Show>
+
+        {/* 复制回执。和上面那行一样不进转录，理由见 copied 那个信号 */}
+        <Show when={copied()}>
+          {(hint) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <text fg={hint().ok ? dark.inactive : dark.warning}>{hint().text}</text>
+            </box>
+          )}
         </Show>
 
         {/* 计划面板钉在输入框下边：出现时把输入框往上顶，

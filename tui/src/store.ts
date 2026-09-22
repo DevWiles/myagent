@@ -28,6 +28,8 @@ export type ToolCall = {
   running: boolean
   ok?: boolean
   output?: string
+  /** 改了什么（统一 diff）。只有写文件这类工具才有，见 protocol.ts 的 tool_finished */
+  diff?: string
 }
 
 /** 计划里的一个任务 + 它的执行进度。界面自己的形态，不直接用线上类型。 */
@@ -661,7 +663,7 @@ export class SessionStore {
           ...tail,
           calls: tail.calls.map(call =>
             call.id === event.id
-              ? { ...call, running: false, ok: event.ok, output: event.output }
+              ? { ...call, running: false, ok: event.ok, output: event.output, diff: event.diff }
               : call,
           ),
         })

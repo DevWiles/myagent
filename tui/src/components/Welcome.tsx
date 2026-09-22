@@ -112,7 +112,7 @@ function Section(props: { title: string; lines: readonly string[] }) {
 }
 
 const TIPS = [
-  "输入任务后按 Enter，agent 会自己决定调哪些工具",
+  "输入任务后按 Enter，agent 会自己决定调哪些工具（Shift+Enter 换行，写长一点也不怕）",
   // 模式是新用户最容易完全错过的东西：它不在命令菜单里，只在左下角常驻一行。
   // 所以这条排在「敲 /」前面——先让人知道有这回事，再教他翻菜单
   "Shift+Tab 切模式：normal 直接干 · plan 先拆计划 · team 几个角色各看一遍",

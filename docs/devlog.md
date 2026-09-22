@@ -8,6 +8,46 @@
 
 ---
 
+## 2026-09-21 · 代码高亮：查了一遍 Claude Code，结论和我自己的三个方案都不一样
+
+界面里代码块整块一个平色。我先给出三个方案（加 wasm / 入库 / 自己写 lexer），
+然后去拆了 Claude Code 的二进制（Bun 编译的单文件，280MB，一部分是 JSC 字节码，
+但**大块 JS 源码是明文**，strings + dd 就能读）。
+
+答案是**第四个**：它用 **highlight.js 11.11.1**，不是 tree-sitter。证据链：
+全量语言定义 + 扩展名映射 + 语言显示名表在包里；全局设置有 `syntaxHighlightingDisabled`；
+插件清单 schema 里有 `syntaxHighlighting.hljsLanguages`，来源限 npm:/github: 且**强制 SRI**，
+注册时跑一次 `highlight("")` 冒烟测试，失败就 unregister 并发 telemetry。
+它自己还内置了一门 hljs grammar（Cedar）。
+
+顺带两个发现：HTML artifact 是**另一条独立的路**（注入客户端 hljs 运行时，带 feature flag、
+字符预算、`data-claude-hljs-claimed` 幂等标记）；终端 diff 做到了**词级**
+（主题键里有 `diffAddedWord`/`diffRemovedWord`），比我们现在的行级细一层。
+
+**教训：拿不准技术选型时，去读一个把这件事做对了的实现，比自己列三个方案靠谱。**
+我那三个方案全部建立在「必须用 tree-sitter」这个没人验证过的前提上——
+而那个前提只是因为 OpenTUI 恰好用它。
+
+### 为什么 tree-sitter 在这儿是错的
+
+OpenTUI 只捆 5 个 parser（js/ts/markdown/markdown_inline/zig），每加一门语言要 400KB~1.4MB 的 wasm。
+更硬的一道坎：markdown parser 的 `infoStringMap` **只认 js/jsx/ts/tsx/md 这几种围栏标记**，
+其余语言的 ``` 块压根不会被注入高亮。也就是说哪怕补上 java 的 wasm，```java 仍然不上色。
+
+换 hljs 之后是纯 JS、无二进制、离线可用，`lib/common` 36 种语言涵盖了 java/python/go/rust。
+
+### 走 token 树，不解析 HTML
+
+`hljs.highlight()` 返回的 `value` 是 HTML。正则抠 `<span>` 能做，但要处理实体转义，
+而**代码里恰恰全是 `<` `&` 这些字符**——少解一个就在屏幕上显示成 `&amp;&amp;`。
+`_emitter.rootNode` 直接给结构化 token 树，一个字都不用解码。
+
+代价是 `_emitter` 带下划线、半私有。所以两头都兜住：认不出结构就整段退回纯文本（不抛异常），
+外加一条**依赖契约测试**（`treeShapeIsIntact`）——升级 hljs 之后形状变了会当场红，
+而不是等用户发现代码块全变白。**半私有 API 可以用，但必须配一条会响的警报。**
+
+---
+
 ## 2026-09-21 · 并发：三个层面一条规矩，和两个「串行时代」埋的雷
 
 这一期给工具调用、计划任务、圆桌席位加并发。设计上最后收敛成一条规矩管三处——

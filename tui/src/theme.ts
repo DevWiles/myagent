@@ -11,6 +11,7 @@
 
 import { SyntaxStyle, type ThemeTokenStyle } from "@opentui/core"
 import { createContext, useContext } from "solid-js"
+import { scopeChain } from "./code-highlight.ts"
 
 export type Theme = {
   /** 正文 */
@@ -59,6 +60,19 @@ export type Theme = {
    */
   diffAdd: string
   diffDel: string
+  /**
+   * 增删两行的**底色**，以及行号的颜色。
+   *
+   * <p>为什么光有前景色不够：一行里真正变了的往往只是中间几个字，
+   * 只给文字上色的话，眼睛得逐行去找那个 `+`/`-` 记号。
+   * 整行铺一层底色，改动的范围一眼就框出来了——这也是所有 diff 工具的做法。
+   *
+   * <p>底色要**压得很暗**：它盖在正文下面，抢眼的必须是字不是背景。
+   */
+  diffAddBg: string
+  diffDelBg: string
+  /** 行号。比正文暗，但要能在增删底色上看清 */
+  diffLineNo: string
   /** 转圈动画 */
   spinner: string
 
@@ -94,6 +108,9 @@ export const dark: Theme = {
   approvalBorder: "#d9a441",
   diffAdd: "#98c379",
   diffDel: "#e06c75",
+  diffAddBg: "#12301c",
+  diffDelBg: "#3a1418",
+  diffLineNo: "#6b7280",
   spinner: "#5b9dfb",
   border: "#3d4757",
   panel: "#1b1f27",
@@ -121,6 +138,9 @@ export const light: Theme = {
   approvalBorder: "#a16207",
   diffAdd: "#166534",
   diffDel: "#b91c1c",
+  diffAddBg: "#dcfce7",
+  diffDelBg: "#fee2e2",
+  diffLineNo: "#9ca3af",
   spinner: "#1d4ed8",
   border: "#c4ccd8",
   panel: "#f2f4f8",
@@ -183,6 +203,68 @@ function syntaxRules(theme: Theme): ThemeTokenStyle[] {
     { scope: ["variable", "variable.parameter", "property", "field"], style: { foreground: theme.text } },
     { scope: ["operator", "punctuation", "punctuation.delimiter", "punctuation.bracket"], style: { foreground: theme.subtle } },
   ]
+}
+
+/**
+ * hljs 作用域 → 颜色。
+ *
+ * <p>取值和上面那张 tree-sitter 表**刻意一致**：同一段 Java 代码，
+ * 走哪条路渲染出来都该是同一个样。两张表配色漂开的话，
+ * 用户会以为是「有时候高亮对有时候不对」，而不是「两条渲染路径」。
+ *
+ * <p>键是 hljs 的作用域名（`keyword`、`title.class`、`variable.language`…）。
+ * 只需要写关心的那几层，带点的作用域由 {@link scopeChain} 逐级回退，
+ * 落到最近的祖先上。
+ */
+const HLJS_COLORS: Record<string, (t: Theme) => string> = {
+  comment: (t) => t.inactive,
+  quote: (t) => t.inactive,
+  string: (t) => t.codeBlock,
+  regexp: (t) => t.codeBlock,
+  symbol: (t) => t.codeBlock,
+  "meta.string": (t) => t.codeBlock,
+  number: (t) => t.warning,
+  literal: (t) => t.warning,
+  keyword: (t) => t.thought,
+  "variable.language": (t) => t.thought,     // this / self / super
+  built_in: (t) => t.user,
+  title: (t) => t.user,                      // 函数名、类名（title.class 也落这儿）
+  "title.class": (t) => t.toolName,
+  type: (t) => t.toolName,
+  class: (t) => t.toolName,
+  name: (t) => t.toolName,                   // 标签名（xml/html）
+  attr: (t) => t.text,
+  attribute: (t) => t.text,
+  property: (t) => t.text,
+  params: (t) => t.text,
+  variable: (t) => t.text,
+  "template-variable": (t) => t.text,
+  operator: (t) => t.subtle,
+  punctuation: (t) => t.subtle,
+  meta: (t) => t.inactive,                   // #include、注解、shebang
+  section: (t) => t.heading,
+  // diff 作用域：``` 里贴 diff 是常事，颜色要和真 diff 那边对上
+  addition: (t) => t.diffAdd,
+  deletion: (t) => t.diffDel,
+}
+
+/** 注释要斜体。和 tree-sitter 那张表的处理一致。 */
+const HLJS_ITALIC = new Set(["comment", "quote"])
+
+/**
+ * 这一段该用什么颜色。作用域认不出来就返回 null，由调用方用代码块的默认色。
+ */
+export function codeScopeColor(scope: string, theme: Theme): string | null {
+  for (const candidate of scopeChain(scope)) {
+    const pick = HLJS_COLORS[candidate]
+    if (pick) return pick(theme)
+  }
+  return null
+}
+
+/** 这一段要不要斜体。 */
+export function codeScopeItalic(scope: string): boolean {
+  return scopeChain(scope).some((candidate) => HLJS_ITALIC.has(candidate))
 }
 
 /**

@@ -30,6 +30,29 @@ export const MAX_FEEDBACK = 500
 /** diff 最多占几行。再多会把上面的对话顶出屏幕。 */
 export const MAX_DIFF_LINES = 12
 
+/**
+ * 一组工具调用里，所有 diff 加起来最多占几行。
+ *
+ * <p>单个 diff 卡 12 行是够的，但**一次新建工程会写七八个文件**——
+ * 七块 12 行就是九十行，把上面的对话整个顶出屏幕。
+ * 所以按组再卡一道，文件多了每个就少露几行。
+ */
+export const MAX_DIFF_LINES_PER_GROUP = 28
+
+/** 一个 diff 至少露几行。再少就只剩个 @@ 抬头，不如不画。 */
+export const MIN_DIFF_LINES = 3
+
+/**
+ * 一组里有 n 个 diff 时，每个分到几行。
+ *
+ * <p>平分，但两头夹住：不超过单个的上限，也不低于「还看得出点东西」的下限。
+ */
+export function diffBudgetFor(count: number): number {
+  if (count <= 1) return MAX_DIFF_LINES
+  const share = Math.floor(MAX_DIFF_LINES_PER_GROUP / count)
+  return Math.max(MIN_DIFF_LINES, Math.min(MAX_DIFF_LINES, share))
+}
+
 export type DiffLineKind = "add" | "del" | "hunk" | "context"
 
 export function diffLineKind(line: string): DiffLineKind {
@@ -37,24 +60,6 @@ export function diffLineKind(line: string): DiffLineKind {
   if (line.startsWith("+")) return "add"
   if (line.startsWith("-")) return "del"
   return "context"
-}
-
-/**
- * 按行数预算裁 diff。
- *
- * **裁掉了多少要报出来**，理由和后端那三道预算一样：悄悄少给的时候，
- * 人以为自己看到了全部，然后按了同意。
- */
-export function visibleDiff(
-  preview: string,
-  budget: number = MAX_DIFF_LINES,
-): { lines: string[]; hidden: number } {
-  const all = preview.split("\n").filter((line) => line.length > 0)
-  const room = Math.max(1, budget)
-  if (all.length <= room) return { lines: all, hidden: 0 }
-  // 留一行给「还有多少没显示」那句话，否则它自己会把内容再挤掉一行
-  const shown = all.slice(0, Math.max(1, room - 1))
-  return { lines: shown, hidden: all.length - shown.length }
 }
 
 /**

@@ -1,32 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { diffLineKind, editFeedback, MAX_FEEDBACK, nextRuleIndex, visibleDiff } from "./approval.ts"
+import {
+  diffBudgetFor,
+  diffLineKind,
+  editFeedback,
+  MAX_DIFF_LINES,
+  MAX_FEEDBACK,
+  MIN_DIFF_LINES,
+  nextRuleIndex,
+} from "./approval.ts"
 
-describe("visibleDiff", () => {
-  test("放得下就全给", () => {
-    expect(visibleDiff("@@ -1 +1 @@\n- a\n+ b", 10)).toEqual({
-      lines: ["@@ -1 +1 @@", "- a", "+ b"],
-      hidden: 0,
-    })
-  })
-
-  test("放不下要裁，并且报出裁了多少——悄悄少给的时候人会以为看到了全部", () => {
-    const preview = Array.from({ length: 20 }, (_, i) => `+ line ${i}`).join("\n")
-    const got = visibleDiff(preview, 5)
-
-    expect(got.lines.length).toBe(4) // 留一行给「还有多少」那句话
-    expect(got.hidden).toBe(16)
-    expect(got.lines.length + got.hidden).toBe(20)
-  })
-
-  test("预算再小也至少给一行", () => {
-    expect(visibleDiff("+ a\n+ b\n+ c", 0).lines.length).toBe(1)
-  })
-
-  test("空的 preview 不产生空行", () => {
-    expect(visibleDiff("", 10)).toEqual({ lines: [], hidden: 0 })
-    expect(visibleDiff("\n\n", 10)).toEqual({ lines: [], hidden: 0 })
-  })
-})
 
 describe("diffLineKind", () => {
   test("认得出四种行", () => {
@@ -78,5 +60,29 @@ describe("editFeedback", () => {
   test("满了就不再加——这句话要进提示词，不能让人粘一整篇", () => {
     const full = "长".repeat(MAX_FEEDBACK)
     expect(editFeedback(full, { sequence: "x" })).toBe(full)
+  })
+})
+
+describe("一组里多个 diff 分预算", () => {
+  test("只有一个就给足——单独一次写入，该看多少看多少", () => {
+    expect(diffBudgetFor(1)).toBe(MAX_DIFF_LINES)
+    expect(diffBudgetFor(0)).toBe(MAX_DIFF_LINES)
+  })
+
+  test("文件一多就每个少露几行，总量不失控", () => {
+    // 新建工程一次写七八个文件，不收着的话九十行 diff 把上面的对话整个顶出屏幕
+    expect(diffBudgetFor(7)).toBeLessThan(MAX_DIFF_LINES)
+    expect(diffBudgetFor(7) * 7).toBeLessThanOrEqual(40)
+  })
+
+  test("再多也不低于下限——只剩个 @@ 抬头不如不画", () => {
+    expect(diffBudgetFor(50)).toBe(MIN_DIFF_LINES)
+  })
+
+  test("单调不增：文件越多，每个分到的不会变多", () => {
+    const budgets = [1, 2, 3, 5, 10, 30].map(diffBudgetFor)
+    for (let i = 1; i < budgets.length; i++) {
+      expect(budgets[i]!).toBeLessThanOrEqual(budgets[i - 1]!)
+    }
   })
 })

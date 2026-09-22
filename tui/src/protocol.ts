@@ -142,7 +142,12 @@ export type ServerEvent =
   /** 模型调用工具前说的话，ReAct 里的 Thought。 */
   | { t: 'thought'; text: string }
   | { t: 'tool_started'; id: number; tool: string; arguments: string }
-  | { t: 'tool_finished'; id: number; tool: string; ok: boolean; output: string }
+  /**
+   * `diff` 是**只给人看的**那份改动（统一 diff），只有写文件这类工具才带，没有就不发这个字段。
+   * 它不进对话历史——模型刚把新内容整段写出来，再回灌一份 diff 给它是白花 token；
+   * 而用户没看过那段内容，「改了什么」恰恰是他唯一想知道的事。
+   */
+  | { t: 'tool_finished'; id: number; tool: string; ok: boolean; output: string; diff?: string }
   /**
    * 上次的对话已经立回后端内存了。
    *

@@ -21,7 +21,8 @@
 
 import { TextAttributes } from "@opentui/core"
 import { createMemo, For, Show } from "solid-js"
-import { diffLineKind, visibleDiff, type ApprovalStage } from "../approval.ts"
+import { type ApprovalStage } from "../approval.ts"
+import { DiffView } from "./DiffView.tsx"
 import type { Approval } from "../store.ts"
 import { truncateEnd, width } from "../path.ts"
 import { useTheme } from "../theme.ts"
@@ -50,7 +51,7 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
 
   // 框里除 diff 之外固定占掉约 10 行（边框、标题、动作、原因、按钮、留白）。
   // 留不下 3 行就干脆不画——画一两行 diff 什么也说明不了，还占着地方
-  const diff = createMemo(() => visibleDiff(props.approval.preview, Math.max(0, props.rows - 12)))
+  const diffBudget = () => Math.max(0, props.rows - 12)
   const showDiff = () => props.approval.preview.length > 0 && props.rows >= 15
 
   const level = createMemo(() => {
@@ -86,30 +87,11 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
       </box>
       <text fg={theme.subtle}>{reason()}</text>
 
-      {/* 改动长什么样。只说「原 30 行 → 新 45 行」的话，用户能做的判断只有「变长了」 */}
+      {/* 改动长什么样。只说「原 30 行 → 新 45 行」的话，用户能做的判断只有「变长了」。
+          带行号和底色，和转录里事后回看的那份长得一模一样——用户正是拿这两屏做对照的 */}
       <Show when={showDiff()}>
         <box flexDirection="column" paddingTop={1}>
-          <For each={diff().lines}>
-            {(line) => {
-              const kind = diffLineKind(line)
-              return (
-                <text
-                  fg={
-                    kind === "add"
-                      ? theme.diffAdd
-                      : kind === "del"
-                        ? theme.diffDel
-                        : theme.subtle
-                  }
-                >
-                  {truncateEnd(line, inner())}
-                </text>
-              )
-            }}
-          </For>
-          <Show when={diff().hidden > 0}>
-            <text fg={theme.subtle}>{`… 还有 ${diff().hidden} 行没显示`}</text>
-          </Show>
+          <DiffView diff={props.approval.preview} columns={inner()} budget={diffBudget()} />
         </box>
       </Show>
 

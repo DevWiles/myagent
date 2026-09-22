@@ -10,6 +10,8 @@
  */
 
 import {
+  fg,
+  italic,
   StyledText,
   TextAttributes,
   TextRenderable,
@@ -17,11 +19,14 @@ import {
   type RenderNodeContext,
 } from "@opentui/core"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from "solid-js"
+import { diffBudgetFor } from "../approval.ts"
+import { highlightCode, parseFence, type CodeLine } from "../code-highlight.ts"
+import { DiffView } from "./DiffView.tsx"
 import { summarizeTools } from "../format.ts"
 import { isListItem, splitBlocks } from "../markdown-blocks.ts"
 import type { MemoryRow } from "../protocol.ts"
 import type { Entry, ToolCall } from "../store.ts"
-import { syntaxStyleFor, useTheme } from "../theme.ts"
+import { codeScopeColor, codeScopeItalic, syntaxStyleFor, useTheme, type Theme } from "../theme.ts"
 
 export type EntryViewProps = {
   entry: Entry
@@ -32,6 +37,11 @@ export type EntryViewProps = {
    * 这两个条件组件都看不到。
    */
   streaming?: boolean
+  /**
+   * 可用宽度（列）。diff 的底色要铺满一整行，而 `<text bg>` 只给文字本身上色，
+   * 得靠补空格撑开——补多少只有上层知道。给个保守的默认值，省得每个调用方都传。
+   */
+  columns?: number
 }
 
 export function EntryView(props: EntryViewProps) {
@@ -47,7 +57,7 @@ export function EntryView(props: EntryViewProps) {
         {(entry) => <ThoughtEntry text={entry().text} />}
       </Match>
       <Match when={props.entry.kind === "tools" ? props.entry : null}>
-        {(entry) => <ToolsEntry calls={entry().calls} />}
+        {(entry) => <ToolsEntry calls={entry().calls} columns={props.columns ?? 80} />}
       </Match>
       <Match when={props.entry.kind === "notice" ? props.entry : null}>
         {(entry) => <NoticeEntry level={entry().level} text={entry().text} />}
@@ -243,6 +253,57 @@ function gapBefore(complete: string[], index: number, text?: string): number {
  *   64 行）。所以会看到当前这一两行露出 `##`、`**` 标记，写完就变正体——
  *   Claude Code 这里用的是一个宽容的流式解析器，我们暂时没有对应物。
  */
+/**
+ * 一个围栏代码块。
+ *
+ * <h3>为什么一行一个 `<text>`，段落用 `<span>`</h3>
+ * OpenTUI 的 `<text>` 能装若干 `<span>`，每个 span 一个颜色——这正好对上
+ * 「一行代码切成若干带作用域的片段」。一行一个节点还顺带让行与行之间互不影响：
+ * 长行怎么处理（截断还是折行）是这一行自己的事。
+ *
+ * <h3>认不出的语言照样画</h3>
+ * `lang` 为 null 时 {@link highlightCode} 退回纯文本，这里照常渲染，
+ * 只是全是默认色。**没有高亮 ≠ 不显示**——模型写 ```mermaid 或者干脆不写语言标记
+ * 都是家常便饭，那时候代码本身还是要看得见的。
+ */
+/**
+ * 把一行的若干片段拼成一段带色文本。
+ *
+ * <h3>为什么是 children 而不是 `content` 属性</h3>
+ * `<text content={styledText}/>` **画出来是 `[object Object]`**——Solid 那层
+ * 不把这个属性当 StyledText 处理，直接字符串化了。类型上它是合法的
+ * （`TextOptions.content?: StyledText | string`），所以编译器一声不吭，
+ * 要到真跑起来才看得见。作为 children 传就正常，颜色和斜体都在。
+ *
+ * <p>`as never` 是因为 `TextChildren` 的类型里没有 StyledText——
+ * 运行时支持，类型没跟上。留着这行注释，免得后来的人以为可以顺手「修掉」它。
+ */
+function styleLine(line: CodeLine, theme: Theme): StyledText {
+  // 空行也要给一个 chunk：一个 chunk 都没有的 <text> 不占高度，
+  // 代码里的空行就会被悄悄吃掉，缩进和段落感全乱
+  if (line.length === 0) return new StyledText([fg(theme.inlineCode)("")])
+  return new StyledText(
+    line.map((span) => {
+      const color = codeScopeColor(span.scope, theme) ?? theme.inlineCode
+      const chunk = fg(color)(span.text)
+      return codeScopeItalic(span.scope) ? italic(chunk) : chunk
+    }),
+  )
+}
+
+function CodeBlock(props: { lang: string | null; code: string; marginTop: number }) {
+  const theme = useTheme()
+  const lines = createMemo(() => highlightCode(props.code, props.lang))
+
+  return (
+    <box flexDirection="column" marginTop={props.marginTop} paddingLeft={2}>
+      <For each={lines()}>
+        {(line) => <text>{styleLine(line, theme) as never}</text>}
+      </For>
+    </box>
+  )
+}
+
 function AssistantEntry(props: { text: string; streaming: boolean }) {
   const theme = useTheme()
   const blocks = createMemo(() =>
@@ -265,6 +326,15 @@ function AssistantEntry(props: { text: string; streaming: boolean }) {
           // 算一次就够。
           const gap = untrack(() => gapBefore(blocks().complete, index()))
           const indent = untrack(() => indentOf(block))
+          // 围栏代码块自己渲染，不交给 <markdown>。
+          //
+          // 交给它的话走的是 CodeRenderable + tree-sitter，而那边只捆了 5 个 parser，
+          // 且 markdown 的 infoStringMap 只认 js/ts/md 这几种围栏标记——
+          // 其余语言（java、python、go…）整块落回一个平色。理由详见 code-highlight.ts
+          const fence = untrack(() => parseFence(block))
+          if (fence) {
+            return <CodeBlock lang={fence.lang} code={fence.code} marginTop={gap} />
+          }
           return (
             // ⚠️ syntaxStyle 必须写在 content 前面：Solid 按书写顺序调 setter，
             // 而设置 content 会立刻触发解析；syntaxStyle 还没赋值的话那一趟解析
@@ -320,23 +390,88 @@ function ThoughtEntry(props: { text: string }) {
  *   只说「执行 1 条命令」而不说它失败了，用户会以为事情办成了
  *
  * 明细留给将来的 Ctrl-O 展开。
+ *
+ * <h3>唯一的例外：改了文件要把 diff 摊开</h3>
+ * 「工具名和参数是内部动作」这条对读文件、搜索都成立，唯独对<b>写文件</b>不成立——
+ * 那是 agent 替用户改了他的代码，而摘要行只会说「写入 1 个文件」。
+ * 用户要判断的是「这个改动对不对」，只给一个计数等于什么都没说。
+ *
+ * <p>确认框里本来就有 diff，但那条路<b>只在需要审批时才走</b>。
+ * 用惯之后绝大多数写入会被 `~/.myagent/policy.json` 里的规则直接放行，
+ * 于是屏幕上从头到尾看不到任何改动内容——这正是要修的。
  */
-function ToolsEntry(props: { calls: ToolCall[] }) {
+function ToolsEntry(props: { calls: ToolCall[]; columns: number }) {
   const theme = useTheme()
   const running = () => props.calls.some((call) => call.running)
   const failed = () => props.calls.filter((call) => call.ok === false).length
+  /** 这一组里改过文件的那几次。顺序保持调用顺序，读起来和发生顺序一致 */
+  const changes = () => props.calls.filter((call) => call.diff && call.diff.length > 0)
 
   return (
-    <box flexDirection="row" paddingTop={1}>
-      <text fg={theme.subtle}>
-        {summarizeTools(props.calls)}
-        {running() ? "…" : ""}
-      </text>
-      <Show when={failed() > 0}>
-        <text fg={theme.error}> · {failed()} 个失败</text>
-      </Show>
+    <box flexDirection="column" paddingTop={1}>
+      <box flexDirection="row">
+        <text fg={theme.subtle}>
+          {summarizeTools(props.calls)}
+          {running() ? "…" : ""}
+        </text>
+        <Show when={failed() > 0}>
+          <text fg={theme.error}> · {failed()} 个失败</text>
+        </Show>
+      </box>
+      {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
+      <For each={changes()}>
+        {(call) => (
+          <ToolDiff
+            call={call}
+            budget={diffBudgetFor(changes().length)}
+            columns={props.columns}
+          />
+        )}
+      </For>
     </box>
   )
+}
+
+/**
+ * 一次写入改了什么。
+ *
+ * <p>配色和确认框共用一套（{@code diffAdd}/{@code diffDel}），判定也共用
+ * {@link diffLineKind}——两处各写一份的话，同一段 diff 在审批时和事后会显示成两个样，
+ * 而用户正是拿这两屏做对照的。
+ *
+ * <p>行号、底色、裁行都归 {@link DiffView}——那也是确认框用的那一个。
+ */
+function ToolDiff(props: { call: ToolCall; budget: number; columns: number }) {
+  const theme = useTheme()
+  const target = () => fileOf(props.call.args)
+  // 左边缩进 2 列，diff 自己能用的就少 2 列
+  const inner = () => Math.max(20, props.columns - 2)
+
+  return (
+    <box flexDirection="column" paddingTop={1} paddingLeft={2}>
+      <Show when={target()}>
+        <text fg={theme.subtle}>{target()}</text>
+      </Show>
+      <DiffView diff={props.call.diff ?? ""} columns={inner()} budget={props.budget} />
+    </box>
+  )
+}
+
+/**
+ * 从工具参数里把文件名抠出来，给 diff 加个抬头。
+ *
+ * <p>一组里可能有好几次写入，不说是哪个文件的话，两段 diff 会糊成一片。
+ * 参数不是合法 JSON、或者没有 path 字段时返回空——**抠不出来不该让这一块不画**，
+ * diff 本身才是主角。
+ */
+function fileOf(args: string): string {
+  try {
+    const parsed: unknown = JSON.parse(args)
+    const path = (parsed as { path?: unknown } | null)?.path
+    return typeof path === "string" ? path : ""
+  } catch {
+    return ""
+  }
 }
 
 /**
