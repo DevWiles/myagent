@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.wiles.myagent.client.state.Entry
 import dev.wiles.myagent.client.state.ToolCall
+import dev.wiles.myagent.client.state.ToolSummary
 
 /**
  * 转录条目的渲染，对齐 TUI 的 EntryView：同一串事件在两块屏上长同一个样子。
@@ -47,7 +48,7 @@ fun EntryView(entry: Entry) {
             modifier = Modifier.padding(vertical = 2.dp),
         )
 
-        is Entry.Tools -> ToolsCard(entry.calls)
+        is Entry.Tools -> ToolsCard(entry.key, entry.calls)
         is Entry.Notice -> NoticeRow(entry)
         is Entry.Compacting -> CompactingRow(entry)
         is Entry.Compacted -> Text(
@@ -103,16 +104,58 @@ private fun CompactingRow(entry: Entry.Compacting) {
     }
 }
 
-/** 连着调用的工具收成一张卡；点一行展开它的输出/diff（对齐 TUI 的折叠语义）。 */
+/**
+ * 连着调用的工具收成**一行摘要**：「▸ 读取 3 个文件 · 执行 1 条命令」——和 TUI 同一个折叠语义。
+ *
+ * 为什么不默认列每一条：工具名和参数是 agent 的内部动作，不是用户要读的东西，
+ * 七八条会把真正有信息量的回复挤出屏幕。点摘要行展开明细，再点一次收起。
+ *
+ * 两件事收着也不能藏（否则摘要行会骗人）：还在跑（末尾省略号）、有失败（单独标红）。
+ * 还有一个例外和 TUI 一致：**改了文件的 diff 一直摊开**——那是 agent 替用户改了
+ * 他的代码，只给个「写入 1 个文件」的计数等于什么都没说。
+ */
 @Composable
-private fun ToolsCard(calls: List<ToolCall>) {
+private fun ToolsCard(entryKey: String, calls: List<ToolCall>) {
+    var expanded by remember(entryKey) { mutableStateOf(false) }
+    val running = calls.any { it.running }
+    val failed = calls.count { it.ok == false }
+    val changes = calls.filter { !it.diff.isNullOrBlank() }
+
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface,
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
     ) {
         Column(Modifier.padding(8.dp)) {
-            for (call in calls) ToolRow(call)
+            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
+                Text(
+                    (if (expanded) "▾ " else "▸ ") +
+                        ToolSummary.summarize(calls) + (if (running) "…" else ""),
+                    color = AgentColors.skipped,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                )
+                if (failed > 0) {
+                    Text(
+                        " · $failed 个失败",
+                        color = AgentColors.fail,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+            if (expanded) {
+                Column(Modifier.padding(start = 8.dp, top = 4.dp)) {
+                    for (call in calls) ToolRow(call)
+                }
+            }
+            // diff 不折叠：收着的时候它也得在（同 TUI 的唯一例外）。
+            // 展开时明细行里自己会画，别重复
+            if (!expanded) {
+                for (call in changes) {
+                    DiffText(call.diff!!, Modifier.padding(top = 4.dp))
+                }
+            }
         }
     }
 }

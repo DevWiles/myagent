@@ -92,6 +92,8 @@ export type Session = {
   pairingUrl: () => string | null
   /** 这个配对地址能用在什么网络下。null = 没有配对地址。 */
   pairingKind: () => 'relay' | 'lan' | null
+  /** 点开/收起某一组工具调用的明细（鼠标点摘要行）。 */
+  toggleEntry: (key: string) => void
   /**
    * 显式关掉后端。
    *
@@ -225,6 +227,9 @@ export function createSession(options: BackendOptions): Session {
     state,
     pairingUrl: () => backend?.pairingUrl ?? null,
     pairingKind: () => backend?.pairingKind ?? null,
+    toggleEntry(key) {
+      store.toggleEntry(key)
+    },
     prompt(text) {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了

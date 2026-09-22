@@ -499,6 +499,7 @@ export function App(props: AppProps) {
     // 清零是同一套语义——「连按两次」说的是连按，中间插了别的就不算
     if (exitArmed()) arm.set(false)
 
+
     const approval = state().approval
     if (approval) {
       // 确认框挂着时，所有按键都归它——此刻不该有任何别的操作。
@@ -705,6 +706,8 @@ export function App(props: AppProps) {
                   entry={entry()}
                   streaming={state().busy && index === state().entries.length - 1}
                   columns={dimensions().width - 2}
+                  expanded={state().expanded.has(entry().key)}
+                  onToggle={() => session.toggleEntry(entry().key)}
                 />
               )}
             </Index>
