@@ -398,6 +398,13 @@ export type ListeningLine = {
   protocol: number
   /** --lan 时后端挑好的局域网 IP。有它才画得出配对二维码（协议 1.1 节）。 */
   lan?: string
+  /**
+   * --relay 时的配对 URL（`wss://…/ws?room=…#<密钥>`）。
+   *
+   * **密钥在 fragment 里**，所以这串东西只能给人看、只能进二维码，
+   * 不该被转发到任何服务器（协议 1.3 节）。
+   */
+  pair?: string
 }
 
 /**

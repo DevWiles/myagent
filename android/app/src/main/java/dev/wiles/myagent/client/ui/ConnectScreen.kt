@@ -30,6 +30,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.wiles.myagent.client.net.AgentClient
+import dev.wiles.myagent.client.net.Pairing
 import dev.wiles.myagent.client.store.Prefs
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,15 +49,17 @@ fun ConnectScreen(client: AgentClient, prefs: Prefs, connecting: Boolean, closed
     val scope = rememberCoroutineScope()
 
     fun connect(raw: String) {
-        val url = raw.trim()
-        val ok = url.startsWith("ws://") && url.contains("?token=")
-        if (!ok) {
-            problem = "这不是 myagent 的配对地址。格式：ws://<IP>:<端口>/?token=<token>"
+        // 两种配对都是「一个 URL 本身」，判别归 Pairing.parse（协议 1.1 / 1.3）
+        val pairing = Pairing.parse(raw)
+        if (pairing == null) {
+            problem = "这不是 myagent 的配对地址。\n" +
+                "中继：wss://<域名>/ws?room=…#<密钥>\n" +
+                "局域网：ws://<IP>:<端口>/?token=<token>"
             return
         }
         problem = null
-        scope.launch { prefs.saveUrl(url) }
-        client.connect(url)
+        scope.launch { prefs.saveUrl(raw.trim()) }
+        client.connect(pairing)
     }
 
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -75,7 +78,7 @@ fun ConnectScreen(client: AgentClient, prefs: Prefs, connecting: Boolean, closed
             Text("myagent", style = MaterialTheme.typography.headlineLarge, fontFamily = FontFamily.Monospace)
             Spacer(Modifier.height(8.dp))
             Text(
-                "在电脑上跑 ./myagent-tui --lan，界面里敲 /qr，扫那个码",
+                "在电脑上跑 ./myagent-tui --relay …（或 --lan），界面里敲 /qr，扫那个码",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Spacer(Modifier.height(24.dp))
@@ -98,7 +101,7 @@ fun ConnectScreen(client: AgentClient, prefs: Prefs, connecting: Boolean, closed
                 value = manual,
                 onValueChange = { manual = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("或手填 ws://192.168.x.x:端口/?token=…") },
+                label = { Text("或手填配对地址（wss://…#密钥 或 ws://…?token=…）") },
                 singleLine = true,
             )
             Spacer(Modifier.height(8.dp))

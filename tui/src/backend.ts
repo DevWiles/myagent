@@ -35,14 +35,21 @@ export type BackendOptions = {
   forceRebuild?: boolean
   /** 局域网模式：后端绑 0.0.0.0，手机扫码可连（协议 1.1 节）。 */
   lan?: boolean
+  /** 中继地址（wss://…/ws）。给了就往外拨，手机在任何网络都能连（协议 1.3 节）。 */
+  relay?: string
+  /** 换一套房间号和配对密钥，手机要重新扫码。 */
+  relayReset?: boolean
 }
 
 export type Backend = {
   /**
-   * 手机配对用的完整 ws URL（`ws://<lan>:<port>/?token=…`）。
-   * 不是 --lan 启动、或后端挑不出局域网地址时是 null——二维码入口就不该出现。
+   * 手机配对用的完整 URL。两种来源，**中继优先**：
+   * 中继那个到哪儿都能用，局域网那个出了门就废。
+   * 两种都没有（既没 --relay 也没 --lan）时是 null，二维码入口就不该出现。
    */
   pairingUrl: string | null
+  /** 这个配对地址是中继的还是局域网的。界面据此说清它能用在什么网络下。 */
+  pairingKind: 'relay' | 'lan' | null
   send(command: ClientCommand): void
   onEvent(handler: (event: ServerEvent) => void): () => void
   /** 连接断了（后端挂了或主动停了）。参数是原因，正常退出时为 null。 */
@@ -133,6 +140,8 @@ export async function startBackend(
   if (options.planMode) args.push('--plan')
   if (options.unsafe) args.push('--unsafe')
   if (options.lan) args.push('--lan')
+  if (options.relay) args.push('--relay', options.relay)
+  if (options.relayReset) args.push('--relay-reset')
 
   const child = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] })
 
@@ -166,11 +175,11 @@ export async function startBackend(
   const socket = await connect(listening)
   // 连上了就不再需要这个应急通道，后面交给 backend.dispose()
   signal?.removeEventListener('abort', onAbort)
-  // 手机连的和本机连的是同一个 URL 格式，只是 host 换成后端挑好的局域网 IP
-  const pairingUrl = listening.lan
-    ? `ws://${listening.lan}:${listening.port}/?token=${listening.token}`
-    : null
-  return wire(child, socket, pairingUrl)
+  // 中继优先：它在任何网络下都能用；局域网那个只在同一屋檐下有效
+  const pairingUrl = listening.pair
+    ?? (listening.lan ? `ws://${listening.lan}:${listening.port}/?token=${listening.token}` : null)
+  const pairingKind = listening.pair ? 'relay' : listening.lan ? 'lan' : null
+  return wire(child, socket, pairingUrl, pairingKind)
 }
 
 /** 等 stdout 上那一行握手信息。后端在这之前挂掉就直接报错，别让界面干等。 */
@@ -243,7 +252,12 @@ function connect(listening: ListeningLine): Promise<WebSocket> {
   })
 }
 
-function wire(child: BackendProcess, socket: WebSocket, pairingUrl: string | null): Backend {
+function wire(
+  child: BackendProcess,
+  socket: WebSocket,
+  pairingUrl: string | null,
+  pairingKind: 'relay' | 'lan' | null,
+): Backend {
   const eventHandlers = new Set<(event: ServerEvent) => void>()
   const closeHandlers = new Set<(reason: string | null) => void>()
   let disposed = false
@@ -267,6 +281,7 @@ function wire(child: BackendProcess, socket: WebSocket, pairingUrl: string | nul
 
   return {
     pairingUrl,
+    pairingKind,
     send(command) {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(command))
     },

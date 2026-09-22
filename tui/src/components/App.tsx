@@ -355,13 +355,20 @@ export function App(props: AppProps) {
         if (url === null) {
           session.notice(
             "warn",
-            "没有配对地址。后端要以局域网模式启动才能被手机连上：\n" +
-              "  ./myagent-tui --lan\n" +
-              "（明文 ws，只在可信网络用——见 docs/protocol.md 1.1）",
+            "没有配对地址。手机要连进来，后端得先挂到中继上、或者开局域网模式：\n" +
+              "  ./myagent-tui --relay wss://relay.example.com/ws   # 任何网络都能连\n" +
+              "  ./myagent-tui --lan                                        # 只在同一个局域网\n" +
+              "（见 docs/protocol.md 1.1 / 1.3）",
           )
           return
         }
-        session.notice("info", `手机扫码连入（或手填下面的地址）：\n\n${qrText(url)}\n\n${url}`)
+        // 说清这个码能用在什么网络下。中继那个到哪儿都行，局域网那个出门就废——
+        // 不写明的话，用户会拿着一个在家扫的码到公司去扫，然后以为是 app 坏了
+        const where =
+          session.pairingKind() === "relay"
+            ? "任何网络都能连（经中继，端到端加密）"
+            : "只在同一个局域网内有效"
+        session.notice("info", `手机扫码连入（或手填下面的地址）——${where}：\n\n${qrText(url)}\n\n${url}`)
         return
       }
     }

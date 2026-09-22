@@ -27,6 +27,14 @@ object ClientCommand {
         return JsonObject(map).toString()
     }
 
+    /**
+     * 中继模式下要首帧 + 补发（协议 1.3）。
+     *
+     * 局域网模式不需要它——那时 `since` 塞在握手 URL 里，后端一眼就看见；
+     * 而中继模式我们连的是 relay，后端看不到我们的 URL。
+     */
+    fun hello(since: Long) = cmd("hello", "since" to since.toInt())
+
     fun prompt(text: String) = cmd("prompt", "text" to text)
     fun plan(goal: String) = cmd("plan", "goal" to goal)
     fun team(goal: String) = cmd("team", "goal" to goal)

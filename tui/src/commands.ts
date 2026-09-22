@@ -136,7 +136,7 @@ const SPECS: CommandSpec[] = [
     // 纯本地：二维码画的是 startBackend 时就拿到的配对 URL，不发协议消息。
     // 「不是 --lan 启动」的情况不在这里灰掉——那要把 pairing 状态穿进
     // CommandContext，为一条本地命令不值当；敲了之后当场说清楚为什么不行
-    description: "手机配对二维码（后端要以 --lan 启动才有）",
+    description: "手机配对二维码（后端要以 --relay 或 --lan 启动才有）",
     anyFeature: [],
   },
 ]
