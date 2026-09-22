@@ -6,7 +6,7 @@
 
   <groupId>dev.wiles</groupId>
   <artifactId>myagent</artifactId>
-  <version>0.3.0</version>
+  <version>1.0.0</version>
   <packaging>jar</packaging>
   <name>myagent</name>
   <description>A coding agent written from scratch in Java 17</description>
