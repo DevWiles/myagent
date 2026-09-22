@@ -425,34 +425,59 @@ function ToolsEntry(props: {
 
   return (
     <box flexDirection="column" paddingTop={1}>
-      {/* 摘要行可点：▸ 收着 / ▾ 展开 */}
-      <box flexDirection="row" onMouseDown={() => props.onToggle?.()}>
-        <text fg={theme.subtle}>
-          {props.expanded ? "▾ " : "▸ "}
-          {summarizeTools(props.calls)}
-          {running() ? "…" : ""}
-        </text>
-        <Show when={failed() > 0}>
-          <text fg={theme.error}> · {failed()} 个失败</text>
-        </Show>
-      </box>
-      <Show when={props.expanded}>
-        <box flexDirection="column" paddingLeft={2}>
+      <Show
+        when={props.expanded}
+        fallback={
+          <>
+            {/* 摘要行可点：▸ 点开换成整块明细 */}
+            <box flexDirection="row" onMouseDown={() => props.onToggle?.()}>
+              <text fg={theme.subtle}>
+                {"▸ "}
+                {summarizeTools(props.calls)}
+                {running() ? "…" : ""}
+              </text>
+              <Show when={failed() > 0}>
+                <text fg={theme.error}> · {failed()} 个失败</text>
+              </Show>
+            </box>
+            {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
+            <For each={changes()}>
+              {(call) => (
+                <ToolDiff
+                  call={call}
+                  budget={diffBudgetFor(changes().length)}
+                  columns={props.columns}
+                />
+              )}
+            </For>
+          </>
+        }
+      >
+        {/* 展开态：摘要行让位，换成一整块带底色的明细（对齐 Claude Code 的样式）。
+            点块内**任意一处**收回去——鼠标事件会从子节点冒泡到这个容器上，
+            所以 handler 只挂这一个，text 子节点不用各自接 */}
+        <box
+          flexDirection="column"
+          backgroundColor={theme.panel}
+          padding={1}
+          onMouseDown={() => props.onToggle?.()}
+        >
           <For each={props.calls}>
-            {(call) => <ToolDetail call={call} columns={props.columns - 2} />}
+            {(call) => (
+              <box flexDirection="column">
+                <ToolDetail call={call} columns={props.columns - 2} />
+                <Show when={call.diff && call.diff.length > 0}>
+                  <ToolDiff
+                    call={call}
+                    budget={diffBudgetFor(changes().length)}
+                    columns={props.columns - 2}
+                  />
+                </Show>
+              </box>
+            )}
           </For>
         </box>
       </Show>
-      {/* 文件多了每个就少露几行，免得七八块 diff 把上面的对话顶出屏幕 */}
-      <For each={changes()}>
-        {(call) => (
-          <ToolDiff
-            call={call}
-            budget={diffBudgetFor(changes().length)}
-            columns={props.columns}
-          />
-        )}
-      </For>
     </box>
   )
 }
@@ -474,16 +499,16 @@ function ToolDetail(props: { call: ToolCall; columns: number }) {
     const room = Math.max(8, props.columns - props.call.tool.length - 4)
     return flat.length > room ? flat.slice(0, room - 1) + "…" : flat
   }
-  /** 输出预览：前 4 行。有 diff 的不给——diff 已经摊在下面了。 */
+  /** 输出预览：前 12 行。有 diff 的不给——diff 已经摊在下面了。 */
   const preview = () => {
     if (props.call.diff && props.call.diff.length > 0) return []
     const output = (props.call.output ?? "").trimEnd()
     if (output.length === 0) return []
     const lines = output.split("\n")
-    const shown = lines.slice(0, 4).map((line) =>
+    const shown = lines.slice(0, 12).map((line) =>
       line.length > props.columns - 4 ? line.slice(0, props.columns - 5) + "…" : line,
     )
-    if (lines.length > 4) shown.push(`… 还有 ${lines.length - 4} 行`)
+    if (lines.length > 12) shown.push(`… 还有 ${lines.length - 12} 行`)
     return shown
   }
 
