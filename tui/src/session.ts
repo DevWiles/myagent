@@ -53,11 +53,15 @@ export type Session = {
     feedback?: string,
   ) => void
   /** 回应计划确认。 */
-  /** 按了 a：进「挑授权范围」那一步。后端没提议规则时什么也不做 */
+  /** 选了「以后都同意」：进「挑授权范围」那一步。后端没提议规则时什么也不做 */
   pickRule: () => void
-  /** ←/→ 调松紧 */
-  moveRule: (delta: number) => void
-  /** 按了 n：进「补一句话」那一步 */
+  /** ↑/↓ 挪光标。停在哪一步就挪哪一列，由 store 判断 */
+  moveChoice: (delta: number) => void
+  /** 光标跳到表态的第 n 个选项（数字键直选） */
+  pickChoice: (index: number) => void
+  /** 计划确认框里挪光标 */
+  movePlanChoice: (delta: number) => void
+  /** 选了拒绝：进「补一句话」那一步 */
   askFeedback: () => void
   /** 在补话那一步敲了个键。返回 true 表示这个键被吃掉了 */
   typeFeedback: (key: { name?: string; sequence?: string }) => boolean
@@ -246,8 +250,14 @@ export function createSession(options: BackendOptions): Session {
     pickRule() {
       store.beginRulePick()
     },
-    moveRule(delta) {
-      store.moveRulePick(delta)
+    moveChoice(delta) {
+      store.moveChoice(delta)
+    },
+    pickChoice(index) {
+      store.pickChoice(index)
+    },
+    movePlanChoice(delta) {
+      store.movePlanChoice(delta)
     },
     askFeedback() {
       store.beginFeedback()

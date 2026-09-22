@@ -27,6 +27,7 @@ import {
   type CommandContext,
   type CommandEntry,
 } from "../commands.ts"
+import { askChoices, digitIndex, PLAN_CHOICES, type AskChoice } from "../approval.ts"
 import { copyToClipboard } from "../clipboard.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
 import { ApprovalDialog } from "./ApprovalDialog.tsx"
@@ -482,8 +483,8 @@ export function App(props: AppProps) {
 
       // ---- 挑授权范围：←/→ 调松紧，enter 存下，esc 只批这一次 ----
       if (stage.step === "rule") {
-        if (key.name === "left" || key.name === "up") return session.moveRule(-1)
-        if (key.name === "right" || key.name === "down") return session.moveRule(1)
+        if (key.name === "left" || key.name === "up") return session.moveChoice(-1)
+        if (key.name === "right" || key.name === "down") return session.moveChoice(1)
         if (key.name === "return") {
           const level = approval.suggestions[stage.index]
           return session.approve(approval.id, "always", level?.patterns ?? [])
@@ -501,25 +502,53 @@ export function App(props: AppProps) {
         return
       }
 
-      // ---- 表态 ----
-      if (key.name === "y") return session.approve(approval.id, "yes")
-      // n 不直接拒绝，而是先给一个补话的机会：拒绝本身只是把路堵上，
-      // 「换个做法」那句话才是模型下一步的依据。Esc 仍然是一键拒绝，
-      // 而且在矮到画不出框的终端上，它是唯一还看得见的出路
-      if (key.name === "n") return session.askFeedback()
+      // ---- 表态：↑/↓ 挪光标，enter 选中，数字键直选，esc 一键拒绝 ----
+      const choices = askChoices(approval.suggestions.length > 0)
+
+      /**
+       * 选中一项。只有「同意」是就地答完的，另外两项都是**进下一步**——
+       * 授权范围要挑、拒绝的理由要写，这个框的三个出口本来就不对称。
+       */
+      const commit = (choice: AskChoice | undefined) => {
+        if (!choice) return
+        if (choice.key === "yes") return session.approve(approval.id, "yes")
+        if (choice.key === "always") return session.pickRule()
+        // 拒绝不直接发出去，先给一个补话的机会：拒绝本身只是把路堵上，
+        // 「换个做法」那句话才是模型下一步的依据
+        return session.askFeedback()
+      }
+
+      if (key.name === "up") return session.moveChoice(-1)
+      if (key.name === "down") return session.moveChoice(1)
+      if (key.name === "return") return commit(choices[stage.index])
+      // Esc 仍然是一键拒绝，不经过补话那一步：
+      // 在矮到画不出框的终端上，它是唯一还看得见的出路
       if (key.name === "escape") return session.approve(approval.id, "no")
-      if (key.name === "a") return session.pickRule()
+
+      // 数字键直选：按下即生效，不用再补一下回车。
+      // 光标跟着挪是为了让这一下**看得见**——终端不重绘完就换了画面的话，
+      // 用户不确定自己到底按中了哪一项
+      const picked = digitIndex(key)
+      if (picked !== null && picked < choices.length) {
+        session.pickChoice(picked)
+        return commit(choices[picked])
+      }
       return
     }
 
-    // 计划确认同一套道理。刻意没有 [a]——每份计划都不一样，不给一次性授权
+    // 计划确认同一套道理。刻意没有「以后都同意」——每份计划都不一样，不给一次性授权
     const confirm = state().planConfirm
     if (confirm) {
-      if (key.name === "y" || key.name === "return")
-        return consume(), session.confirmPlan(confirm.id, true)
-      if (key.name === "n" || key.name === "escape")
-        return consume(), session.confirmPlan(confirm.id, false)
-      return consume()
+      consume()
+      if (key.name === "up") return session.movePlanChoice(-1)
+      if (key.name === "down") return session.movePlanChoice(1)
+      if (key.name === "return") return session.confirmPlan(confirm.id, confirm.choice === 0)
+      if (key.name === "escape") return session.confirmPlan(confirm.id, false)
+      const picked = digitIndex(key)
+      if (picked !== null && picked < PLAN_CHOICES.length) {
+        return session.confirmPlan(confirm.id, picked === 0)
+      }
+      return
     }
 
     // 会话选择器开着时，它先接键。输入框照常收字符——那就是搜索框
@@ -714,9 +743,11 @@ export function App(props: AppProps) {
           )}
         </Show>
         <Show when={!state().approval && state().planConfirm}>
-          <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-            <PlanConfirmDialog />
-          </box>
+          {(confirm) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <PlanConfirmDialog choice={confirm().choice} />
+            </box>
+          )}
         </Show>
 
         {/* 会话选择器。和命令菜单一样钉在输入框上方，两个不会同时出现 */}

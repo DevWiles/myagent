@@ -13,16 +13,51 @@ export type ApprovalSuggestion = { label: string; patterns: string[] }
 /**
  * 确认框现在停在哪一步。
  *
- * - `ask` 等用户表态
- * - `rule` 按了 a，正在挑「以后都同意」到什么程度
- * - `feedback` 按了 n，正在补一句话给模型
+ * - `ask` 等用户表态，`index` 是光标停在第几个选项上
+ * - `rule` 选了「以后都同意」，正在挑到什么程度
+ * - `feedback` 选了拒绝，正在补一句话给模型
  */
 export type ApprovalStage =
-  | { step: "ask" }
+  | { step: "ask"; index: number }
   | { step: "rule"; index: number }
   | { step: "feedback"; text: string }
 
-export const ASK_STAGE: ApprovalStage = { step: "ask" }
+export const ASK_STAGE: ApprovalStage = { step: "ask", index: 0 }
+
+/** 表态那一步的一个选项。`key` 决定选中后干什么，`label` 是给人看的。 */
+export type AskChoice = { key: "yes" | "always" | "no"; label: string }
+
+/**
+ * 表态那一步有哪几个选项。
+ *
+ * <h3>为什么不再是敲 y/n/a</h3>
+ * 字母键要求用户<b>先记住映射再动手</b>，而这个框出现的时机是随机的——
+ * 人正看着 diff 想事情，脑子里没挂着「a 是以后都同意」这张表。
+ * 光标选择把映射画在屏幕上，代价只是多按一下回车。
+ *
+ * <p>两套入口不能并存：留着 y/n/a 当快捷键，就会出现「光标停在拒绝上、
+ * 手按了 y」这种自相矛盾的一瞬间——而这正是这个框最不能有的东西。
+ * 所以字母键整套撤掉，只留数字键直选（按下即生效）和 Esc 拒绝。
+ *
+ * <p>顺序是「同意 / 以后都同意 / 拒绝」，光标默认停在第一个：绝大多数确认
+ * 的答案就是同意，默认停在拒绝上只会训练出闭眼按方向键的习惯。
+ * 代价要认账——<b>回车是整个键盘上最反射性的键</b>，这里是唯一一处
+ * 手滑要付真代价的地方，所以配了两道防线：选项列表<b>不循环</b>
+ * （见 {@link moveSelection}），Esc 永远是一键拒绝的逃生口。
+ *
+ * @param hasSuggestions 后端有没有提议可存的规则。没有就不画这一项——
+ *                       画了按下去也进不去挑规则那一步，是个死选项
+ */
+export function askChoices(hasSuggestions: boolean): AskChoice[] {
+  const choices: AskChoice[] = [{ key: "yes", label: "同意，就这一次" }]
+  if (hasSuggestions) {
+    choices.push({ key: "always", label: "以后都同意（下一步挑范围）" })
+  }
+  // 拒绝排最后，而且带着「说说为什么」：拒绝本身只是把路堵上，
+  // 那句话才是模型下一步的依据
+  choices.push({ key: "no", label: "不要这么做，我说说为什么" })
+  return choices
+}
 
 /** 补充说明最多多少字。和后端的 MAX_FEEDBACK 对齐，超了后端也会截。 */
 export const MAX_FEEDBACK = 500
@@ -63,14 +98,37 @@ export function diffLineKind(line: string): DiffLineKind {
 }
 
 /**
- * ←/→ 调松紧。**不循环**：撞到头就停在那儿。
+ * 计划确认框的两个选项。
  *
- * 循环的话，用户一路按 → 会从最松的那档绕回最紧的，
- * 而他此刻正盯着「以后都同意」几个字——转一圈回到原点是这个框最不该有的意外。
+ * <p>刻意**没有「以后都同意」**：每份计划都不一样，一次性授权掉后面所有计划
+ * 是危险的。审批框有这一项、这里没有，是有意的差别（见 docs/protocol.md）。
  */
-export function nextRuleIndex(current: number, delta: number, count: number): number {
+export const PLAN_CHOICES: readonly string[] = ["执行这份计划", "放弃"]
+
+/**
+ * 光标在一列选项里挪一格。表态和挑松紧两步共用。
+ *
+ * <p><b>不循环</b>：撞到头就停在那儿。循环的话，用户一路按 ↓ 会从最松的那档
+ * 绕回最紧的，而他此刻正盯着「以后都同意」几个字——转一圈回到原点
+ * 是这个框最不该有的意外。表态那一列同理，而且更要命：
+ * 那里绕一圈会从「拒绝」回到「同意」。
+ */
+export function moveSelection(current: number, delta: number, count: number): number {
   if (count <= 0) return 0
   return Math.max(0, Math.min(count - 1, current + delta))
+}
+
+/**
+ * 数字键 → 选项下标（1 → 0）。不是 1-9 就返回 null。
+ *
+ * <p>认 `sequence` 不认 `name`：两者对数字键通常都是 "1"，但 `sequence` 是
+ * 终端实际送来的字节，`name` 是库解析出来的名字——解析这一层将来换库会变，
+ * 字节不会。0 不收：选项从 1 开始编号，按 0 什么也不该发生。
+ */
+export function digitIndex(key: { name?: string; sequence?: string }): number | null {
+  const typed = key.sequence ?? key.name ?? ""
+  if (typed.length !== 1 || typed < "1" || typed > "9") return null
+  return Number(typed) - 1
 }
 
 /** 补充说明的输入：可打印字符往后加，退格往回删。返回 null 表示这个键与我无关。 */

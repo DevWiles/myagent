@@ -16,7 +16,7 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
-import { ASK_STAGE, editFeedback, nextRuleIndex } from './approval.ts'
+import { ASK_STAGE, askChoices, editFeedback, moveSelection, PLAN_CHOICES } from './approval.ts'
 import type { ApprovalStage, ApprovalSuggestion } from './approval.ts'
 import type { MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
@@ -231,11 +231,16 @@ export type SessionState = {
    * 确认框停在哪一步（表态 / 挑规则 / 补一句话）。
    *
    * **放在 store 而不是组件里**：按键处理在 App，而组件在矮终端上可能压根不渲染。
-   * 状态跟着组件走的话，那种终端上按 a 会没有任何反应——后端还等着，用户不知道为什么。
+   * 状态跟着组件走的话，那种终端上挪光标会没有任何反应——后端还等着，用户不知道为什么。
    */
   approvalStage: ApprovalStage
-  /** 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。 */
-  planConfirm: { id: number } | null
+  /**
+   * 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。
+   *
+   * <p>`choice` 是光标停在哪个选项上（0 执行 / 1 放弃）。和审批框那份状态
+   * 放在一起、也放在 store 里，理由一模一样。
+   */
+  planConfirm: { id: number; choice: number } | null
   /**
    * 底部那块计划面板该显示哪份计划，指向 entries 里的某条 plan。
    *
@@ -503,6 +508,15 @@ export class SessionStore {
     this.set({ planConfirm: null })
   }
 
+  /** 计划确认框里挪光标。只有两项，同样不循环。 */
+  movePlanChoice(delta: number): void {
+    const confirm = this.state.planConfirm
+    if (!confirm) return
+    this.set({
+      planConfirm: { ...confirm, choice: moveSelection(confirm.choice, delta, PLAN_CHOICES.length) },
+    })
+  }
+
   /**
    * 回答完审批（发送由调用方负责），把框收掉。
    *
@@ -515,7 +529,7 @@ export class SessionStore {
   }
 
   /**
-   * 按了 a：进「挑松紧」这一步。
+   * 选了「以后都同意」：进「挑松紧」这一步。
    *
    * 后端一条都没提议时**留在原地**——多段命令里有段推不出规则，
    * 或者根本没有 subject。这时候让框跳进一个空的选择态，用户只会更糊涂。
@@ -526,20 +540,42 @@ export class SessionStore {
     this.set({ approvalStage: { step: 'rule', index: approval.preferred } })
   }
 
-  /** ←/→ 调松紧。 */
-  moveRulePick(delta: number): void {
+  /**
+   * 光标上下挪一格。表态和挑松紧两步共用一个入口。
+   *
+   * <p>合成一个方法是因为 App 那边转发的是同一个按键：光标键按下去该动哪一列，
+   * 取决于框此刻停在哪一步——而「停在哪一步」只有 store 知道。
+   * 分成两个方法的话，调用方就得先判断步骤，等于把状态判断漏到外面去。
+   */
+  moveChoice(delta: number): void {
     const stage = this.state.approvalStage
     const approval = this.state.approval
-    if (stage.step !== 'rule' || !approval) return
-    this.set({
-      approvalStage: {
-        step: 'rule',
-        index: nextRuleIndex(stage.index, delta, approval.suggestions.length),
-      },
-    })
+    if (!approval) return
+    if (stage.step === 'ask') {
+      const count = askChoices(approval.suggestions.length > 0).length
+      this.set({ approvalStage: { step: 'ask', index: moveSelection(stage.index, delta, count) } })
+      return
+    }
+    if (stage.step === 'rule') {
+      this.set({
+        approvalStage: {
+          step: 'rule',
+          index: moveSelection(stage.index, delta, approval.suggestions.length),
+        },
+      })
+    }
   }
 
-  /** 按了 n：进「补一句话」这一步。 */
+  /** 光标直接跳到第 n 个（数字键直选）。越界不动。 */
+  pickChoice(index: number): void {
+    const stage = this.state.approvalStage
+    const approval = this.state.approval
+    if (!approval || stage.step !== 'ask') return
+    if (index < 0 || index >= askChoices(approval.suggestions.length > 0).length) return
+    this.set({ approvalStage: { step: 'ask', index } })
+  }
+
+  /** 选了拒绝：进「补一句话」这一步。 */
   beginFeedback(): void {
     if (!this.state.approval) return
     this.set({ approvalStage: { step: 'feedback', text: '' } })
@@ -895,7 +931,7 @@ export class SessionStore {
         return
 
       case 'plan_confirm_request':
-        this.set({ planConfirm: { id: event.id } })
+        this.set({ planConfirm: { id: event.id, choice: 0 } })
         return
 
       case 'plan_task_started':

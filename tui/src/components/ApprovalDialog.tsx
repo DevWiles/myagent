@@ -11,17 +11,20 @@
  *
  * **三态**：
  * ```
- *   ask ──[a]──▸ rule      挑「以后都同意」到什么程度，enter 存，esc 只批这一次
+ *   ask ──选「以后都同意」──▸ rule      挑到什么程度，enter 存，esc 只批这一次
  *    │
- *    └──[n]──▸ feedback    补一句话给模型，enter 发，esc 不带话拒绝
+ *    └──选「拒绝」──────────▸ feedback  补一句话给模型，enter 发，esc 不带话拒绝
  * ```
  *
- * 按钮行压成**一行**：窄屏折行会把框撑高，把上面的对话内容顶掉。
+ * 表态那一步是**光标选**不是敲字母：字母键要求用户先记住映射再动手，
+ * 而这个框出现的时机是随机的（理由写在 {@link askChoices} 上）。
+ * 代价是按钮区从一行变成一列，框高了 3 行——所以 diff 预算同步让出 3 行，
+ * 否则框会悄悄把上面的对话顶出屏幕。
  */
 
 import { TextAttributes } from "@opentui/core"
 import { createMemo, For, Show } from "solid-js"
-import { type ApprovalStage } from "../approval.ts"
+import { askChoices, type ApprovalStage, type AskChoice } from "../approval.ts"
 import { DiffView } from "./DiffView.tsx"
 import type { Approval } from "../store.ts"
 import { truncateEnd, width } from "../path.ts"
@@ -49,16 +52,25 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
   )
   const reason = createMemo(() => truncateEnd(`原因: ${props.approval.reason}`, inner()))
 
-  // 框里除 diff 之外固定占掉约 10 行（边框、标题、动作、原因、按钮、留白）。
-  // 留不下 3 行就干脆不画——画一两行 diff 什么也说明不了，还占着地方
-  const diffBudget = () => Math.max(0, props.rows - 12)
-  const showDiff = () => props.approval.preview.length > 0 && props.rows >= 15
+  // 框里除 diff 之外固定占掉约 13 行（边框、标题、动作、原因、留白，
+  // 加上选项列表那 3~4 行）。选项从一行按钮变成一列之后，这个数字跟着涨了 3——
+  // **不涨的话框会悄悄变高，把上面的对话顶出屏幕**，而那正是选项行
+  // 一直压在一行里要避免的事。留不下 3 行就干脆不画 diff
+  const diffBudget = () => Math.max(0, props.rows - 15)
+  const showDiff = () => props.approval.preview.length > 0 && props.rows >= 18
 
   const level = createMemo(() => {
     const stage = props.stage
     if (stage.step !== "rule") return null
     return props.approval.suggestions[stage.index] ?? null
   })
+
+  const choices = createMemo(() => askChoices(props.approval.suggestions.length > 0))
+  const askIndex = () => (props.stage.step === "ask" ? props.stage.index : 0)
+
+  /** 选中项按后果上色：同意绿、以后都同意黄、拒绝红。颜色本身就是一句提醒。 */
+  const choiceColor = (key: AskChoice["key"]) =>
+    key === "yes" ? theme.success : key === "always" ? theme.warning : theme.error
 
   return (
     <box
@@ -95,17 +107,33 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
         </box>
       </Show>
 
-      {/* ---- 第一步：表态 ---- */}
+      {/* ---- 第一步：表态。光标选，不再背 y/n/a 的映射 ---- */}
       <Show when={props.stage.step === "ask"}>
-        <box flexDirection="row" paddingTop={1}>
-          <text fg={theme.success}>[y]</text>
-          <text fg={theme.subtle}>{wide() ? " 同意   " : "同意 "}</text>
-          <text fg={theme.error}>[n]</text>
-          <text fg={theme.subtle}>{wide() ? " 拒绝（Esc 同）   " : "拒绝 "}</text>
-          <Show when={props.approval.suggestions.length > 0}>
-            <text fg={theme.warning}>[a]</text>
-            <text fg={theme.subtle}>{wide() ? " 以后都同意" : "以后都行"}</text>
-          </Show>
+        <box flexDirection="column" paddingTop={1}>
+          <For each={choices()}>
+            {(choice, i) => {
+              const active = () => i() === askIndex()
+              return (
+                <box flexDirection="row">
+                  {/* 选中标记和选项文字都换色：只靠一个 ❯ 的话，
+                      在没有真彩色的终端上等于没有标记 */}
+                  <text fg={active() ? theme.approvalBorder : theme.inactive}>
+                    {active() ? "❯ " : "  "}
+                  </text>
+                  <text fg={theme.inactive}>{`${i() + 1}. `}</text>
+                  <text
+                    fg={active() ? choiceColor(choice.key) : theme.subtle}
+                    attributes={active() ? TextAttributes.BOLD : undefined}
+                  >
+                    {truncateEnd(choice.label, Math.max(6, inner() - 6))}
+                  </text>
+                </box>
+              )
+            }}
+          </For>
+          <text fg={theme.subtle}>
+            {wide() ? "  ↑↓ 选   Enter 确认   数字键直选   Esc 拒绝" : "  ↑↓/数字选  Enter 定"}
+          </text>
         </box>
       </Show>
 

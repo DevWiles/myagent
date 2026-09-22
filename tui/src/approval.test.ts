@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import {
+  askChoices,
   diffBudgetFor,
   diffLineKind,
+  digitIndex,
   editFeedback,
   MAX_DIFF_LINES,
   MAX_FEEDBACK,
   MIN_DIFF_LINES,
-  nextRuleIndex,
+  moveSelection,
 } from "./approval.ts"
 
 
@@ -23,21 +25,55 @@ describe("diffLineKind", () => {
   })
 })
 
-describe("nextRuleIndex", () => {
+describe("moveSelection", () => {
   test("撞到两头就停住，不绕回去", () => {
-    // 绕回去的话，用户一路按 → 会从最松的那档回到最紧的，
-    // 而他此刻正盯着「以后都同意」几个字
-    expect(nextRuleIndex(0, -1, 3)).toBe(0)
-    expect(nextRuleIndex(2, 1, 3)).toBe(2)
+    // 绕回去的话，用户一路按 ↓ 会从最松的那档回到最紧的，
+    // 而他此刻正盯着「以后都同意」几个字；表态那一列更糟，会从拒绝转回同意
+    expect(moveSelection(0, -1, 3)).toBe(0)
+    expect(moveSelection(2, 1, 3)).toBe(2)
   })
 
   test("中间正常走", () => {
-    expect(nextRuleIndex(1, 1, 3)).toBe(2)
-    expect(nextRuleIndex(1, -1, 3)).toBe(0)
+    expect(moveSelection(1, 1, 3)).toBe(2)
+    expect(moveSelection(1, -1, 3)).toBe(0)
   })
 
   test("一档都没有时不崩", () => {
-    expect(nextRuleIndex(0, 1, 0)).toBe(0)
+    expect(moveSelection(0, 1, 0)).toBe(0)
+  })
+})
+
+describe("askChoices", () => {
+  test("有可存的规则时三项，顺序是同意 / 以后都同意 / 拒绝", () => {
+    // 默认光标停在 0，所以第一项是什么等于「回车下去会发生什么」
+    expect(askChoices(true).map((c) => c.key)).toEqual(["yes", "always", "no"])
+  })
+
+  test("后端没提议规则时不画「以后都同意」——那是个进不去的死选项", () => {
+    expect(askChoices(false).map((c) => c.key)).toEqual(["yes", "no"])
+  })
+
+  test("每一项都有给人看的字，光标选靠的就是它", () => {
+    for (const choice of askChoices(true)) {
+      expect(choice.label.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe("digitIndex", () => {
+  test("1 对应第 0 项", () => {
+    expect(digitIndex({ sequence: "1" })).toBe(0)
+    expect(digitIndex({ sequence: "3" })).toBe(2)
+  })
+
+  test("0 不收：选项从 1 编号，按 0 什么也不该发生", () => {
+    expect(digitIndex({ sequence: "0" })).toBeNull()
+  })
+
+  test("字母和转义序列都不是数字键", () => {
+    expect(digitIndex({ sequence: "y" })).toBeNull()
+    expect(digitIndex({ name: "down", sequence: "\x1b[B" })).toBeNull()
+    expect(digitIndex({})).toBeNull()
   })
 })
 

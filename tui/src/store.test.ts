@@ -321,7 +321,50 @@ function askWithRules(): ServerEvent {
 }
 
 describe('确认框的三个交互态', () => {
-  test('按 a 进挑规则那一步，默认停在后端推荐的那一档', () => {
+  test('新的确认请求，光标停在第一项「同意」上', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 0 })
+  })
+
+  test('↑↓ 在表态那一列挪光标，撞到两头停住', () => {
+    // 绕回去的代价在这一列最大：一路按 ↓ 会从「拒绝」转回「同意」
+    const store = new SessionStore()
+    feed(store, askWithRules())        // 有提议 → 三项
+
+    store.moveChoice(-1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 0 })
+    store.moveChoice(1)
+    store.moveChoice(1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 2 })
+    store.moveChoice(1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 2 })
+  })
+
+  test('后端没提议规则时只有两项，光标挪不到第三项去', () => {
+    // 「以后都同意」那一项这时根本不画，光标却能停上去的话，
+    // 回车下去会掉进一个进不去的步骤
+    const store = new SessionStore()
+    feed(store,
+      { t: 'approval_request', id: 1, action: '执行命令', detail: 'x', reason: 'y' })
+
+    store.moveChoice(1)
+    store.moveChoice(1)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 1 })
+  })
+
+  test('数字键直选跳到对应项，越界的数字不动光标', () => {
+    const store = new SessionStore()
+    feed(store, askWithRules())
+
+    store.pickChoice(2)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 2 })
+    store.pickChoice(7)
+    expect(store.getSnapshot().approvalStage).toEqual({ step: 'ask', index: 2 })
+  })
+
+  test('选「以后都同意」进挑规则那一步，默认停在后端推荐的那一档', () => {
     const store = new SessionStore()
     feed(store, askWithRules())
 
@@ -330,7 +373,7 @@ describe('确认框的三个交互态', () => {
     expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 1 })
   })
 
-  test('后端一条规则都没提议时，按 a 留在原地', () => {
+  test('后端一条规则都没提议时，进挑规则那一步会留在原地', () => {
     // 跳进一个空的选择态，用户只会更糊涂——而且此刻后端还等着
     const store = new SessionStore()
     feed(store,
@@ -346,17 +389,17 @@ describe('确认框的三个交互态', () => {
     feed(store, askWithRules())
     store.beginRulePick()
 
-    store.moveRulePick(-1)
+    store.moveChoice(-1)
     expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 0 })
-    store.moveRulePick(-1)
+    store.moveChoice(-1)
     expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 0 })
-    store.moveRulePick(1)
-    store.moveRulePick(1)
-    store.moveRulePick(1)
+    store.moveChoice(1)
+    store.moveChoice(1)
+    store.moveChoice(1)
     expect(store.getSnapshot().approvalStage).toEqual({ step: 'rule', index: 2 })
   })
 
-  test('按 n 进补话那一步，敲字进得去、退格删得掉', () => {
+  test('选「拒绝」进补话那一步，敲字进得去、退格删得掉', () => {
     const store = new SessionStore()
     feed(store, askWithRules())
 
@@ -641,9 +684,22 @@ describe('计划面板', () => {
     const store = new SessionStore()
     feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })
 
-    expect(store.getSnapshot().planConfirm).toEqual({ id: 1 })
+    // 光标从「执行」起步，和审批框一样默认停在肯定的那一项
+    expect(store.getSnapshot().planConfirm).toEqual({ id: 1, choice: 0 })
     store.clearPlanConfirm()
     expect(store.getSnapshot().planConfirm).toBeNull()
+  })
+
+  test('计划确认的光标只有两格，同样不绕回去', () => {
+    const store = new SessionStore()
+    feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })
+
+    store.movePlanChoice(1)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(1)
+    store.movePlanChoice(1)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(1)
+    store.movePlanChoice(-1)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(0)
   })
 
   test('任务开始/结束原地点亮，哪怕计划面板后面已经堆了流式输出', () => {
