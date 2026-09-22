@@ -30,6 +30,10 @@ Claude Code 早期就是 embedding + 本地向量库，后来整套拆掉换成�
 - **前后端是真的分开的。** 后端 `--serve` 起一个 WebSocket 服务，界面是个纯客户端。
   两边照 [`docs/protocol.md`](docs/protocol.md) 各自开工——那份文档是契约，改协议先改它。
 
+界面现在有两块屏：终端里的 TUI，和 [`android/`](android/) 里的手机端。
+**agent 始终跑在电脑上**，手机连的是同一个后端、同一份会话——
+它存在的理由是那个最常见的场景：任务跑了十分钟、卡在等你授权，而你早就不在电脑前了。
+
 ## 快速开始
 
 需要 JDK 17+、Maven、[Bun](https://bun.sh)，以及一个 DeepSeek API key。
@@ -46,6 +50,19 @@ cd 你要让它干活的目录
 敲好，连上的瞬间自动发出。
 两件事都带新鲜度判断，没改动就直接跳过，启动和裸跑界面一样快。
 敲命令时所在的目录就是 agent 的工作区。
+
+### 用手机连
+
+```bash
+./myagent-tui --lan        # 后端改绑 0.0.0.0，界面里敲 /qr 出配对二维码
+```
+
+装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
+扫码即连。二维码的内容就是 `ws://<局域网IP>:<端口>/?token=<token>` 这个地址本身，
+所以手填和扫码是同一条路。
+
+**明文 ws，只在可信网络用**——局域网里任何设备都摸得到那个端口，
+唯一的门禁是 token（随后端进程生灭）。出门要用得等中继那一步，见 `docs/protocol.md` 1.1。
 
 配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
 
