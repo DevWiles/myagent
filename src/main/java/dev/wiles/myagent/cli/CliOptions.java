@@ -23,6 +23,11 @@ import java.nio.file.Path;
  * @param lan       局域网模式：绑 0.0.0.0 让手机等远程客户端能连进来。
  *                  默认关——「只听 127.0.0.1」是安全边界，跨过去必须显式说
  *                  （见 docs/protocol.md 1.1 节）
+ * @param relay     中继地址（{@code wss://…/ws}）。给了就往外拨一条连接挂上去，
+ *                  手机在任何网络都能连回来。**从不监听公网端口**（见 1.3 节）
+ * @param relayReset 换一套房间号和配对密钥。手机需要重新扫码
+ * @param relayServe 以中继服务端的身份启动（部署在公网机器上用），
+ *                   这条路径不碰 API key、不注册工具、不起 agent
  */
 public record CliOptions(
         Path workspace,
@@ -33,6 +38,9 @@ public record CliOptions(
         boolean version,
         boolean serve,
         int port,
-        boolean lan
+        boolean lan,
+        String relay,
+        boolean relayReset,
+        boolean relayServe
 ) {
 }

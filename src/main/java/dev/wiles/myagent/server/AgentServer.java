@@ -28,6 +28,8 @@ import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.mcp.McpConfig;
 import dev.wiles.myagent.mcp.McpServers;
+import dev.wiles.myagent.relay.Pairing;
+import dev.wiles.myagent.relay.RelayLink;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.GitBranch;
 import dev.wiles.myagent.tool.Tool;
@@ -160,6 +162,17 @@ public final class AgentServer extends WebSocketServer {
      */
     private final EventLog events = new EventLog(4096);
 
+    /**
+     * 中继连接。没加 {@code --relay} 时是 null，那时一切和以前一模一样。
+     *
+     * <p>它是一条**出站**连接，所以家里、4G、公司网都能用——
+     * 我们从不监听公网端口（协议 1.3）。
+     */
+    private volatile RelayLink relay;
+
+    /** 房间号 + 配对密钥，跨重启保持。没开中继时是 null。 */
+    private final Pairing pairing;
+
     /** agent.run() 的跑道。单线程：同一时刻只允许一轮对话。 */
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "agent-run");
@@ -194,8 +207,12 @@ public final class AgentServer extends WebSocketServer {
 
         this.workspace = new Workspace(options.workspace());
         this.token = newToken();
-        this.approval = new RemoteApproval(this::publish, () -> !getConnections().isEmpty());
-        this.planConfirm = new PlanConfirmation(this::publish, () -> !getConnections().isEmpty());
+        // 配对身份跨重启保持——每次换一套的话，手机每次都要重新扫码，
+        // 而「任何时候都能连」正是中继模式的全部目标
+        this.pairing = options.relay() == null ? null
+                : Pairing.loadOrCreate(Pairing.defaultFile(), options.relayReset());
+        this.approval = new RemoteApproval(this::publish, this::hasPeers);
+        this.planConfirm = new PlanConfirmation(this::publish, this::hasPeers);
 
         // 审批策略是三层套起来的，从外到里：
         //   PolicyGate        先算规则——命中就不打扰人，这是治「被问烦」的那一层
@@ -441,6 +458,10 @@ public final class AgentServer extends WebSocketServer {
         try {
             super.stop(timeout);
         } finally {
+            RelayLink link = relay;
+            if (link != null) {
+                link.close();
+            }
             audit.close();
             mcp.close();     // MCP server 是子进程，不关就是孤儿
         }
@@ -466,6 +487,15 @@ public final class AgentServer extends WebSocketServer {
             log.warn("局域网模式：0.0.0.0:{} 对整个网络可见，门禁只有 token（明文 ws）",
                     getPort());
         }
+        if (pairing != null) {
+            // 配对 URL 里带着密钥，**只打给本机的界面看**（stdout），不发给任何人
+            hello.put("pair", pairing.pairingUrl(options.relay()));
+            relay = new RelayLink(options.relay(), pairing,
+                    // 中继拆封出来的就是普通命令，和本机连接走同一条处理路径
+                    message -> handleCommand(relay, message),
+                    present -> log.info(present ? "手机连上来了" : "手机断开了"));
+            relay.start();
+        }
         System.out.println(hello.toString());
         System.out.flush();
     }
@@ -483,22 +513,32 @@ public final class AgentServer extends WebSocketServer {
         }
         // since = 客户端上次看到的 seq：0 是「把留底全给我」（手机首连），
         // 不带就是「只要新的」（终端每次都是全新会话，补发只会搅乱它）
-        long since = parseSince(queryParam(handshake.getResourceDescriptor(), "since"));
-        // 锁住流水账再发 ready + 补发：这期间不许有新广播插队，
-        // 否则「ready 里的 lastSeq」和补发内容之间会漏帧。
-        // 补发完释放锁，新事件照常广播到这条连接上，正好接上
+        greet(Peer.of(conn), parseSince(queryParam(handshake.getResourceDescriptor(), "since")));
+    }
+
+    /**
+     * 首帧 + 补发。本机连接在握手后走这儿，中继来的客户端靠一条 {@code hello} 命令走这儿。
+     *
+     * <p>为什么中继那边要用命令而不是握手参数：手机连的是 relay 不是我们，
+     * 它的 {@code since} 塞不进我们看得见的 URL。而这一层本来就该由**内层协议**回答，
+     * 中继只是信封（协议 1.3）。
+     *
+     * <p>锁住流水账再发：这期间不许有新广播插队，否则「ready 里的 lastSeq」
+     * 和补发内容之间会漏帧。补发完释放锁，新事件照常广播过去，正好接上。
+     */
+    private void greet(Peer peer, long since) {
         synchronized (events) {
-            conn.send(ready().toString());
+            peer.send(ready());
             if (since >= 0) {
                 EventLog.Replay replay = events.replay(since);
                 if (replay.gap()) {
                     // 如实报缺口，别静默跳过——转录豁了口子还看不出来，没人查得动
-                    conn.send(Protocol.event("replay_gap")
+                    peer.send(Protocol.event("replay_gap")
                             .put("from", replay.gapFrom())
-                            .put("to", replay.gapTo()).toString());
+                            .put("to", replay.gapTo()));
                 }
                 for (String line : replay.events()) {
-                    conn.send(line);
+                    peer.send(line);
                 }
             }
         }
@@ -537,42 +577,54 @@ public final class AgentServer extends WebSocketServer {
 
     @Override
     public void onMessage(WebSocket conn, String message) {
+        handleCommand(Peer.of(conn), message);
+    }
+
+    /**
+     * 一条命令，不管它是从本机 WebSocket 来的还是从中继拆封出来的。
+     *
+     * <p>两条入口在这儿汇合：分开写的话，每加一条命令就要在两处各写一遍，
+     * 而漏写一处的症状是「手机上这个功能就是不响应」——极难查（devlog 记过同类）。
+     */
+    void handleCommand(Peer peer, String message) {
         JsonNode cmd;
         try {
             cmd = Protocol.mapper().readTree(message);
         } catch (Exception e) {
-            send(conn, error("报文不是合法 JSON"));
+            peer.send(error("报文不是合法 JSON"));
             return;
         }
         String type = Protocol.str(cmd, "t", "");
         switch (type) {
-            case "prompt" -> handlePrompt(conn, Protocol.str(cmd, "text", "").trim());
+            case "prompt" -> handlePrompt(peer, Protocol.str(cmd, "text", "").trim());
             case "cancel" -> handleCancel();
             case "approval_reply" -> approval.reply(
                     Protocol.num(cmd, "id", -1), Protocol.str(cmd, "decision", "no"),
                     Protocol.strings(cmd, "rules"), Protocol.str(cmd, "feedback", ""));
-            case "plan" -> handlePlan(conn, Protocol.str(cmd, "goal", "").trim());
-            case "team" -> handleTeam(conn, Protocol.str(cmd, "goal", "").trim(),
+            case "plan" -> handlePlan(peer, Protocol.str(cmd, "goal", "").trim());
+            case "team" -> handleTeam(peer, Protocol.str(cmd, "goal", "").trim(),
                     Protocol.strings(cmd, "roles"));
             // resume 是老名字（那会儿只有计划能续）。终端那边已经改叫 /resume-plan，
             // 协议这边两个都认：改名不该让还没更新的界面连不上
-            case "resume", "resume_plan" -> handleResume(conn);
-            case "continue" -> handleContinue(conn);
-            case "sessions" -> handleSessions(conn);
-            case "session_resume" -> handleSessionResume(conn, Protocol.str(cmd, "id", ""));
+            case "resume", "resume_plan" -> handleResume(peer);
+            case "continue" -> handleContinue(peer);
+            case "sessions" -> handleSessions(peer);
+            case "session_resume" -> handleSessionResume(peer, Protocol.str(cmd, "id", ""));
             case "plan_confirm_reply" -> planConfirm.reply(
                     Protocol.num(cmd, "id", -1), Protocol.bool(cmd, "approved", false));
-            case "compact" -> handleCompact(conn);
-            case "memory" -> handleMemory(conn, Protocol.str(cmd, "action", "list"));
-            case "reset" -> handleReset(conn);
-            case "ping" -> send(conn, Protocol.event("pong"));
-            default -> send(conn, error("未知命令: " + type));
+            case "compact" -> handleCompact(peer);
+            case "memory" -> handleMemory(peer, Protocol.str(cmd, "action", "list"));
+            case "reset" -> handleReset(peer);
+            // 中继来的客户端用它要首帧 + 补发（本机连接靠握手参数，见 greet）
+            case "hello" -> greet(peer, Protocol.num(cmd, "since", -1));
+            case "ping" -> peer.send(Protocol.event("pong"));
+            default -> peer.send(error("未知命令: " + type));
         }
     }
 
-    private void handlePrompt(WebSocket conn, String text) {
+    private void handlePrompt(Peer peer, String text) {
         if (agent == null) {
-            send(conn, error("没有配置 API key，无法对话。设置环境变量 DEEPSEEK_API_KEY "
+            peer.send(error("没有配置 API key，无法对话。设置环境变量 DEEPSEEK_API_KEY "
                     + "或写进 ~/.myagent/config.json"));
             return;
         }
@@ -580,7 +632,7 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         if (!busy.compareAndSet(false, true)) {
-            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
@@ -623,16 +675,16 @@ public final class AgentServer extends WebSocketServer {
      * 编排本身归 {@link PlanExecuteAgent}，这儿只负责把过程翻译成事件发出去，
      * 以及用 {@link PlanConfirmation} 等界面回一句「跑不跑」。
      */
-    private void handlePlan(WebSocket conn, String goal) {
+    private void handlePlan(Peer peer, String goal) {
         if (planner == null) {
-            send(conn, error("没有配置 API key，无法规划"));
+            peer.send(error("没有配置 API key，无法规划"));
             return;
         }
         if (goal.isEmpty()) {
             return;
         }
         if (!busy.compareAndSet(false, true)) {
-            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
@@ -652,9 +704,9 @@ public final class AgentServer extends WebSocketServer {
      * <p>{@code roles} 字段已废弃：分工由规划工序决定（它给每个任务派角色）。
      * 老界面传了就忽略——废弃字段报错等于把还没更新的界面锁在门外。
      */
-    private void handleTeam(WebSocket conn, String goal, List<String> roleIds) {
+    private void handleTeam(Peer peer, String goal, List<String> roleIds) {
         if (pipeline == null) {
-            send(conn, error("没有配置 API key，无法开流水线"));
+            peer.send(error("没有配置 API key，无法开流水线"));
             return;
         }
         if (goal.isEmpty()) {
@@ -664,7 +716,7 @@ public final class AgentServer extends WebSocketServer {
             log.info("team 命令带了已废弃的 roles 字段，忽略: {}", roleIds);
         }
         if (!busy.compareAndSet(false, true)) {
-            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
@@ -690,17 +742,17 @@ public final class AgentServer extends WebSocketServer {
      * 没有存档是个该定向回给发命令那个连接的错误（`error` 只发给他一个人），
      * 而后台线程手上没有 conn，只能广播，等于打扰了所有连着的界面。
      */
-    private void handleResume(WebSocket conn) {
+    private void handleResume(Peer peer) {
         if (planner == null) {
-            send(conn, error("没有配置 API key，无法执行计划"));
+            peer.send(error("没有配置 API key，无法执行计划"));
             return;
         }
         if (!planAgent.hasSavedPlan()) {
-            send(conn, error("这个工作区没有没跑完的计划"));
+            peer.send(error("这个工作区没有没跑完的计划"));
             return;
         }
         if (!busy.compareAndSet(false, true)) {
-            send(conn, error("正在处理上一条，请先等它结束或按 Esc 中断"));
+            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
@@ -717,23 +769,23 @@ public final class AgentServer extends WebSocketServer {
      * <p>三道闸都过不了就定向回一条 error 给发命令的那个连接，
      * 而不是广播——别的界面没做错什么，不该被打扰。
      */
-    private void handleContinue(WebSocket conn) {
+    private void handleContinue(Peer peer) {
         if (agent == null) {
-            send(conn, error("没有配置 API key，无法对话"));
+            peer.send(error("没有配置 API key，无法对话"));
             return;
         }
         if (busy.get()) {
-            send(conn, error("正在处理中，不能恢复会话"));
+            peer.send(error("正在处理中，不能恢复会话"));
             return;
         }
         var snapshot = sessions.latest(workspace.root());
         if (snapshot.isEmpty()) {
-            send(conn, error("这个工作区没有可以接着聊的会话"));
+            peer.send(error("这个工作区没有可以接着聊的会话"));
             return;
         }
         if (agent.history().size() > 1) {
             // 恢复会把眼前这段直接冲掉，这个决定得由用户来做
-            send(conn, error("当前已经有对话了。要接上次的，先 reset 再 continue"));
+            peer.send(error("当前已经有对话了。要接上次的，先 reset 再 continue"));
             return;
         }
 
@@ -749,7 +801,7 @@ public final class AgentServer extends WebSocketServer {
      *
      * <p>只回给问的那个连接。别的界面没在挑会话，不该收到一坨列表。
      */
-    private void handleSessions(WebSocket conn) {
+    private void handleSessions(Peer peer) {
         ObjectNode list = Protocol.event("session_list");
         list.put("currentId", sessionId);
         ArrayNode rows = list.putArray("sessions");
@@ -764,7 +816,7 @@ public final class AgentServer extends WebSocketServer {
             row.put("savedAt", summary.savedAt());
             row.put("bytes", summary.bytes());
         }
-        send(conn, list);
+        peer.send(list);
     }
 
     /**
@@ -775,22 +827,22 @@ public final class AgentServer extends WebSocketServer {
      * 只多一道「这个 id 还在不在」——列出来到挑中之间隔着用户的思考时间，
      * 那段会话可能已经被另一个界面清掉了。
      */
-    private void handleSessionResume(WebSocket conn, String id) {
+    private void handleSessionResume(Peer peer, String id) {
         if (agent == null) {
-            send(conn, error("没有配置 API key，无法对话"));
+            peer.send(error("没有配置 API key，无法对话"));
             return;
         }
         if (busy.get()) {
-            send(conn, error("正在处理中，不能恢复会话"));
+            peer.send(error("正在处理中，不能恢复会话"));
             return;
         }
         if (agent.history().size() > 1) {
-            send(conn, error("当前已经有对话了。要接另一段，先 reset 再 session_resume"));
+            peer.send(error("当前已经有对话了。要接另一段，先 reset 再 session_resume"));
             return;
         }
         var snapshot = sessions.load(workspace.root(), id);
         if (snapshot.isEmpty()) {
-            send(conn, error("这段会话找不到了，可能是别处清掉的"));
+            peer.send(error("这段会话找不到了，可能是别处清掉的"));
             return;
         }
         adopt(snapshot.get());
@@ -890,15 +942,15 @@ public final class AgentServer extends WebSocketServer {
      * 摘要边界正好落在语义边界上，比等到 93.5% 时机器随便挑一个切点干净得多。
      * 有后台算好的现货就直接用，没有就现算。
      */
-    private void handleCompact(WebSocket conn) {
+    private void handleCompact(Peer peer) {
         if (agent == null) {
-            send(conn, error("没配 API key，压缩无从谈起"));
+            peer.send(error("没配 API key，压缩无从谈起"));
             return;
         }
         // 和 handlePrompt 用同一个闸：压缩改写 agent 的派生物（segments/summary/coversUpTo），
         // 和一轮对话并发跑会互相踩
         if (!busy.compareAndSet(false, true)) {
-            send(conn, error("正在处理中，压缩要等这一轮跑完"));
+            peer.send(error("正在处理中，压缩要等这一轮跑完"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
@@ -948,7 +1000,7 @@ public final class AgentServer extends WebSocketServer {
      * 和 {@code /compact} 不一样——这三个动作都不碰会话记录，也不发模型调用，
      * 跑着任务时查一眼记忆是完全安全的。
      */
-    private void handleMemory(WebSocket conn, String action) {
+    private void handleMemory(Peer peer, String action) {
         switch (action) {
             case "list" -> {
                 ObjectNode list = Protocol.event("memory_list");
@@ -965,26 +1017,26 @@ public final class AgentServer extends WebSocketServer {
                     row.put("supersededBy", e.supersededBy());      // 非空即已失效
                     row.put("turnId", e.metadata().get(MemoryMetadata.TURN_ID));
                 }
-                send(conn, list);
+                peer.send(list);
             }
             case "undo" -> memory.undoLastAutoWrite(workspace.root()).ifPresentOrElse(
-                    e -> send(conn, Protocol.event("memory_changed")
+                    e -> peer.send(Protocol.event("memory_changed")
                             .put("action", "undo")
                             .put("name", e.name())
                             .put("description", e.description())),
-                    () -> send(conn, error("没有可撤销的自动记录"
+                    () -> peer.send(error("没有可撤销的自动记录"
                             + "（只认压缩时顺手捡的那些，你自己让记的不在此列）")));
-            case "clear_auto" -> send(conn, Protocol.event("memory_changed")
+            case "clear_auto" -> peer.send(Protocol.event("memory_changed")
                     .put("action", "clear_auto")
                     .put("removed", memory.clearAutoMemories(workspace.root())));
-            default -> send(conn, error("认不出的 memory action: " + action
+            default -> peer.send(error("认不出的 memory action: " + action
                     + "（认 list / undo / clear_auto）"));
         }
     }
 
-    private void handleReset(WebSocket conn) {
+    private void handleReset(Peer peer) {
         if (busy.get()) {
-            send(conn, error("正在处理中，不能清空"));
+            peer.send(error("正在处理中，不能清空"));
             return;
         }
         if (agent != null) {
@@ -1116,14 +1168,19 @@ public final class AgentServer extends WebSocketServer {
      */
     private void publish(ObjectNode node) {
         synchronized (events) {
-            broadcast(events.stamp(node));
+            String json = events.stamp(node);
+            broadcast(json);                      // 本机连着的界面（终端）
+            RelayLink link = relay;
+            if (link != null) {
+                link.send(json);                  // 中继那头的手机
+            }
         }
     }
 
-    private void send(WebSocket conn, ObjectNode node) {
-        if (conn != null && conn.isOpen()) {
-            conn.send(node.toString());
-        }
+    /** 有没有人在看。审批要问人，一个界面都没有时只能按否决处理。 */
+    private boolean hasPeers() {
+        RelayLink link = relay;
+        return !getConnections().isEmpty() || (link != null && link.isOpen());
     }
 
     /** 从 "/?token=abc&x=1" 里抠出一个查询参数。够用就行，不引入 URL 解析库。 */

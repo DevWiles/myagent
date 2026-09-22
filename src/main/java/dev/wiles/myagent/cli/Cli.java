@@ -28,6 +28,9 @@ public final class Cli {
         boolean serve = false;
         int port = 0;
         boolean lan = false;
+        String relay = null;
+        boolean relayReset = false;
+        boolean relayServe = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -40,6 +43,12 @@ public final class Cli {
                 case "--unsafe" -> unsafe = true;
                 case "--serve" -> serve = true;
                 case "--lan" -> lan = true;
+                case "--relay" -> {
+                    requireValue(args, i, arg);
+                    relay = args[++i];
+                }
+                case "--relay-reset" -> relayReset = true;
+                case "--relay-serve" -> relayServe = true;
                 case "--port" -> {
                     requireValue(args, i, arg);
                     port = parsePort(args[++i]);
@@ -60,7 +69,8 @@ public final class Cli {
                                 + "要对话请用 myagent-tui 起界面）");
             }
         }
-        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port, lan);
+        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port, lan,
+                relay, relayReset, relayServe);
     }
 
     private static int parsePort(String value) {
@@ -98,6 +108,11 @@ public final class Cli {
                       --port <端口>    监听端口，默认 0（系统分配，推荐）
                       --lan            局域网模式：绑 0.0.0.0，手机等远程客户端可连。
                                        明文 ws，只在可信网络用（见 docs/protocol.md 1.1）
+                      --relay <地址>   挂到中继上（wss://…/ws），手机在任何网络都能连。
+                                       只往外拨，不监听公网端口（见 docs/protocol.md 1.3）
+                      --relay-reset    换一套房间号和配对密钥，手机要重新扫码
+                      --relay-serve    以中继服务端启动（部署在公网机器上），
+                                       配合 --port；这条路径不起 agent
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
                   -r, --readonly       只读模式：写文件和执行命令的工具压根不注册
