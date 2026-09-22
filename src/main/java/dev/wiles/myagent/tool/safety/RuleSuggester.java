@@ -69,7 +69,53 @@ public final class RuleSuggester {
         return switch (request.kind()) {
             case BASH -> forCommand(request.subject());
             case WRITE -> forPath(request.subject());
+            case BROWSE -> forHost(request.subject());
         };
+    }
+
+    // ---------------------------------------------------------------- 站点
+
+    /**
+     * 站点只给两档：<b>就这个主机名</b>，和<b>连子域一起</b>。
+     *
+     * <h3>为什么没有更松的那一档</h3>
+     * 顺着往上推会得到 {@code *.com}，而那不是「放宽一点」，是「整个互联网」。
+     * 命令和路径可以一层层放松是因为它们有天然的层级语义（子命令、目录），
+     * 域名的层级<b>方向是反的</b>：越往上越大，而且大得没有边界。
+     *
+     * <p>主机名里已经只剩一段（{@code localhost}）时，两档会重合，只给一档。
+     */
+    private static Suggestions forHost(String host) {
+        String clean = host.strip().toLowerCase(java.util.Locale.ROOT);
+        if (clean.isEmpty()) {
+            return Suggestions.none();
+        }
+        List<Level> levels = new ArrayList<>();
+        levels.add(new Level(clean, List.of(clean)));           // 就这个主机名
+        String parent = parentDomain(clean);
+        if (parent != null) {
+            levels.add(new Level("*." + parent + "（连子域一起）", List.of("*." + parent)));
+        }
+        return new Suggestions(levels, 0);                      // 默认选最紧那档
+    }
+
+    /**
+     * {@code mail.google.com} → {@code google.com}。
+     *
+     * <p>只脱一层，而且只在脱完还剩两段时才脱：{@code google.com} 再往上是
+     * {@code com}，那一档不该存在（理由见 {@link #forHost}）。
+     * IP 地址一律不脱——{@code 192.168.1.7} 的「父域」是 {@code 168.1.7}，纯属胡说。
+     */
+    private static String parentDomain(String host) {
+        if (host.isEmpty() || Character.isDigit(host.charAt(host.length() - 1))) {
+            return null;                     // IPv4 结尾一定是数字，IPv6 走不到这儿
+        }
+        int dot = host.indexOf('.');
+        if (dot < 0) {
+            return null;                     // localhost 这种单段主机名没有父域
+        }
+        String parent = host.substring(dot + 1);
+        return parent.indexOf('.') < 0 ? null : parent;
     }
 
     // ---------------------------------------------------------------- 命令

@@ -171,4 +171,32 @@ class RuleSuggesterTest {
         assertEquals(ApprovalRules.Decision.ASK,
                 rules.check(ApprovalRequest.bash("rm -rf target src", "")).decision());
     }
+
+    private static List<List<String>> browsePatterns(String host) {
+        return RuleSuggester.forRequest(new ApprovalRequest(
+                        ApprovalKind.BROWSE, "浏览", host, "", "", null))
+                .levels().stream().map(RuleSuggester.Level::patterns).toList();
+    }
+
+    @Test
+    @DisplayName("站点给两档：就这个主机名、连子域")
+    void browseSuggestsTheHostAndItsParent() {
+        assertEquals(List.of(List.of("mail.google.com"), List.of("*.google.com")),
+                browsePatterns("mail.google.com"));
+    }
+
+    @Test
+    @DisplayName("没有比「连子域」更松的一档——再往上是 *.com，那不是放宽是整个互联网")
+    void browseNeverSuggestsATopLevelDomain() {
+        assertEquals(List.of(List.of("example.com")), browsePatterns("example.com"),
+                "example.com 的父域是 com，那一档不该存在");
+    }
+
+    @Test
+    @DisplayName("IP 和单段主机名不脱层——192.168.1.7 的「父域」是 168.1.7，纯属胡说")
+    void addressesAndSingleLabelHostsGetOneLevelOnly() {
+        for (String host : List.of("127.0.0.1", "192.168.1.7", "localhost")) {
+            assertEquals(List.of(List.of(host)), browsePatterns(host), host + " 不该被脱掉一层");
+        }
+    }
 }

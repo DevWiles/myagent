@@ -26,13 +26,19 @@ import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.llm.DeepSeekClient;
 import dev.wiles.myagent.llm.LlmClient;
+import dev.wiles.myagent.browser.BrowserSites;
+import dev.wiles.myagent.browser.GuardedBrowserTool;
 import dev.wiles.myagent.mcp.McpConfig;
 import dev.wiles.myagent.mcp.McpServers;
 import dev.wiles.myagent.relay.Pairing;
 import dev.wiles.myagent.relay.RelayLink;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.GitBranch;
+import dev.wiles.myagent.skill.Skill;
+import dev.wiles.myagent.skill.SkillLibrary;
+import dev.wiles.myagent.skill.SkillTool;
 import dev.wiles.myagent.tool.Tool;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.plan.ExecutionMode;
 import dev.wiles.myagent.plan.ModeHeuristic;
@@ -66,6 +72,7 @@ import java.net.InetSocketAddress;
 import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.util.HexFormat;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
@@ -232,7 +239,17 @@ public final class AgentServer extends WebSocketServer {
         // 而只读模式承诺的是「不改任何东西」，兑现不了的承诺不能开这个口子
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
-        tools.registerAll(mcp.tools());
+        tools.registerAll(guardBrowserTools(mcp.tools(), policy));
+
+        // 技能：用户自己写的说明书，标准 SKILL.md 格式。一份都没有就不注册这个工具——
+        // 清单挂在它的描述上，注册了就是每一轮的固定开销。只读模式照接：
+        // 技能本身只是一段文字，真正动手的是模型读完之后调的那些工具
+        SkillLibrary skills = SkillLibrary.load(workspace.root());
+        if (!skills.isEmpty()) {
+            tools.register(new SkillTool(skills));
+            log.info("接入 {} 份技能: {}", skills.all().size(),
+                    skills.all().stream().map(Skill::id).collect(java.util.stream.Collectors.joining(", ")));
+        }
 
         // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
         this.agent = config.hasApiKey()
@@ -282,6 +299,29 @@ public final class AgentServer extends WebSocketServer {
      */
     private LlmClient newClient() {
         return meter.meter(new DeepSeekClient(config));
+    }
+
+    /**
+     * 浏览器工具外面套一层按站点的审批，别的 MCP 工具照旧直通。
+     *
+     * <p>「哪些算浏览器工具」用的是 {@link AgentRoles#BROWSER} 那条白名单——
+     * <b>和规划器派活用的是同一个判据</b>。两处各写一份的话，
+     * 迟早出现「这个工具规划器认得、审批层不认得」，而那个缺口的症状是
+     * 一次未经同意的页面操作，从日志里根本看不出来。
+     *
+     * <p>一份 {@link BrowserSites} 给所有浏览器工具共用：页面停在哪个站是
+     * <b>浏览器的状态</b>，不是某个工具的状态。{@code list_pages} 认到的路，
+     * {@code click} 那边也得认。
+     */
+    private static List<Tool> guardBrowserTools(List<Tool> mcpTools, ApprovalPolicy approval) {
+        BrowserSites sites = new BrowserSites();
+        List<Tool> guarded = new ArrayList<>();
+        for (Tool tool : mcpTools) {
+            guarded.add(AgentRoles.BROWSER.matches(tool.name())
+                    ? new GuardedBrowserTool(tool, approval, sites)
+                    : tool);
+        }
+        return guarded;
     }
 
     private ContextManager contextManager(boolean readOnly) {

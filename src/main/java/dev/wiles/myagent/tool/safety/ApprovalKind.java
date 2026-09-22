@@ -20,6 +20,8 @@ import java.util.Locale;
  *   <li>{@link #BASH} 的 subject 是命令原文，规则按 <b>token 前缀</b>匹配，
  *       而且必须<b>逐段</b>匹配（见 {@link ApprovalRules}）</li>
  *   <li>{@link #WRITE} 的 subject 是工作区相对路径，规则按<b>路径 glob</b> 匹配</li>
+ *   <li>{@link #BROWSE} 的 subject 是<b>站点主机名</b>，规则按主机名匹配，
+ *       {@code *.example.com} 连顶级域一起罩住</li>
  * </ul>
  */
 public enum ApprovalKind {
@@ -28,7 +30,20 @@ public enum ApprovalKind {
     BASH("bash"),
 
     /** 写文件（新建、覆盖、脚手架里的覆盖，都算这一种）。 */
-    WRITE("write");
+    WRITE("write"),
+
+    /**
+     * 在某个站点上操作浏览器。
+     *
+     * <h3>为什么按站点而不是按动作</h3>
+     * 「点一下」「填个字」单独看都无害，有害的是<b>在哪个站上</b>点——
+     * 同一个 click，在本地开发页上是测试，在网银上是转账。
+     * 用户能判断的也只有站点：问他「要不要允许在 mail.google.com 上操作」
+     * 他答得出来，问他「要不要允许 click uid=1_12」他只能瞎点。
+     *
+     * <p>这也是 Claude in Chrome 扩展的做法——权限按站点给、按站点撤。
+     */
+    BROWSE("browse");
 
     private final String id;
 

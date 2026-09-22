@@ -25,14 +25,30 @@ public final class TaskPrompt {
     /**
      * 验证角色必须以这一行收尾，{@link AgentTaskRunner} 靠它判定成败。
      *
-     * <p>要求这一行的那段话在 {@code prompts/roles/verifier.md} 里<b>写成字面量</b>，
-     * 而不是从这两个常量插值进去：角色正文是通过变量填进模板的，
-     * 而装配器的占位符替换只扫一遍模板（见 {@code PromptAssembler}），
-     * 填进去的内容里再有 <code>{{@…}}</code> 不会被替换，也不会报错——
-     * 模型收到的就是字面的占位符。两处对不上的风险改由单测钉住。
+     * <p>要求这一行的那段话由 {@link #contractFor} <b>从这两个常量拼出来</b>，
+     * 填进 {@code prompts/modes/task.md} 的占位符。原先写在
+     * {@code prompts/roles/verifier.md} 里当字面量，代价是「代码判的」和
+     * 「提示词要的」在两个文件里，改一处忘另一处没有任何症状——
+     * 现在同一个常量出两份，对不上这件事在语法上就不成立。
      */
     public static final String VERDICT_PASS = "结论: 通过";
     public static final String VERDICT_FAIL = "结论: 不通过";
+
+    /**
+     * 别的角色必须以这一行收尾，回答的是<b>另一个问题</b>。
+     *
+     * <h3>为什么不和结论行共用一句话</h3>
+     * 两句话问的不是一件事：{@code 结论:} 问「被验的东西过了吗」，
+     * {@code 完成:} 问「你这一步做到了吗」。同一个验证任务完全可能
+     * 顺利跑完（完成了）却报告测试挂了（不通过）——合成一句就只能和稀泥，
+     * 而和稀泥的代价在 {@code explorer}/{@code reviewer} 那儿已经付过一次了。
+     *
+     * <p>加这一行是因为实测到一种最坏的失败：子任务如实说「我的工具集里没有
+     * 这个工具，这步没做成」，而程序没有任何地方读这句话，七步全判成功，
+     * 计划收在 {@code COMPLETED ok=7 fail=0}。<b>界面全绿，一步没做。</b>
+     */
+    public static final String DONE_YES = "完成: 是";
+    public static final String DONE_NO = "完成: 否";
 
     private static final PromptAssembler ASSEMBLER = PromptAssembler.createDefault();
 
@@ -63,7 +79,29 @@ public final class TaskPrompt {
                 .variable("workspace", String.valueOf(workspaceRoot))
                 .variable("role", role.title())
                 .variable("taskRules", role.rules())
+                .variable("completionContract", contractFor(role))
                 .build());
+    }
+
+    /**
+     * 收尾那一行的要求。由代码按角色生成，不写进各自的 md。
+     *
+     * <p>理由和 {@code PlanPrompt#roleMenu} 一样：<b>代码判的和提示词要的，
+     * 必须同一个地方出</b>。分开写的症状是某个角色的 md 忘了加这句，
+     * 于是它永远收不到结论行——而代码那边照判，这个角色就莫名其妙地全成功
+     * 或者全失败，从日志里完全看不出来。
+     */
+    private static String contractFor(AgentRole role) {
+        if (role.requiresVerdict()) {
+            return "**回答的最后一行必须是** `" + VERDICT_PASS + "` 或 `" + VERDICT_FAIL
+                    + "`，前面可以先说过程。\n"
+                    + "这一行是程序判定成败的唯一依据，少了它这一步会被当成失败。";
+        }
+        return "**回答的最后一行必须是** `" + DONE_YES + "` 或 `" + DONE_NO + "`。\n"
+                + "它回答的只有一件事：**这一步要求的事你做到了没有**。"
+                + "做不到就写 `" + DONE_NO + "` 并说清卡在哪（缺工具、缺权限、上游没给够材料），"
+                + "这比写一段漂亮的交代有用得多——程序靠这一行决定后面的步骤还要不要跑。"
+                + "不要用它评价东西好不好，那是验证角色的事。";
     }
 
     /**

@@ -16,6 +16,7 @@ import java.util.Set;
  *   reviewer  审查   FILE_READ     只读        对着现成的东西挑毛病
  *   coder     编码   FILE_WRITE    读+写       动手改
  *   operator  执行   COMMAND       读+bash     跑命令
+ *   browser   浏览   COMMAND       浏览器工具   在真实页面上点、填、读
  *   analyst   分析   ANALYSIS      无工具      只基于上游材料想
  *   verifier  验证   VERIFICATION  读+bash     确认真的成了
  * </pre>
@@ -73,6 +74,32 @@ public final class AgentRoles {
             TaskType.COMMAND, List.of("read_file", "list_dir", "grep", "glob", "bash"),
             12, true, false);
 
+    /**
+     * 浏览器角色。
+     *
+     * <h3>为什么不把浏览器工具挂到 operator 上</h3>
+     * 因为姿势完全不同。跑命令是「发一条、看退出码」；开浏览器是
+     * 「先取快照拿 uid → 动一下 → 页面变了，快照作废 → 再取一次」。
+     * 两件事共用一段 {@code operator.md} 只能写成和稀泥——这正是
+     * {@code explorer}/{@code reviewer} 当初分开的同一条理由。
+     *
+     * <h3>为什么白名单是通配而不是全名</h3>
+     * {@code chrome} 这一截是用户在 {@code mcp.json} 里自己起的 key，
+     * 写死全名等于假设每个人都叫它 chrome。前缀匹配到 {@code mcp__chrome}，
+     * 所以 {@code chrome}/{@code chromium}/{@code chrome-devtools} 都认。
+     * <b>没接浏览器 server 的人身上，这个角色会从规划菜单里整个消失</b>
+     * （见 {@code PlanPrompt#staffed}）——否则模型会派出一个手上空空的角色。
+     *
+     * <p>类型仍然是 {@code COMMAND}，不新开一种：{@link TaskType} 那六个值写在
+     * {@code docs/protocol.md} 里，为了一个角色升协议不值当。
+     * 默认角色也还是 {@code operator}——「只填了 type」的老存档不该突然改走浏览器。
+     */
+    public static final AgentRole BROWSER = new AgentRole(
+            "browser", "浏览",
+            "在真实浏览器里打开页面、点按钮、填表单、读 JS 动态生成的内容。"
+                    + "页面是活的、curl 和读源码看不到的东西，只有它能拿到",
+            TaskType.COMMAND, List.of("mcp__chrome*"), 15, true, false);
+
     public static final AgentRole ANALYST = new AgentRole(
             "analyst", "分析",
             "不碰文件系统，把上游任务交过来的材料整理成结论",
@@ -92,7 +119,7 @@ public final class AgentRoles {
      * 而不是按字母——模型对列表顺序是有感觉的，乱序等于白白丢掉一点先验。
      */
     private static final List<AgentRole> ALL =
-            List.of(SCOUT, EXPLORER, REVIEWER, CODER, OPERATOR, ANALYST, VERIFIER);
+            List.of(SCOUT, EXPLORER, REVIEWER, CODER, OPERATOR, BROWSER, ANALYST, VERIFIER);
 
     /**
      * 每种类型的默认角色。

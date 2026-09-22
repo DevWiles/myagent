@@ -35,7 +35,9 @@ import java.util.Objects;
  *                       模型就只能靠 id 猜
  * @param taskType       对应的任务类型。调度和界面继续用它，协议里也照发
  * @param tools          工具白名单。<b>白名单不是黑名单</b>：以后新增工具（发邮件、调 API）
- *                       默认对所有角色不可见，得显式想清楚该给谁
+ *                       默认对所有角色不可见，得显式想清楚该给谁。
+ *                       写全名精确匹配；<b>只有 {@code mcp__} 开头的条目</b>许用尾部
+ *                       {@code *} 通配，见 {@link #matches(String)}
  * @param maxSteps       这个角色的 ReAct 步数上限。分析型的给三步足够，
  *                       编码型的要留出「读—改—再读」的来回
  * @param mutates        会不会改变世界。只读模式靠它过滤掉一半角色，
@@ -56,6 +58,9 @@ public record AgentRole(
 
     private static final PromptRepository REPO = PromptRepository.createDefault();
 
+    /** MCP 工具的名字前缀，和 {@code McpTool} 那边定的一致。通配只对它开放。 */
+    private static final String MCP_PREFIX = "mcp__";
+
     public AgentRole {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(title, "title");
@@ -65,6 +70,42 @@ public record AgentRole(
             throw new IllegalArgumentException("角色 " + id + " 的步数上限必须大于 0");
         }
         tools = List.copyOf(tools == null ? List.of() : tools);
+        for (String entry : tools) {
+            if (entry.endsWith("*") && !entry.startsWith(MCP_PREFIX)) {
+                // 通配只对外挂工具开放，理由见 matches()。写死在构造里而不是靠约定，
+                // 是因为这条一旦破了，破的方式一定是某次「顺手加个 * 省事」
+                throw new IllegalArgumentException("角色 " + id + " 的白名单里有非法通配 \""
+                        + entry + "\"：只有 " + MCP_PREFIX + " 开头的条目可以用 *");
+            }
+        }
+    }
+
+    /**
+     * 这个工具在不在本角色的菜单上。
+     *
+     * <h3>为什么要有通配，又为什么只给 MCP</h3>
+     * MCP 工具的名字是 {@code mcp__<server>__<tool>}，而 {@code <server>} 是用户在
+     * {@code ~/.myagent/mcp.json} 里自己起的 key，{@code <tool>} 由 server 决定——
+     * <b>两截都不在我们手里</b>，没法像内置工具那样把全名写进名册。
+     * 不给通配的结果实测过一次：规划器看得见 29 个浏览器工具、规划得头头是道，
+     * 执行器按白名单精确匹配一个都没兑现，七步全报「我没这个工具」却全判成功。
+     *
+     * <p>但通配<b>只对 {@code mcp__} 开放</b>。名册是安全边界（见 {@link AgentRoles}），
+     * 「谁能调 bash」必须是代码里一眼看得见的字面量；放开 {@code *} 等于让
+     * {@code "b*"} 这种手滑把 bash 递给只读角色。
+     */
+    public boolean matches(String toolName) {
+        if (toolName == null) {
+            return false;
+        }
+        for (String entry : tools) {
+            if (entry.endsWith("*")
+                    ? toolName.startsWith(entry.substring(0, entry.length() - 1))
+                    : entry.equals(toolName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 这个角色的提示词正文在哪。一个角色一个文件，改哪个角色就只碰哪个文件。 */

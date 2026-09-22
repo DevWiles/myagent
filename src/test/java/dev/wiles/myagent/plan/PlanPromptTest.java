@@ -3,6 +3,7 @@ package dev.wiles.myagent.plan;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -35,6 +36,61 @@ class PlanPromptTest {
             }
         }
         throw new AssertionError("提示词里的 JSON 示例括号不配平");
+    }
+
+    /** 造一份带指定工具名的现场信息——staffed() 的判据就是这份清单。 */
+    private static PlanContext contextWith(String... toolNames) {
+        List<PlanContext.ToolBrief> briefs = new ArrayList<>();
+        for (String name : toolNames) {
+            briefs.add(new PlanContext.ToolBrief(name, "干点什么"));
+        }
+        return new PlanContext("/tmp/proj", null, briefs, List.of());
+    }
+
+    @Test
+    @DisplayName("没接浏览器时，浏览角色整个从菜单上消失——否则会被派出去然后两手空空")
+    void rolesWithNoToolsAvailableAreHidden() {
+        String prompt = PlanPrompt.system(false, contextWith("read_file", "bash"));
+
+        assertFalse(prompt.contains("`browser`"),
+                "菜单上留着它，模型就会派它，而执行器给它的是一份空菜单——"
+                        + "实测过一次：七步全报「我没这个工具」，计划却收在 COMPLETED ok=7");
+        assertTrue(prompt.contains("`operator`"), "有 bash 的角色不受影响");
+    }
+
+    @Test
+    @DisplayName("接上了浏览器，浏览角色就回到菜单上")
+    void browserRoleAppearsOnceItsToolsExist() {
+        String prompt = PlanPrompt.system(false,
+                contextWith("read_file", "bash", "mcp__chrome__take_snapshot"));
+
+        assertTrue(prompt.contains("`browser`"));
+    }
+
+    @Test
+    @DisplayName("本来就不要工具的角色不能被误伤——analyst 是故意一个都不给的")
+    void rolesThatWantNoToolsSurvive() {
+        String prompt = PlanPrompt.system(false, contextWith("read_file"));
+
+        assertTrue(prompt.contains("`analyst`"),
+                "判据是「要了却没兑现」，不是「手上没工具」");
+    }
+
+    @Test
+    @DisplayName("没带现场信息时一个都不剔——「没告诉我」不等于「没有」")
+    void noContextMeansNoFiltering() {
+        String prompt = PlanPrompt.system(false, PlanContext.none());
+
+        assertTrue(prompt.contains("`browser`"));
+    }
+
+    @Test
+    @DisplayName("补救和第二层的菜单也照剔——漏一处，那条路上照样派得出空角色")
+    void replanAndSubPlanMenusAreFilteredToo() {
+        PlanContext noBrowser = contextWith("read_file", "bash");
+
+        assertFalse(PlanPrompt.replanSystem(false, noBrowser).contains("`browser`"));
+        assertFalse(PlanPrompt.subPlanSystem(false, noBrowser).contains("`browser`"));
     }
 
     @Test

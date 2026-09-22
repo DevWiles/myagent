@@ -1,12 +1,15 @@
 package dev.wiles.myagent.mcp;
 
+import dev.wiles.myagent.browser.ChromeSession;
 import dev.wiles.myagent.tool.Tool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -71,6 +74,7 @@ public final class McpServers implements AutoCloseable {
             } catch (Exception e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 log.warn("MCP server {} 起不来，跳过: {}", startup.getKey(), cause.getMessage());
+                hintIfAutoConnect(config.servers().get(startup.getKey()));
             }
         }
         return new McpServers(clients, tools);
@@ -79,8 +83,15 @@ public final class McpServers implements AutoCloseable {
     private record Started(McpClient client, List<Tool> tools) {
     }
 
-    /** 一家 server 的完整接入：spawn → 握手 → 清点工具。任何一步炸了整家作废。 */
+    /**
+     * 一家 server 的完整接入：（备浏览器 →）spawn → 握手 → 清点工具。
+     * 任何一步炸了整家作废。
+     */
     private static Started connect(String name, McpConfig.ServerSpec spec) {
+        // 参数里写了 --browserUrl 的，说明它要连一个现成的浏览器而不是自己拉。
+        // 那就得有人保证那个浏览器在，否则握手直接失败——而这件事只有我们能做，
+        // server 进程自己是连不上就退。备不好也只是少一家 server，不拦别人的路
+        prepareBrowser(name, spec);
         McpClient client;
         try {
             client = McpClient.spawn(name, spec);
@@ -89,14 +100,56 @@ public final class McpServers implements AutoCloseable {
         }
         try {
             client.initialize();
+            List<McpClient.RemoteTool> offered = client.listTools();
             List<Tool> tools = new ArrayList<>();
-            for (McpClient.RemoteTool remote : client.listTools()) {
-                tools.add(new McpTool(client, remote));
+            List<String> dropped = new ArrayList<>();
+            for (McpClient.RemoteTool remote : offered) {
+                if (spec.wants(remote.name())) {
+                    tools.add(new McpTool(client, remote));
+                } else {
+                    dropped.add(remote.name());
+                }
+            }
+            // 筛掉了什么必须说出来：配置里打错一个工具名的症状是「模型就是不用那个工具」，
+            // 而菜单上少一个和这个工具压根不存在，在事件流里长得一模一样
+            if (spec.picky()) {
+                log.info("MCP server {} 提供 {} 个工具，按配置留下 {} 个，筛掉: {}",
+                        name, offered.size(), tools.size(),
+                        dropped.isEmpty() ? "（一个都没筛掉，检查配置里的名字有没有写错）"
+                                : String.join(" ", dropped));
             }
             return new Started(client, tools);
         } catch (RuntimeException e) {
             client.close();                  // 握手失败的进程不能留着
             throw e;
+        }
+    }
+
+    /**
+     * 这家 server 要连现成的浏览器的话，先把浏览器备好。
+     *
+     * <p>端口从它自己的 {@code --browserUrl} 里读，不让用户再配一遍——
+     * 同一个事实写两处迟早对不上。没写这个参数的 server 这里一步都不做。
+     */
+    private static void prepareBrowser(String name, McpConfig.ServerSpec spec) {
+        if (ChromeSession.usesAutoConnect(spec.args())) {
+            // 它自己会去找用户日常那个浏览器。我们再拉一个只会抢位置，
+            // 而且抢到的是个没有任何登录态的空白 profile——两边都不会报错
+            log.info("MCP server {} 用 --autoConnect 接管你日常的浏览器，这边不插手", name);
+            return;
+        }
+        Optional<URI> target = ChromeSession.debugTargetIn(spec.args());
+        if (target.isEmpty()) {
+            return;
+        }
+        log.info("MCP server {} 要连 {} 上的浏览器，先确认它在", name, target.get());
+        new ChromeSession().ensure(target.get());
+    }
+
+    /** autoConnect 连不上时给一句能照着做的提示，而不是让用户对着通用报错猜。 */
+    private static void hintIfAutoConnect(McpConfig.ServerSpec spec) {
+        if (spec != null && ChromeSession.usesAutoConnect(spec.args())) {
+            log.warn(ChromeSession.AUTO_CONNECT_HINT);
         }
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "myagent-tui",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "myagent 的终端界面：OpenTUI + SolidJS，通过 WebSocket 驱动 Java 后端",

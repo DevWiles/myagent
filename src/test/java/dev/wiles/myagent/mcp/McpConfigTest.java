@@ -76,4 +76,70 @@ class McpConfigTest {
                 {"servers": {"z": {"command": "a"}, "a": {"command": "b"}, "m": {"command": "c"}}}""");
         assertEquals(List.of("z", "a", "m"), List.copyOf(config.servers().keySet()));
     }
+
+    @Test
+    @DisplayName("不写挑选规则就是全都要——挑工具是优化，不是必填项")
+    void withoutRulesEveryToolIsWanted() throws Exception {
+        McpConfig config = McpConfig.parse("""
+                { "servers": { "chrome": { "command": "npx" } } }
+                """);
+
+        McpConfig.ServerSpec spec = config.servers().get("chrome");
+        assertFalse(spec.picky());
+        assertTrue(spec.wants("take_screenshot"));
+        assertTrue(spec.wants("随便什么名字"));
+    }
+
+    @Test
+    @DisplayName("白名单：只要列出来的那几个")
+    void allowListKeepsOnlyWhatIsListed() throws Exception {
+        McpConfig config = McpConfig.parse("""
+                { "servers": { "chrome": { "command": "npx",
+                    "tools": ["new_page", "take_snapshot"] } } }
+                """);
+
+        McpConfig.ServerSpec spec = config.servers().get("chrome");
+        assertTrue(spec.picky());
+        assertTrue(spec.wants("new_page"));
+        assertFalse(spec.wants("emulate"));
+    }
+
+    @Test
+    @DisplayName("黑名单：别的都要，就这几个不要")
+    void denyListDropsOnlyWhatIsListed() throws Exception {
+        McpConfig config = McpConfig.parse("""
+                { "servers": { "chrome": { "command": "npx",
+                    "exclude": ["take_screenshot"] } } }
+                """);
+
+        McpConfig.ServerSpec spec = config.servers().get("chrome");
+        assertTrue(spec.wants("click"));
+        assertFalse(spec.wants("take_screenshot"));
+    }
+
+    @Test
+    @DisplayName("两个都写就先过白名单再剔黑名单——黑名单说了不要的，白名单也留不住")
+    void denyWinsOverAllow() throws Exception {
+        McpConfig config = McpConfig.parse("""
+                { "servers": { "chrome": { "command": "npx",
+                    "tools": ["click", "take_screenshot"],
+                    "exclude": ["take_screenshot"] } } }
+                """);
+
+        McpConfig.ServerSpec spec = config.servers().get("chrome");
+        assertTrue(spec.wants("click"));
+        assertFalse(spec.wants("take_screenshot"));
+    }
+
+    @Test
+    @DisplayName("挑选规则写成别的类型，只作废这一条规则，不作废整个 server")
+    void brokenRulesOnlyVoidThemselves() throws Exception {
+        McpConfig config = McpConfig.parse("""
+                { "servers": { "chrome": { "command": "npx", "tools": "click" } } }
+                """);
+
+        McpConfig.ServerSpec spec = config.servers().get("chrome");
+        assertEquals("npx", spec.command(), "server 本身还得在——外挂配置写错，代价该只是这一条");
+        assertFalse(spec.picky(), "读不出清单就当没写，而不是当成一个空白名单把工具全筛光");
+    }
 }

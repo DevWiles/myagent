@@ -247,6 +247,99 @@ class AgentTaskRunnerTest {
     }
 
     @Test
+    @DisplayName("别的角色说自己没做到，就得落成失败——这一条是靠实测踩出来的")
+    void selfReportedFailureIsRecordedAsFailure() {
+        FakeLlm llm = new FakeLlm();
+        // 实测里模型的原话就是这个意思：「我的工具集里没有 mcp__chrome__click」。
+        // 当时没有任何地方读这句话，七步全判成功，计划收在 COMPLETED ok=7 fail=0
+        llm.reply = messages -> "任务要求用浏览器工具，但我的工具集里没有。\n"
+                + TaskPrompt.DONE_NO;
+
+        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.COMMAND), List.of());
+
+        assertFalse(outcome.ok(), "模型明说没做到，程序不能当成做到了");
+        assertTrue(outcome.output().contains("工具集里没有"), "失败也要把原因交代带上");
+    }
+
+    @Test
+    @DisplayName("说做到了就是成功")
+    void doneYesIsSuccess() {
+        FakeLlm llm = new FakeLlm();
+        llm.reply = messages -> "页面上写着「已提交: wiles / 广州」。\n" + TaskPrompt.DONE_YES;
+
+        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.COMMAND), List.of());
+
+        assertTrue(outcome.ok());
+    }
+
+    @Test
+    @DisplayName("忘了写完成行算成功——把「忘了说」判成失败，代价是一串做成了的步骤被跳过")
+    void missingCompletionLineStillPasses() {
+        FakeLlm llm = new FakeLlm();
+        llm.reply = messages -> "读完了，Java 版本是 17。";
+
+        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.FILE_READ), List.of());
+
+        assertTrue(outcome.ok(), "判据只看模型明说自己没做到，不替它当真它没说的话");
+    }
+
+    @Test
+    @DisplayName("完成行只看最后一行——中间提一句「完成: 否」不算数")
+    void onlyTheLastLineCounts() {
+        FakeLlm llm = new FakeLlm();
+        llm.reply = messages -> "上游那步写着 " + TaskPrompt.DONE_NO + "，我这步补上了。\n"
+                + TaskPrompt.DONE_YES;
+
+        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.COMMAND), List.of());
+
+        assertTrue(outcome.ok());
+    }
+
+    @Test
+    @DisplayName("两条契约互不串台：验证角色收结论行，别的角色收完成行")
+    void theTwoContractsDoNotCrossWires() {
+        FakeLlm verifierSaysDone = new FakeLlm();
+        verifierSaysDone.reply = messages -> "测试挂了。\n" + TaskPrompt.DONE_YES;
+        // 验证角色写「完成: 是」不能把「测试挂了」洗成通过——它的契约是结论行，
+        // 而结论行没出现，按「少了就算没验」落成失败
+        assertFalse(new AgentTaskRunner(verifierSaysDone, fullSet(), ROOT)
+                .run(task("n1", TaskType.VERIFICATION), List.of()).ok());
+
+        FakeLlm operatorSaysVerdict = new FakeLlm();
+        operatorSaysVerdict.reply = messages -> "跑完了。\n" + TaskPrompt.VERDICT_FAIL;
+        // 反过来，执行角色随口说「结论: 不通过」也不该被当成没做到
+        assertTrue(new AgentTaskRunner(operatorSaysVerdict, fullSet(), ROOT)
+                .run(task("n1", TaskType.COMMAND), List.of()).ok());
+    }
+
+    @Test
+    @DisplayName("验证任务不给结论行就算没验——「没验」和「验过了」之间不该有默认值")
+    void verificationWithoutAVerdictFails() {
+        FakeLlm llm = new FakeLlm();
+        llm.reply = messages -> "我跑了一下 mvn test，看起来没什么问题。";
+
+        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.VERIFICATION), List.of());
+
+        assertFalse(outcome.ok(), "verifier.md 就是这么告诉模型的，代码得和那句话一致");
+    }
+
+    @Test
+    @DisplayName("结论行认的是「通过」两个字，写成全角冒号照样算数")
+    void verdictToleratesPunctuation() {
+        FakeLlm llm = new FakeLlm();
+        llm.reply = messages -> "全绿。\n结论：通过";
+
+        assertTrue(new AgentTaskRunner(llm, fullSet(), ROOT)
+                .run(task("n1", TaskType.VERIFICATION), List.of()).ok(),
+                "为一个标点判掉一次真的验证，代价是下游全被跳过");
+    }
+
+    @Test
     @DisplayName("跑到一半被叫停：算这个任务失败，而不是假装成功")
     void cancelMakesTaskFail() {
         FakeLlm llm = new FakeLlm();

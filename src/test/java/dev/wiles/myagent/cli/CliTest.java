@@ -3,6 +3,11 @@ package dev.wiles.myagent.cli;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -151,5 +156,24 @@ class CliTest {
                 () -> Cli.parse(new String[]{"--port", "70000"}));
         assertThrows(IllegalArgumentException.class,
                 () -> Cli.parse(new String[]{"--port"}));
+    }
+
+    @Test
+    @DisplayName("三处版本号必须一致——漂开了没人会发现，直到用户报一个对不上的版本")
+    void everyPlaceThatSpellsTheVersionAgrees() throws IOException {
+        String pom = Files.readString(Path.of("pom.xml"));
+        Matcher project = Pattern.compile("<artifactId>myagent</artifactId>\\s*<version>([^<]+)</version>")
+                .matcher(pom);
+        assertTrue(project.find(), "pom.xml 里找不到本项目的 version");
+
+        assertEquals(project.group(1), Cli.VERSION,
+                "pom.xml 和 Cli.VERSION 对不上。后者是 --version 和协议 ready 帧里报的那个，"
+                        + "而前者决定 jar 叫什么名字——两个都是用户看得见的");
+
+        String tuiPackage = Files.readString(Path.of("tui/package.json"));
+        Matcher tui = Pattern.compile("\"version\"\\s*:\\s*\"([^\"]+)\"").matcher(tuiPackage);
+        assertTrue(tui.find());
+        assertEquals(Cli.VERSION, tui.group(1),
+                "界面和后端是一起发的一个东西，版本号分家只会让「你用的是哪个版本」问不清楚");
     }
 }
