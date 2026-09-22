@@ -1,0 +1,11 @@
+# Android 构建产物与本机配置
+build/
+.gradle/
+local.properties
+.kotlin/
+*.apk
+*.aab
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
