@@ -73,6 +73,7 @@ public record ApprovalRule(ApprovalKind kind, String match, String added) {
         return switch (kind) {
             case BASH -> "*".equals(match);
             case WRITE -> "*".equals(match) || "**".equals(match) || "**/*".equals(match);
+            case BROWSE -> "*".equals(match) || "*.*".equals(match);
         };
     }
 
@@ -88,7 +89,33 @@ public record ApprovalRule(ApprovalKind kind, String match, String added) {
         return switch (kind) {
             case BASH -> coversSegment(subject);
             case WRITE -> pathMatcher().test(subject.replace('\\', '/'));
+            case BROWSE -> coversHost(subject);
         };
+    }
+
+    /**
+     * 主机名匹配：要么一模一样，要么 {@code *.example.com} 这种前缀通配。
+     *
+     * <p><b>{@code *.example.com} 连 {@code example.com} 本身一起罩住。</b>
+     * 用户按下「以后都同意 *.example.com」时想的是「这个站我信得过」，
+     * 而不是「除了主域名之外的那些子域我信得过」——按字面理解会让他
+     * 在同一个站上被问第二次，然后他会去按更松的那一档。
+     *
+     * <p>大小写不敏感（主机名本来就是），但<b>不做任何后缀推断</b>：
+     * {@code *.com} 就是字面上的「com 下面全部」，我们不去猜公共后缀，
+     * 猜错的方向永远是放得太宽。
+     */
+    private boolean coversHost(String host) {
+        String want = match.toLowerCase(java.util.Locale.ROOT);
+        String got = host.strip().toLowerCase(java.util.Locale.ROOT);
+        if (want.equals(got)) {
+            return true;
+        }
+        if (!want.startsWith("*.")) {
+            return false;
+        }
+        String domain = want.substring(2);
+        return !domain.isEmpty() && (got.equals(domain) || got.endsWith("." + domain));
     }
 
     private boolean coversSegment(String segment) {

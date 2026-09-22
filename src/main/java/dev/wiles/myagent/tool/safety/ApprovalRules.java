@@ -120,6 +120,7 @@ public final class ApprovalRules {
         return switch (request.kind()) {
             case BASH -> checkCommand(request.subject());
             case WRITE -> checkOne(ApprovalKind.WRITE, request.subject());
+            case BROWSE -> checkOne(ApprovalKind.BROWSE, request.subject());
         };
     }
 

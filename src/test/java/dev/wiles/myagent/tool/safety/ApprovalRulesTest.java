@@ -164,4 +164,69 @@ class ApprovalRulesTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ApprovalRule.of(ApprovalKind.BASH, "   ", "d"));
     }
+
+    // ── 站点（browse）─────────────────────────────────────────
+
+    private static ApprovalRules browseAllowing(String... hosts) {
+        return ApprovalRules.of(
+                List.of(hosts).stream()
+                        .map(m -> ApprovalRule.of(ApprovalKind.BROWSE, m, "2026-09-22")).toList(),
+                List.of());
+    }
+
+    private static ApprovalRules.Decision browse(ApprovalRules rules, String host) {
+        return rules.check(new ApprovalRequest(ApprovalKind.BROWSE, "浏览", host, "", "", null))
+                .decision();
+    }
+
+    @Test
+    @DisplayName("站点规则：一模一样才算，别的站一律要问")
+    void browseRuleMatchesTheExactHost() {
+        ApprovalRules rules = browseAllowing("example.com");
+
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "example.com"));
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "EXAMPLE.COM"),
+                "主机名本来就不分大小写");
+        assertEquals(ApprovalRules.Decision.ASK, browse(rules, "mail.example.com"));
+        assertEquals(ApprovalRules.Decision.ASK, browse(rules, "notexample.com"),
+                "后缀一样不等于同一个站——这条错了就是把一整类域名放进来");
+    }
+
+    @Test
+    @DisplayName("*.example.com 连主域一起罩——不然用户会在同一个站上被问第二次")
+    void browseWildcardCoversTheApexToo() {
+        ApprovalRules rules = browseAllowing("*.example.com");
+
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "mail.example.com"));
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "a.b.example.com"));
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "example.com"),
+                "按字面理解会让他在主域名上被再问一次，然后他会去按更松的那一档");
+        assertEquals(ApprovalRules.Decision.ASK, browse(rules, "example.com.evil.test"),
+                "结尾不是 .example.com，只是含着它");
+    }
+
+    @Test
+    @DisplayName("站点的 deny 压过 allow——黑名单要悲观，和命令那边一个规矩")
+    void browseDenyBeatsAllow() {
+        ApprovalRules rules = ApprovalRules.of(
+                List.of(ApprovalRule.of(ApprovalKind.BROWSE, "*.google.com", "")),
+                List.of(ApprovalRule.of(ApprovalKind.BROWSE, "mail.google.com", "")));
+
+        assertEquals(ApprovalRules.Decision.DENY, browse(rules, "mail.google.com"));
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(rules, "docs.google.com"));
+    }
+
+    @Test
+    @DisplayName("光一个 * 是「整个互联网」，得被当成放行一切处理掉")
+    void bareStarIsMatchEverything() {
+        assertTrue(ApprovalRule.of(ApprovalKind.BROWSE, "*", "").matchesEverything());
+        assertFalse(ApprovalRule.of(ApprovalKind.BROWSE, "*.example.com", "").matchesEverything());
+    }
+
+    @Test
+    @DisplayName("file:// 是个正经站点名，记得下来也罩得住——从这条路能读工作区外的磁盘")
+    void fileSchemeIsARuleableSite() {
+        assertEquals(ApprovalRules.Decision.ALLOW, browse(browseAllowing("file://"), "file://"));
+        assertEquals(ApprovalRules.Decision.ASK, browse(browseAllowing("example.com"), "file://"));
+    }
 }

@@ -74,6 +74,7 @@ public final class McpServers implements AutoCloseable {
             } catch (Exception e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 log.warn("MCP server {} 起不来，跳过: {}", startup.getKey(), cause.getMessage());
+                hintIfAutoConnect(config.servers().get(startup.getKey()));
             }
         }
         return new McpServers(clients, tools);
@@ -131,12 +132,25 @@ public final class McpServers implements AutoCloseable {
      * 同一个事实写两处迟早对不上。没写这个参数的 server 这里一步都不做。
      */
     private static void prepareBrowser(String name, McpConfig.ServerSpec spec) {
+        if (ChromeSession.usesAutoConnect(spec.args())) {
+            // 它自己会去找用户日常那个浏览器。我们再拉一个只会抢位置，
+            // 而且抢到的是个没有任何登录态的空白 profile——两边都不会报错
+            log.info("MCP server {} 用 --autoConnect 接管你日常的浏览器，这边不插手", name);
+            return;
+        }
         Optional<URI> target = ChromeSession.debugTargetIn(spec.args());
         if (target.isEmpty()) {
             return;
         }
         log.info("MCP server {} 要连 {} 上的浏览器，先确认它在", name, target.get());
         new ChromeSession().ensure(target.get());
+    }
+
+    /** autoConnect 连不上时给一句能照着做的提示，而不是让用户对着通用报错猜。 */
+    private static void hintIfAutoConnect(McpConfig.ServerSpec spec) {
+        if (spec != null && ChromeSession.usesAutoConnect(spec.args())) {
+            log.warn(ChromeSession.AUTO_CONNECT_HINT);
+        }
     }
 
     /** 接入成功的所有工具，给注册表。 */

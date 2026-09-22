@@ -141,4 +141,33 @@ class ChromeSessionTest {
 
         assertTrue(profile.endsWith("/.myagent/chrome-profile"), profile);
     }
+
+    @Test
+    @DisplayName("配了 --autoConnect 就绝不拉浏览器——那是要用你日常那个，抢位置会静默出错")
+    void autoConnectMeansHandsOff() {
+        assertTrue(ChromeSession.usesAutoConnect(
+                List.of("-y", "chrome-devtools-mcp@latest", "--autoConnect")));
+        assertTrue(ChromeSession.usesAutoConnect(List.of("--auto-connect")));
+        assertFalse(ChromeSession.usesAutoConnect(List.of("--autoConnect=false")),
+                "显式关掉就不算");
+        assertFalse(ChromeSession.usesAutoConnect(List.of("--isolated")));
+        assertFalse(ChromeSession.usesAutoConnect(null));
+    }
+
+    @Test
+    @DisplayName("autoConnect 和 --browserUrl 是两条路，认 autoConnect 时不该再去探端口")
+    void autoConnectCarriesNoPortToProbe() {
+        List<String> args = List.of("-y", "chrome-devtools-mcp@latest", "--autoConnect");
+
+        assertTrue(ChromeSession.usesAutoConnect(args));
+        assertTrue(ChromeSession.debugTargetIn(args).isEmpty(),
+                "没有端口可探——发现不了就该老实什么都不做，而不是猜一个 9222");
+    }
+
+    @Test
+    @DisplayName("远程调试开关没开时那句提示，得说清去哪儿点")
+    void theAutoConnectHintIsActionable() {
+        assertTrue(ChromeSession.AUTO_CONNECT_HINT.contains("chrome://inspect"),
+                "只说「连不上」等于没说——这个开关不落地成文件，探不出来，只能告诉他去哪儿开");
+    }
 }

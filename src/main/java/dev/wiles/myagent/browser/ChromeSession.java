@@ -125,6 +125,42 @@ public final class ChromeSession {
         return Optional.empty();
     }
 
+    /**
+     * 这家 server 是不是自己会去找你日常那个浏览器（{@code --autoConnect}）。
+     *
+     * <h3>认出来是为了「什么都不做」</h3>
+     * 这条参数的意思是：chrome-devtools-mcp 自己去本机默认 profile 里找一个
+     * 开了远程调试的 Chrome。那正是<b>你日常那个浏览器</b>，带着全部登录态。
+     * 这时候我们绝不能再拉一个专用 profile 的 Chrome——那会抢走它的位置，
+     * 用户明明想用自己的浏览器，结果 agent 在一个空白 profile 里干活，
+     * 而两边都没有报错。
+     *
+     * <p>认出来的第二个用处是<b>失败时能说人话</b>：远程调试开关没打开时，
+     * 这条路会直接连不上，而通用报错只会说「server 起不来」。
+     * 那个开关在 {@code chrome://inspect/#remote-debugging}，
+     * 而且它<b>不落地成任何文件</b>（实测 Chrome 153 不写 DevToolsActivePort），
+     * 所以只能在失败之后提示，猜不出来。
+     */
+    public static boolean usesAutoConnect(List<String> args) {
+        if (args == null) {
+            return false;
+        }
+        for (String arg : args) {
+            if ("--autoConnect".equals(arg) || "--auto-connect".equals(arg)
+                    || arg.startsWith("--autoConnect=") || arg.startsWith("--auto-connect=")) {
+                return !arg.endsWith("=false");
+            }
+        }
+        return false;
+    }
+
+    /** 远程调试开关没开时该说的那句话。失败之后才发得出来，见 {@link #usesAutoConnect}。 */
+    public static final String AUTO_CONNECT_HINT =
+            "这家 server 配的是 --autoConnect（用你日常那个浏览器）。连不上最常见的原因是"
+                    + "浏览器里的远程调试开关没打开：在 Chrome 里打开 "
+                    + "chrome://inspect/#remote-debugging，勾上 Enable remote debugging，"
+                    + "然后重启一次 Chrome。需要 Chrome 144 以上。";
+
     /** 只有回环地址才谈得上「拉起来」。指到别的机器上，我们只能连，连不上也没辙。 */
     static boolean isLoopback(URI target) {
         String host = target.getHost();
