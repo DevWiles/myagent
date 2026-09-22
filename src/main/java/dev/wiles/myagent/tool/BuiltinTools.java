@@ -13,6 +13,11 @@ import dev.wiles.myagent.tool.builtin.WriteFileTool;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.safety.CommandGuard;
 import dev.wiles.myagent.tool.safety.FileWriteGuard;
+import dev.wiles.myagent.tool.web.WebFetchTool;
+import dev.wiles.myagent.tool.web.WebSearchTool;
+import okhttp3.OkHttpClient;
+
+import java.time.Duration;
 
 /** 内置工具的装配点。以后加新工具，在这里注册一行即可。 */
 public final class BuiltinTools {
@@ -29,6 +34,25 @@ public final class BuiltinTools {
             java.util.Set.of("write_file", "create_project");
 
     private BuiltinTools() {
+    }
+
+    /**
+     * 联网工具共用的 HTTP 客户端，懒加载单例。
+     *
+     * <p>为什么共享一个而不是每个工具自己 new：OkHttpClient 背后是连接池和线程池，
+     * 每个实例一套。注册表可能被造很多次（每个测试、每种模式），
+     * 跟着造一堆线程池纯属漏水。挂在 holder 类里则是让「从不联网的进程」
+     * （绝大多数单测）连这一个都不用付。
+     *
+     * <p>超时比 LLM 客户端紧得多：模型生成要等几分钟是常态，
+     * 抓网页 20 秒还没回来就该放弃了——工具卡住卡的是整个 agent 循环。
+     */
+    private static final class Web {
+        static final OkHttpClient CLIENT = new OkHttpClient.Builder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .readTimeout(Duration.ofSeconds(20))
+                .callTimeout(Duration.ofSeconds(45))
+                .build();
     }
 
     /** 不传审批策略时，危险命令一律拒绝。 */
@@ -63,7 +87,11 @@ public final class BuiltinTools {
                 .register(new ReadFileTool(workspace))
                 .register(new ListDirTool(workspace))
                 .register(new GrepTool(workspace))
-                .register(new GlobTool(workspace));
+                .register(new GlobTool(workspace))
+                // 联网读也在只读集合里：GET 网页和 read_file 同属「看」，
+                // 只读模式承诺的是不改用户的东西，不是与世隔绝
+                .register(new WebSearchTool(Web.CLIENT))
+                .register(new WebFetchTool(Web.CLIENT));
         if (memory != null) {
             registry.register(new RecallTool(memory, workspace.root()));
         }
@@ -89,7 +117,9 @@ public final class BuiltinTools {
                 .register(new GrepTool(workspace))
                 .register(new GlobTool(workspace))
                 .register(new BashTool(workspace, new CommandGuard(), approval))
-                .register(new CreateProjectTool(workspace, new FileWriteGuard(), approval));
+                .register(new CreateProjectTool(workspace, new FileWriteGuard(), approval))
+                .register(new WebSearchTool(Web.CLIENT))
+                .register(new WebFetchTool(Web.CLIENT));
         if (memory != null) {
             registry.register(new RememberTool(memory, workspace.root()))
                     .register(new RecallTool(memory, workspace.root()));
