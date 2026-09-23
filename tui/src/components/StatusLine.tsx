@@ -21,6 +21,11 @@ export type StatusLineProps = {
   /** 终端列数，用来算路径能占多宽 */
   columns: number
   busy?: boolean
+  /**
+   * 连接不正常时顶在最左边的那句话（「重连中（第 3 次）」）。
+   * 空就是连着，什么都不画。它比 busy 优先：断着的时候「正在跑」没有意义。
+   */
+  link?: string
   tokens?: number
   /** 累计真正发出去的提示词。 */
   sentTokens?: number
@@ -67,13 +72,17 @@ export function StatusLine(props: StatusLineProps) {
     const model = `[${props.model}]`
     const branch = props.branch ? ` git:(${props.branch})` : ""
     const budget =
-      props.columns - 2 - width(model) - width(SEPARATOR) - width(branch) - width(usage()) - 2
+      props.columns - 2 - width(model) - width(SEPARATOR) - width(branch) - width(usage()) -
+      width(linkText()) - 2
     return truncateStart(props.workspace, budget)
   })
 
+  const linkText = createMemo(() => (props.link ? `⟳ ${props.link}${SEPARATOR}` : ""))
+
   return (
     <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
-      <text fg={props.busy ? theme.spinner : theme.user}>{props.busy ? "● " : ""}</text>
+      {linkText() ? <text fg={theme.warning}>{linkText()}</text> : null}
+      <text fg={props.busy ? theme.spinner : theme.user}>{props.busy && !props.link ? "● " : ""}</text>
       <text fg={theme.user}>[{props.model}]</text>
       <text fg={theme.inactive}>{SEPARATOR}</text>
       <text fg={theme.subtle}>{workspace()}</text>

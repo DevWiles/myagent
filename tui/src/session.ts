@@ -156,27 +156,12 @@ export function createSession(options: BackendOptions): Session {
   let backend: Backend | undefined
 
   /**
-   * 后端起来之前攒下的命令，连上那一刻按序补发。
-   *
-   * <p>为什么现在必须有：build 挪到了界面起来之后（见 build.ts），
-   * 「界面活着、后端还没影」这扇窗从零点几秒变成了 mvn 的五秒起步，
-   * 而输入框在这期间是活的。原来的 `backend?.send` 会把这五秒里敲的话
-   * **静默扔掉**——transcript 里记了、模型永远收不到，界面就此干等到天荒地老。
+   * 发命令。攒命令的事归 backend 管：没连着（首连中 / 断线重连中）就先留着，
+   * 连上按序补发——build 那五秒、断网那几十秒里敲的话，一句都不该静默丢。
    */
-  const outbox: ClientCommand[] = []
   const send = (command: ClientCommand): void => {
-    if (backend) backend.send(command)
-    else outbox.push(command)
+    backend?.send(command)
   }
-
-  /**
-   * 用来在「后端还没起好」时也能把 java 子进程杀掉。
-   *
-   * backend 只在 startBackend 的 then 里才被赋值，而 java 要一两秒才起得来。
-   * 这段时间里退出的话，backend 还是 undefined，子进程句柄只活在 startBackend
-   * 内部的作用域里——**没有任何人够得着它**。abort 是唯一的手。
-   */
-  const aborter = new AbortController()
 
   // 回放模式：不连后端，改用一份固定文本按固定速率喂进来。
   //
@@ -192,19 +177,46 @@ export function createSession(options: BackendOptions): Session {
   if (replayPath) {
     stopReplay = startReplay(store, replayPath, Number(process.env["MYAGENT_REPLAY_CPS"] ?? 120))
   } else {
-    startBackend(options, aborter.signal, (text) => store.setBootStatus(text))
-      .then((b) => {
-        backend = b
-        b.onEvent((event) => store.apply(event))
-        b.onClose((reason) => store.markClosed(reason ?? "后端已退出"))
-        // 事件先接好再补发：攒下的第一句话马上会引来回答，接晚了会漏帧
-        for (const command of outbox.splice(0)) b.send(command)
-      })
-      .catch((error: unknown) => {
-        // 起不来是常见情况（jar 没 build、没装 java），要把原因原样显示出来，
-        // 而不是留一个空界面让人猜
-        store.markClosed(error instanceof Error ? error.message : String(error))
-      })
+    // 同步拿到句柄：启动在里面异步跑。这样在 java 还没起好的那一两秒里按 Ctrl-C，
+    // dispose 也够得着子进程——原来那版句柄要等 Promise resolve 才有，那扇窗里谁也杀不到它
+    const b = startBackend(options, (text) => store.setBootStatus(text))
+    backend = b
+    b.onEvent((event) => store.apply(event))
+    // 只有彻底放弃（协议不兼容、崩溃循环）才走到这儿并退出；普通断线不会
+    b.onClose((reason) => store.markClosed(reason))
+    b.onLink((link) => {
+      if (link.kind === "reconnecting") {
+        store.setLink({
+          phase: "reconnecting",
+          attempt: link.attempt,
+          reason: link.reason,
+          restarting: link.restarting,
+        })
+        return
+      }
+      store.setLink({ phase: "online" })
+      if (!link.reconnected) return
+      if (!link.restarted) {
+        // 同一个进程，会话还在，漏掉的事件已经按 since 补发过了
+        store.notice("info", "已重新连上后端")
+        return
+      }
+      // 对面是个新进程：会话在它那儿是空的，但存档还在。
+      // 屏幕上有过对话就自动接回最近那段——用户看到的转录和模型手里的上下文才对得上。
+      // 这是「不自动恢复」规矩（协议 3.9）的唯一例外：这里不是隔了不知道多久的重启，
+      // 是几秒前还在聊的同一段
+      store.markRestarted()
+      const snapshot = store.getSnapshot()
+      const talked = snapshot.entries.some((entry) => entry.kind === "user")
+      const canContinue =
+        Boolean(snapshot.ready?.continuable) && Boolean(snapshot.ready?.features.includes("session"))
+      if (talked && canContinue) {
+        store.notice("warn", "后端进程重启了，正在接回刚才的会话…")
+        send({ t: "continue" })
+      } else {
+        store.notice("warn", "后端进程重启了")
+      }
+    })
   }
 
   let disposed = false
@@ -217,16 +229,15 @@ export function createSession(options: BackendOptions): Session {
     if (timer) clearTimeout(timer)
     stopReplay?.()
     unsubscribe()
-    aborter.abort()      // 后端还没起好时，这是唯一能杀到子进程的手
-    backend?.dispose()
+    backend?.dispose()   // 任何阶段都够得着子进程：build 中掐 mvn，起了就杀 java
   }
 
   onCleanup(dispose)
 
   return {
     state,
-    pairingUrl: () => backend?.pairingUrl ?? null,
-    pairingKind: () => backend?.pairingKind ?? null,
+    pairingUrl: () => backend?.pairing()?.url ?? null,
+    pairingKind: () => backend?.pairing()?.kind ?? null,
     toggleEntry(key) {
       store.toggleEntry(key)
     },

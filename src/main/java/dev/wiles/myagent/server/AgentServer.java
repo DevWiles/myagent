@@ -81,6 +81,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -189,6 +191,23 @@ public final class AgentServer extends WebSocketServer {
     });
 
     private final AtomicBoolean busy = new AtomicBoolean(false);
+
+    /**
+     * 最后一个界面断开后等多久才认定「真的没人了」。
+     *
+     * <p>界面断线会自动重连（协议 1.2），大多数断线几秒内就回来了；
+     * 这段时间里既不该把待答的审批判否，也不该拒绝新冒出来的审批。
+     * 60 秒和界面那头的退避上限（30 秒）留了一倍余量。
+     */
+    static final long PEER_GRACE_MS = 60_000;
+    /** 最后一个界面是什么时候走的。0 = 从没有人来过（那就不存在宽限）。 */
+    private volatile long lastPeerLeftAt = Long.MIN_VALUE / 2;
+    /** 宽限到点的检查跑在这上面。单线程够用，活很少。 */
+    private final ScheduledExecutorService housekeeping = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "agent-housekeeping");
+        t.setDaemon(true);
+        return t;
+    });
     /**
      * 每个 tool_started 的参数，按流水号存着，等对应的 tool_finished 到了一起写进审计。
      *
@@ -505,6 +524,7 @@ public final class AgentServer extends WebSocketServer {
             }
             audit.close();
             mcp.close();     // MCP server 是子进程，不关就是孤儿
+            housekeeping.shutdownNow();
         }
     }
 
@@ -553,7 +573,8 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         // since = 客户端上次看到的 seq：0 是「把留底全给我」（手机首连），
-        // 不带就是「只要新的」（终端每次都是全新会话，补发只会搅乱它）
+        // 不带就是「只要新的」（首连的终端：它面前是一段全新会话，补发只会搅乱它；
+        // 终端断线重连时也会带 since，和手机走同一条路）
         greet(Peer.of(conn), parseSince(queryParam(handshake.getResourceDescriptor(), "since")));
     }
 
@@ -599,9 +620,16 @@ public final class AgentServer extends WebSocketServer {
 
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
-        // 最后一个界面走了就没人能审批了，卡在审批上的那轮得放行，否则线程永远醒不过来
-        if (getConnections().isEmpty()) {
-            approval.cancelPending();
+        if (!connectedPeers()) {
+            // 最后一个界面走了。原来这里立刻把卡在审批上的那轮按拒绝放行——
+            // 界面现在会自动重连（协议 1.2），断两秒就把用户没答的问题判成「不」太粗暴。
+            // 给一段宽限：到点还没人回来，再放行，否则 agent 线程永远醒不过来
+            lastPeerLeftAt = System.currentTimeMillis();
+            housekeeping.schedule(() -> {
+                if (!connectedPeers()) {
+                    approval.cancelPending();
+                }
+            }, PEER_GRACE_MS, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -1235,8 +1263,19 @@ public final class AgentServer extends WebSocketServer {
         }
     }
 
-    /** 有没有人在看。审批要问人，一个界面都没有时只能按否决处理。 */
+    /**
+     * 有没有人在看。审批要问人，一个界面都没有时只能按否决处理。
+     *
+     * <p>刚断开、还在宽限期内也算「有人」：界面会自己重连回来（协议 1.2），
+     * 这期间冒出来的审批照常广播——留底里有它，重连补发时会送到；
+     * 立刻判否的话，用户回来只看到一条「没人确认，拒绝了」，而他根本没来得及看到问题。
+     */
     private boolean hasPeers() {
+        return connectedPeers() || System.currentTimeMillis() - lastPeerLeftAt < PEER_GRACE_MS;
+    }
+
+    /** 此刻真连着的：本机 WebSocket，或中继那头的手机。 */
+    private boolean connectedPeers() {
         RelayLink link = relay;
         return !getConnections().isEmpty() || (link != null && link.isOpen());
     }

@@ -22,8 +22,15 @@ myagent 的终端界面，用 **OpenTUI + SolidJS** 写的。
 ./myagent-tui -m 模型名        # 换模型
 ./myagent-tui --readonly      # 只读，不让它改文件
 ./myagent-tui --rebuild       # 强制重新 build 后端
+./myagent-tui --connect ws://host:port/?token=…   # 不起本地后端，连一个已在跑的（云上）
 ./myagent-tui --help          # 用法（不触发 build）
 ```
+
+**断了不退出。** 后端连接断了（机器休眠、远端网络抖动）界面不再整个退出，
+而是状态栏显示「重连中（第 n 次）」，1s→30s 退避一直重试，重连带 `since` 把漏掉的事件补回来；
+本地 java 崩了会自动重新拉起并 `continue` 接回刚才的会话。期间敲的话先攒着，连上补发。
+只有两种情况才真的退：协议版本对不上、一分钟内崩三次（这时把后端 stderr 打出来）。
+规则部分在 `src/link.ts`，I/O 在 `src/backend.ts`。
 
 想放进 PATH 直接叫 `myagent-tui`，做个软链接就行，脚本会自己解开链接找到仓库：
 

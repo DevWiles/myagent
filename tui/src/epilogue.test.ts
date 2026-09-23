@@ -38,6 +38,7 @@ function stateOf(partial: {
     contextLimit: 1_000_000,
     lastDurationMs: null,
     startedAt: null,
+    link: { phase: 'online' as const },
     closed: null,
     bootStatus: '连接后端中…',
     sessionPicker: null,

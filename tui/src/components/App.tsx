@@ -86,6 +86,18 @@ export function App(props: AppProps) {
   const workspace = () => tildify(state().ready?.workspace ?? props.options.workspace)
 
   /**
+   * 状态栏最左边那句连接提示。连着时是空的。
+   *
+   * <p>断线不再退出（见 backend.ts 开头），所以得有个地方让人知道「现在没连着、
+   * 正在等它回来」——否则敲了没反应，用户第一反应是界面卡死了。
+   */
+  const linkText = () => {
+    const link = state().link
+    if (link.phase !== "reconnecting") return undefined
+    return `${link.restarting ? "后端重启中" : "重连中"}（第 ${link.attempt} 次）`
+  }
+
+  /**
    * 底部面板要显示的那份计划。
    *
    * <p>从 transcript 里按 key 取，而不是另存一份——两份状态各更新各的，
@@ -902,6 +914,7 @@ export function App(props: AppProps) {
           branch={state().ready?.branch ?? undefined}
           columns={dimensions().width}
           busy={state().busy}
+          link={linkText()}
           tokens={state().tokens}
           contextLimit={state().contextLimit}
         />

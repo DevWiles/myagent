@@ -63,6 +63,8 @@ if (argv.includes("-h") || argv.includes("--help")) {
                       明文 ws，只在可信网络用
       --relay <地址>  挂到中继上，手机在任何网络都能连（端到端加密）
       --relay-reset   换一套房间号和配对密钥，手机要重新扫码
+      --connect <地址> 不在本机起后端，连一个已经在跑的（ws://host:port/?token=…）。
+                      后端在云服务器上时用；那头要用 --lan 起。断了会一直重连
   -h, --help          这段文字
 `)
   process.exit(0)
@@ -192,12 +194,14 @@ await render(
         lan: argv.includes("--lan"),
         relay: flag("--relay"),
         relayReset: argv.includes("--relay-reset"),
+        connect: flag("--connect"),
       }}
       // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
       // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的
 
-      // 后端没了就退出，并把原因留在终端上——altscreen 一还原，
-      // 界面里印的任何错误都会跟着消失，只有这里打的才看得见
+      // 后端**彻底**没了（协议不兼容、崩溃循环）才退出，并把原因留在终端上——
+      // altscreen 一还原，界面里印的任何错误都会跟着消失，只有这里打的才看得见。
+      // 普通断线不走这儿：backend.ts 会自己重连，界面照常活着
       onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
       onExit={() => shutdown()}
       onMounted={(handle) => {

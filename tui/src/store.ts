@@ -217,6 +217,19 @@ export type ReadyInfo = {
   }
 }
 
+/** 和后端的连接处于哪一步。`connecting` 是首连（进度看 bootStatus），之后在另两者间切换。 */
+export type LinkState =
+  | { phase: 'connecting' }
+  | { phase: 'online' }
+  | {
+      phase: 'reconnecting'
+      /** 第几次重试，从 1 起。 */
+      attempt: number
+      reason: string
+      /** 这次是在重启进程，不只是重连。 */
+      restarting: boolean
+    }
+
 export type SessionState = {
   ready: ReadyInfo | null
   /** 全部对话记录。渲染层负责视口裁剪，这里不关心屏幕。 */
@@ -266,8 +279,19 @@ export type SessionState = {
   /** 上一轮耗时，画在状态栏上。 */
   lastDurationMs: number | null
   startedAt: number | null
-  /** 非空表示后端没了，界面该退出。 */
+  /**
+   * 非空表示后端**彻底**没了（协议不兼容、崩溃循环），界面该退出。
+   *
+   * <p>普通的断线不走这里——那是 {@link link} 的事，断了会自己重连。
+   */
   closed: string | null
+  /**
+   * 和后端的连接此刻是什么状态。
+   *
+   * <p>原来只有「连着」和「死了」两种；现在断线是一等状态，界面照常活着，
+   * 状态栏画「重连中」，敲的命令先攒着。抄的是 Claude Code 的形状。
+   */
+  link: LinkState
   /**
    * 后端还没 ready 时状态栏显示的那句话（「正在 build 后端…」「正在启动后端…」）。
    *
@@ -304,6 +328,7 @@ const EMPTY_STATE: SessionState = {
   lastDurationMs: null,
   startedAt: null,
   closed: null,
+  link: { phase: 'connecting' },
   bootStatus: '连接后端中…',
   sessionPicker: null,
 }
@@ -631,6 +656,23 @@ export class SessionStore {
     this.set({ closed: reason, busy: false, approval: null, approvalStage: ASK_STAGE })
   }
 
+  /** 连接状态变了（断了 / 重连中 / 又连上了）。 */
+  setLink(link: LinkState): void {
+    this.set({ link })
+  }
+
+  /**
+   * 对面换了进程（本地 java 重启、云上后端重启）。
+   *
+   * <p>转录**留着**——那是用户已经看过的东西，不该因为后端崩一次就消失。
+   * 但挂着的确认框要收：它问的是一个已经不存在的进程里的事，答了也没人收。
+   * `busy` 由紧随其后的 ready 帧给出（新进程一定是闲的）。
+   */
+  markRestarted(): void {
+    this.set({ approval: null, approvalStage: ASK_STAGE, planConfirm: null })
+    this.clearCompacting()
+  }
+
   // ------------------------------------------------------------ 后端事件
 
   apply(event: ServerEvent): void {
@@ -856,6 +898,11 @@ export class SessionStore {
 
       case 'error':
         this.notice('error', event.message)
+        return
+
+      case 'replay_gap':
+        // 如实标出来，别装完整：静默跳过的话转录看起来是全的、实际上少了一段（协议 1.2）
+        this.notice('warn', `断线期间有 ${event.to - event.from + 1} 条事件补不回来了（第 ${event.from}–${event.to} 号）`)
         return
 
       case 'mode_switched': {

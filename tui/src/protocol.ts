@@ -90,6 +90,11 @@ export type ServerEvent =
       busy: boolean
       /** 后端支持的可选能力。老后端没有这个字段——界面据此决定画不画对应入口。 */
       features?: string[]
+      /**
+       * 到此刻为止最后一个广播事件的号（协议 1.2）。重连时拿它对账：
+       * 比我们记的还小，说明对面换过进程，老号作废。
+       */
+      lastSeq?: number
       tokens?: number
       /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
       sentTokens?: number
@@ -260,6 +265,8 @@ export type ServerEvent =
     }
   | { t: 'error'; message: string }
   | { t: 'pong' }
+  /** 重连补发时留底装不下、有一段补不回来（协议 1.2）。from–to 是缺的号段。 */
+  | { t: 'replay_gap'; from: number; to: number }
   // ---- 先规划后执行（feature: 'plan'），时序见 docs/protocol.md 第 5 节 ----
   /** 规划产出。layers 是服务端算好的拓扑分层——界面直接照着画，别自己按 dependsOn 再推一遍。 */
   | { t: 'plan_created'; goal: string; tasks: PlanTaskWire[]; layers: string[][] }
