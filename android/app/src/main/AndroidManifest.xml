@@ -16,7 +16,7 @@
         android:label="myagent"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/Theme.MyAgent">
 
         <activity
             android:name=".MainActivity"
@@ -42,5 +42,10 @@
             android:name=".service.AgentService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 通知上的「同意/拒绝」按钮 -->
+        <receiver
+            android:name=".service.ApprovalActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

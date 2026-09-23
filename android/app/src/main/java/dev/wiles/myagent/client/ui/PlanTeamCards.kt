@@ -1,55 +1,49 @@
 package dev.wiles.myagent.client.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.wiles.myagent.client.state.PlanData
 import dev.wiles.myagent.client.state.TeamData
 
 /** 计划面板：任务逐个点亮，救场任务标「改道」。原地更新，滚上去随时能看进度（同 TUI）。 */
 @Composable
 fun PlanCard(plan: PlanData) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Row {
-                val (mark, color) = statusMark(plan.status)
-                Text(mark, color = color, fontFamily = FontFamily.Monospace)
-                Spacer(Modifier.width(8.dp))
+    AgentCard {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusIcon(plan.status, 18.dp)
+                Spacer(Modifier.width(10.dp))
                 Text("计划：${plan.goal}", style = MaterialTheme.typography.titleSmall)
             }
             for (task in plan.tasks) {
-                val (mark, color) = statusMark(task.status)
-                Row(Modifier.padding(top = 6.dp, start = if (task.parentId != null) 16.dp else 0.dp)) {
-                    Text(mark, color = color, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.width(8.dp))
+                Row(Modifier.padding(top = 8.dp, start = if (task.parentId != null) 20.dp else 0.dp)) {
+                    Box(Modifier.padding(top = 2.dp)) { StatusIcon(task.status, 16.dp) }
+                    Spacer(Modifier.width(10.dp))
                     Column {
                         Text(
                             buildString {
                                 if (task.recovery) append("[改道] ")
                                 append(task.description)
                             },
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = if (task.recovery) AgentColors.running
                             else MaterialTheme.colorScheme.onSurface,
                         )
@@ -80,16 +74,11 @@ fun PlanCard(plan: PlanData) {
  */
 @Composable
 fun TeamCard(team: TeamData) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Row {
-                val (mark, color) = statusMark(team.status)
-                Text(mark, color = color, fontFamily = FontFamily.Monospace)
-                Spacer(Modifier.width(8.dp))
+    AgentCard {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusIcon(team.status, 18.dp)
+                Spacer(Modifier.width(10.dp))
                 Text("流水线：${team.goal}", style = MaterialTheme.typography.titleSmall)
             }
             Text(
@@ -100,17 +89,16 @@ fun TeamCard(team: TeamData) {
             )
             for (seat in team.seats) {
                 var expanded by remember(seat.id) { mutableStateOf(false) }
-                val (mark, color) = statusMark(seat.status)
-                Row(Modifier.padding(top = 6.dp).clickable { expanded = !expanded }) {
-                    Text(mark, color = color, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.width(8.dp))
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp).clickable { expanded = !expanded }) {
+                    Box(Modifier.padding(top = 2.dp)) { StatusIcon(seat.status, 16.dp) }
+                    Spacer(Modifier.width(10.dp))
                     Column {
-                        Text("${seat.roleTitle} · ${seat.summary}", style = MaterialTheme.typography.bodySmall)
+                        Text("${seat.roleTitle} · ${seat.summary}", style = MaterialTheme.typography.bodyMedium)
                         seat.error?.let {
                             Text(it, style = MaterialTheme.typography.labelSmall, color = AgentColors.fail)
                         }
                         if (expanded && !seat.opinion.isNullOrBlank()) {
-                            MarkdownBlock(seat.opinion, Modifier.padding(top = 4.dp))
+                            MarkdownBlock(seat.opinion, Modifier.padding(top = 4.dp), ReplyText.copy(fontSize = 14.sp, lineHeight = 22.sp))
                         }
                     }
                 }
@@ -124,7 +112,7 @@ fun TeamCard(team: TeamData) {
                         color = AgentColors.running,
                         modifier = Modifier.padding(top = 8.dp),
                     )
-                    MarkdownBlock(team.verdict)
+                    MarkdownBlock(team.verdict, style = ReplyText.copy(fontSize = 14.sp, lineHeight = 22.sp))
                 }
 
                 team.status == "PARTIAL" -> Text(
@@ -141,7 +129,7 @@ fun TeamCard(team: TeamData) {
                         color = AgentColors.ok,
                         modifier = Modifier.padding(top = 8.dp),
                     )
-                    MarkdownBlock(team.verdict)
+                    MarkdownBlock(team.verdict, style = ReplyText.copy(fontSize = 14.sp, lineHeight = 22.sp))
                 }
             }
         }

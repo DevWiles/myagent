@@ -6,7 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +27,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 内容画到状态栏/导航栏底下，栏图标深浅跟系统主题走；各屏自己管 insets
+        enableEdgeToEdge()
         val client = (application as AgentApp).client
         val prefs = Prefs(applicationContext)
 
@@ -60,14 +64,17 @@ private fun Root(
 
     // 收到过 ready 才进会话页；重连中（ready 还在）留在会话页，转录不该被踢没。
     // 用户主动断开（CLOSED）回连接页
-    if (state.ready != null && state.link != Link.CLOSED) {
-        ChatScreen(client = client, state = state)
-    } else {
-        ConnectScreen(
-            client = client,
-            prefs = prefs,
-            connecting = state.link == Link.CONNECTING || state.link == Link.RECONNECTING,
-            closedReason = state.closedReason,
-        )
+    val inChat = state.ready != null && state.link != Link.CLOSED
+    Crossfade(targetState = inChat, label = "screen") { chat ->
+        if (chat) {
+            ChatScreen(client = client, state = state)
+        } else {
+            ConnectScreen(
+                client = client,
+                prefs = prefs,
+                connecting = state.link == Link.CONNECTING || state.link == Link.RECONNECTING,
+                closedReason = state.closedReason,
+            )
+        }
     }
 }

@@ -10,6 +10,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dev.wiles.myagent.client.AgentApp
 import dev.wiles.myagent.client.MainActivity
+import dev.wiles.myagent.client.R
 import dev.wiles.myagent.client.state.Link
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -83,7 +84,9 @@ class AgentService : Service() {
                         nm.notify(
                             APPROVAL_ID,
                             NotificationCompat.Builder(this@AgentService, CHANNEL_APPROVAL)
-                                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                                .setSmallIcon(R.drawable.ic_stat_agent)
+                                .setColor(BRAND)
+                                .setCategory(NotificationCompat.CATEGORY_REMINDER)
                                 .setContentTitle("myagent 在等你批准")
                                 .setContentText(approval.action)
                                 .setStyle(NotificationCompat.BigTextStyle().bigText(
@@ -92,6 +95,8 @@ class AgentService : Service() {
                                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                                 .setAutoCancel(true)
                                 .setContentIntent(openApp())
+                                .addAction(0, "同意", decide(approval.id, "yes"))
+                                .addAction(0, "拒绝", decide(approval.id, "no"))
                                 .build(),
                         )
                     }
@@ -101,7 +106,8 @@ class AgentService : Service() {
 
     private fun ongoing(text: String): Notification =
         NotificationCompat.Builder(this, CHANNEL_ONGOING)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_agent)
+            .setColor(BRAND)
             .setContentTitle("myagent")
             .setContentText(text)
             .setOngoing(true)
@@ -112,6 +118,16 @@ class AgentService : Service() {
     private fun openApp(): PendingIntent = PendingIntent.getActivity(
         this, 0,
         Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    /** 通知按钮 → ApprovalActionReceiver。request code 按决定区分，否则两个按钮会共用一个 PendingIntent */
+    private fun decide(id: Int, decision: String): PendingIntent = PendingIntent.getBroadcast(
+        this,
+        if (decision == "yes") 1 else 2,
+        Intent(this, ApprovalActionReceiver::class.java)
+            .putExtra(ApprovalActionReceiver.EXTRA_ID, id)
+            .putExtra(ApprovalActionReceiver.EXTRA_DECISION, decision),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
@@ -135,5 +151,6 @@ class AgentService : Service() {
         const val CHANNEL_APPROVAL = "approval"
         const val ONGOING_ID = 1
         const val APPROVAL_ID = 2
+        const val BRAND = 0xFFD97757.toInt()
     }
 }
