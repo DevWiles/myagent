@@ -49,6 +49,24 @@ public final class Headless {
     private Headless() {
     }
 
+    /** 时间上有重叠的席位对数——0 就说明这一场没有任何并行。 */
+    static int overlaps(java.util.Map<String, long[]> spans) {
+        java.util.List<long[]> list = new java.util.ArrayList<>(spans.values());
+        int n = 0;
+        for (int i = 0; i < list.size(); i++) {
+            for (int j = i + 1; j < list.size(); j++) {
+                long[] a = list.get(i);
+                long[] b = list.get(j);
+                long aEnd = a[1] == 0 ? Long.MAX_VALUE : a[1];
+                long bEnd = b[1] == 0 ? Long.MAX_VALUE : b[1];
+                if (a[0] < bEnd && b[0] < aEnd) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
     /** @return 进程退出码：0 正常收口，1 没做完（撞上限 / 验收没过 / 模型失败），2 参数或配置错 */
     public static int run(CliOptions options) {
         String prompt;
@@ -93,12 +111,27 @@ public final class Headless {
                 Planner planner = new Planner(clients.get())
                         .context(PlanContext.of(workspace.root(), tools));
                 AtomicInteger steps = new AtomicInteger();
+                // 席位时间线：并行到底发不发生，要用重叠的对数说话，不能靠代码注释
+                java.util.Map<String, long[]> seatSpans = new java.util.concurrent.ConcurrentHashMap<>();
                 Pipeline pipeline = new Pipeline(clients, tools, workspace.root(), planner);
                 pipeline.listener(new dev.wiles.myagent.team.TeamListener() {
                     @Override
                     public void onAgentEvent(dev.wiles.myagent.plan.Task stage, AgentEvent event) {
                         if (event instanceof AgentEvent.Thinking) {
                             steps.incrementAndGet();
+                        }
+                    }
+
+                    @Override
+                    public void onStageStarted(dev.wiles.myagent.plan.Task stage) {
+                        seatSpans.put(stage.id(), new long[]{System.currentTimeMillis(), 0});
+                    }
+
+                    @Override
+                    public void onStageFinished(dev.wiles.myagent.plan.Task stage) {
+                        long[] span = seatSpans.get(stage.id());
+                        if (span != null) {
+                            span[1] = System.currentTimeMillis();
                         }
                     }
                 });
@@ -108,6 +141,12 @@ public final class Headless {
                 summary.put("rounds", result.rounds());
                 summary.put("steps", steps.get());
                 summary.put("seats", result.stages().size());
+                summary.put("overlappingSeatPairs", overlaps(seatSpans));
+                com.fasterxml.jackson.databind.node.ArrayNode seats = summary.putArray("seatTimeline");
+                seatSpans.entrySet().stream()
+                        .sorted(java.util.Comparator.comparingLong(e -> e.getValue()[0]))
+                        .forEach(e -> seats.add(e.getKey() + ":" + (e.getValue()[0] - started)
+                                + "-" + (e.getValue()[1] == 0 ? "?" : String.valueOf(e.getValue()[1] - started))));
                 exit = result.status() == TeamStatus.COMPLETED ? 0 : 1;
             } else {
                 MemoryIndex index = memory.index(workspace.root(),

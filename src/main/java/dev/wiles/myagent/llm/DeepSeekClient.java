@@ -63,7 +63,9 @@ public final class DeepSeekClient implements LlmClient {
                 .connectTimeout(Duration.ofSeconds(15))
                 .writeTimeout(Duration.ofSeconds(30))
                 // 模型出长回答可能要一两分钟，读超时必须给足
-                .readTimeout(Duration.ofMinutes(5))
+                // 两个 SSE 分片之间最多等多久。百炼上十几万 token 的上下文首 token 能等好几分钟，
+                // 5 分钟在 AsynCodeBench 的验收席上真掐断过一次（整场落成 PARTIAL）
+                .readTimeout(Duration.ofMinutes(10))
                 .build();
     }
 
