@@ -65,13 +65,13 @@ class TaskRefsTest {
     }
 
     @Test
-    @DisplayName("上游没产出、或压根找不到时，明说，不留空")
+    @DisplayName("上游没产出时明说，不留空；上游里压根没有这个 id 的原样保留——那是正文里的花括号")
     void neverSilentlyDropsAnInstruction() {
         assertTrue(TaskRefs.resolve("按 {{t1}} 办", List.of(finished("t1", "")))
                 .contains("没有给出产出"));
-        assertTrue(TaskRefs.resolve("按 {{t9}} 办", List.of(finished("t1", "甲")))
-                .contains("不可用"));
-        assertTrue(TaskRefs.resolve("按 {{t1}} 办", List.of()).contains("不可用"));
+        assertEquals("按 {{t9}} 办", TaskRefs.resolve("按 {{t9}} 办", List.of(finished("t1", "甲"))));
+        assertEquals("实现 {{ user.name }} 替换", TaskRefs.resolve("实现 {{ user.name }} 替换", List.of()),
+                "模板引擎任务的正文不能被当成引用改写");
     }
 
     @Test
