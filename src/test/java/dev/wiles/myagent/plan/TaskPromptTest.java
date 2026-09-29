@@ -20,6 +20,17 @@ class TaskPromptTest {
     }
 
     @Test
+    @DisplayName("验收席的收尾契约是三选一，措辞和 Pipeline.verdictOf 认的词一致")
+    void acceptorContractIsThreeWay() {
+        Task review = new Task("review", "验收", AgentRoles.ACCEPTOR, List.of(), "查完");
+
+        String system = TaskPrompt.system(review, java.nio.file.Path.of("."));
+
+        assertTrue(system.contains("通过") && system.contains("重新执行") && system.contains("重新规划"), system);
+        assertFalse(system.contains(TaskPrompt.DONE_YES), "不能同时要求「完成: 是」，两套收尾会打架");
+    }
+
+    @Test
     @DisplayName("系统提示词交代清楚：这是大计划里的一步，只做自己那份")
     void systemPromptFramesTheSubtask() {
         Task task = new Task("n2", "改 UserService", TaskType.FILE_WRITE, List.of());

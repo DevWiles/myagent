@@ -92,6 +92,13 @@ public final class TaskPrompt {
      * 或者全失败，从日志里完全看不出来。
      */
     private static String contractFor(AgentRole role) {
+        if (role == AgentRoles.ACCEPTOR) {
+            // 验收席的结论是三选一，由 Pipeline.verdictOf 判；措辞必须和那边指着同一组词
+            return "**回答的最后一行只写下面三个词之一，别带别的字**——这一行是程序读的：\n"
+                    + "- 通过——没有必须修的问题\n"
+                    + "- 重新执行——方案没错，是施工没做对或没做完，按原方案重做能好\n"
+                    + "- 重新规划——方案本身有问题（方向拆错、漏了目标里的要求），要重拟";
+        }
         if (role.requiresVerdict()) {
             return "**回答的最后一行必须是** `" + VERDICT_PASS + "` 或 `" + VERDICT_FAIL
                     + "`，前面可以先说过程。\n"

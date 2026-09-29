@@ -122,6 +122,21 @@ public final class AgentRoles {
             List.of(SCOUT, EXPLORER, REVIEWER, CODER, OPERATOR, BROWSER, ANALYST, VERIFIER);
 
     /**
+     * 流水线末端的验收席。<b>不在 {@link #ALL} 里</b>：它是流水线自己的工序，
+     * 规划器不该把它派成一个子任务（那等于让工人自己给自己验收）。
+     * 但 {@link #find}/{@link #require} 认它——存档里带着 acceptor 的任务要能恢复。
+     *
+     * <p>工具是只读 + bash：验收要能<b>跑</b>测试和探针，读 {@code .pytest_cache}
+     * 猜上一次有没有过，是这席以前最丢人的验法。bash 会动世界，所以 mutates 为 true，
+     * 进场规矩和 verifier 一样独占。
+     */
+    public static final AgentRole ACCEPTOR = new AgentRole(
+            "acceptor", "验收",
+            "流水线末端：对着目标原话和改动清单逐条核对，能跑的都跑一遍，给出通过 / 重新执行 / 重新规划",
+            TaskType.VERIFICATION, List.of("read_file", "list_dir", "grep", "glob", "bash"),
+            16, true, false);
+
+    /**
      * 每种类型的默认角色。
      *
      * <p>为什么要显式写一张表，而不是「名册里第一个是这个类型的角色」：
@@ -140,7 +155,9 @@ public final class AgentRoles {
     private static final Map<String, AgentRole> BY_ID = new LinkedHashMap<>();
 
     static {
-        for (AgentRole role : ALL) {
+        List<AgentRole> registered = new java.util.ArrayList<>(ALL);
+        registered.add(ACCEPTOR);
+        for (AgentRole role : registered) {
             if (BY_ID.put(role.id(), role) != null) {
                 throw new IllegalStateException("角色 id 重复: " + role.id());
             }

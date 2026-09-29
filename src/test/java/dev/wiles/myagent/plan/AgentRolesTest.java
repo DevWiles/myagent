@@ -193,6 +193,21 @@ class AgentRolesTest {
     }
 
     @Test
+    @DisplayName("验收席认得出、能跑 bash、但不在规划器的名册里——工人不能给自己派验收")
+    void acceptorIsRegisteredButNotPlannable() {
+        AgentRole acceptor = AgentRoles.require("acceptor");
+
+        assertSame(AgentRoles.ACCEPTOR, acceptor);
+        assertTrue(acceptor.matches("bash"), "验收要能跑测试和探针");
+        assertTrue(acceptor.matches("read_file"));
+        assertFalse(acceptor.matches("write_file"), "验收不改工作区");
+        assertTrue(acceptor.mutates(), "bash 会动世界，进场要独占");
+        assertFalse(AgentRoles.all().contains(acceptor));
+        assertFalse(AgentRoles.runnable(false).contains(acceptor));
+        assertFalse(acceptor.rules().isBlank(), "提示词文件要打包进来");
+    }
+
+    @Test
     @DisplayName("角色名认不出来时，报错要列出全部角色——这句话是发回给模型的")
     void unknownRoleErrorListsEveryRole() {
         String msg = assertThrows(IllegalArgumentException.class,
