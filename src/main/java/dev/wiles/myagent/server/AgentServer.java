@@ -108,6 +108,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class AgentServer extends WebSocketServer {
 
     private static final Logger log = LoggerFactory.getLogger(AgentServer.class);
+    /** MYAGENT_AUTO_PLAN=0 时 prompt 不再按字面启发式改走规划；评测里用它做纯单 agent 对照 */
+    private static final boolean AUTO_PLAN = !"0".equals(System.getenv("MYAGENT_AUTO_PLAN"));
 
     private final CliOptions options;
     private final Config config;
@@ -230,7 +232,7 @@ public final class AgentServer extends WebSocketServer {
         Config loaded = Config.load();
         this.config = options.model() == null ? loaded
                 : new Config(loaded.apiKey(), loaded.baseUrl(), options.model(),
-                        loaded.contextTokens());
+                        loaded.contextTokens(), loaded.thinking());
 
         this.workspace = new Workspace(options.workspace());
         this.token = newToken();
@@ -725,7 +727,8 @@ public final class AgentServer extends WebSocketServer {
         // 而规划本来就带一道确认（plan_confirm_request），「问一句」的效果它已经有了，
         // 代价只是多花一次规划调用。为此单开一条协议消息不划算
         ModeHeuristic.Decision decision = ModeHeuristic.assess(text);
-        if (planAgent != null && decision.mode() != ExecutionMode.DIRECT) {
+        // MYAGENT_AUTO_PLAN=0 关掉这道字面判断（评测对照用：纯单 agent 基线），prompt 永远直接对话
+        if (planAgent != null && AUTO_PLAN && decision.mode() != ExecutionMode.DIRECT) {
             publish(Protocol.encodeModeSwitch(decision.explain()));
             worker.submit(() -> runPlan(text));
             return;
@@ -748,6 +751,7 @@ public final class AgentServer extends WebSocketServer {
                 idle.put("durationMs", System.currentTimeMillis() - startedAt);
                 idle.put("tokens", agent.estimatedTokens());
                 idle.put("sentTokens", meter.snapshot().promptTokens());
+                idle.put("completionTokens", meter.snapshot().completionTokens());
                 idle.put("contextLimit", agent.contextLimit());
                 publish(idle);
             }
@@ -960,6 +964,7 @@ public final class AgentServer extends WebSocketServer {
         done.put("savedAt", snapshot.savedAt());
         done.put("tokens", agent.estimatedTokens());
         done.put("sentTokens", meter.snapshot().promptTokens());
+        done.put("completionTokens", meter.snapshot().completionTokens());
         done.put("contextLimit", agent.contextLimit());
         publish(done);
     }
@@ -1067,6 +1072,7 @@ public final class AgentServer extends WebSocketServer {
                 idle.put("durationMs", System.currentTimeMillis() - startedAt);
                 idle.put("tokens", agent.estimatedTokens());
                 idle.put("sentTokens", meter.snapshot().promptTokens());
+                idle.put("completionTokens", meter.snapshot().completionTokens());
                 idle.put("contextLimit", agent.contextLimit());
                 publish(idle);
             }

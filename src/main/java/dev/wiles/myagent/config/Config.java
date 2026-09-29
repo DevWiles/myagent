@@ -16,7 +16,18 @@ import java.nio.file.Path;
  * <p>没有「便利构造器」是故意的：少一个字段就默默退回默认值，是这种配置最容易出的事故。
  * 加字段时让所有构造点都编译不过，比让它们悄悄丢掉一个旋钮好。
  */
-public record Config(String apiKey, String baseUrl, String model, int contextTokens) {
+/**
+ * @param thinking 思考开关。{@code null} 表示不碰（请求里不带 enable_thinking，服务端按默认来）；
+ *                 {@code false} 关掉——百炼上的 deepseek-v4-flash / qwen 默认开思考，
+ *                 每步多几秒、多一截 reasoning_tokens，评测和日常用都不需要。
+ *                 只在显式配置时才发字段：DeepSeek 官方接口不认这个字段，乱发会 400
+ */
+public record Config(String apiKey, String baseUrl, String model, int contextTokens, Boolean thinking) {
+
+    /** 老签名：不碰思考开关。 */
+    public Config(String apiKey, String baseUrl, String model, int contextTokens) {
+        this(apiKey, baseUrl, model, contextTokens, null);
+    }
 
     public static final String DEFAULT_BASE_URL = "https://api.deepseek.com";
     /**
@@ -39,7 +50,8 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
                 pick(System.getenv("DEEPSEEK_BASE_URL"), text(file, "baseUrl"), DEFAULT_BASE_URL),
                 pick(System.getenv("DEEPSEEK_MODEL"), text(file, "model"), DEFAULT_MODEL),
                 contextTokens(pick(System.getenv("MYAGENT_CONTEXT_TOKENS"),
-                        text(file, "contextTokens"), null)));
+                        text(file, "contextTokens"), null)),
+                thinking(pick(System.getenv("MYAGENT_THINKING"), text(file, "thinking"), null)));
     }
 
     public boolean hasApiKey() {
@@ -92,6 +104,19 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
         return value;
     }
 
+    /** "true"/"false"（大小写不限）之外的值一律当没配：宁可多想一会儿，也别因为拼错关掉思考还不报错。 */
+    static Boolean thinking(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String v = raw.strip().toLowerCase();
+        if (v.equals("true") || v.equals("false")) {
+            return Boolean.valueOf(v);
+        }
+        System.err.println("警告: thinking \"" + raw + "\" 不是 true/false，已忽略");
+        return null;
+    }
+
     private static String text(JsonNode node, String field) {
         return node == null || !node.hasNonNull(field) ? null : node.get(field).asText();
     }
@@ -112,6 +137,7 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
                 : apiKey.length() <= 8 ? "***"
                 : apiKey.substring(0, 6) + "..." + apiKey.substring(apiKey.length() - 4);
         return "Config[apiKey=" + masked + ", baseUrl=" + baseUrl + ", model=" + model
-                + ", contextTokens=" + contextTokens + "]";
+                + ", contextTokens=" + contextTokens
+                + (thinking == null ? "" : ", thinking=" + thinking) + "]";
     }
 }

@@ -242,7 +242,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 |---|---|---|
 | `listening` | `port` `token` `protocol` | 打在 stdout，不走 WebSocket |
 | `ready` | 见下 | 连接建立后的首帧 |
-| `busy` | `busy`(bool)、结束时另有 `durationMs` `tokens` `contextLimit` | 忙/闲切换。`busy:true` 时界面应禁用输入 |
+| `busy` | `busy`(bool)、结束时另有 `durationMs` `tokens` `sentTokens` `completionTokens` `contextLimit` | 忙/闲切换。`busy:true` 时界面应禁用输入 |
 | `error` | `message` | 命令被拒（未知命令、正忙、没 API key 等）。只发给发命令的那个连接 |
 | `pong` | — | 对 `ping` 的回应 |
 | `reset_done` | — | `/clear` 成功。**不删存档**，见 3.9 |

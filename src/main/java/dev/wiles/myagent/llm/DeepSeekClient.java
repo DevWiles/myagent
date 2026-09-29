@@ -116,7 +116,8 @@ public final class DeepSeekClient implements LlmClient {
                 maxTokens,
                 false,                              // 流式输出留到后面再做
                 null,                               // 非流式的响应本来就带 usage
-                responseFormat());
+                responseFormat(),
+                config.thinking());
 
         String body = writeJson(payload);
         log.debug("-> {} ({} 条消息, {} 个工具)", config.chatCompletionsUrl(), messages.size(),
@@ -148,7 +149,8 @@ public final class DeepSeekClient implements LlmClient {
                 temperature, maxTokens,
                 true,                               // 唯一的区别就是这个 true
                 StreamOptions.INCLUDE_USAGE,        // 不给这个字段，流式就一个 token 数都不回
-                responseFormat());
+                responseFormat(),
+                config.thinking());
 
         String body = writeJson(payload);
         log.debug("-> {} (流式, {} 条消息, {} 个工具)", config.chatCompletionsUrl(),
@@ -162,29 +164,54 @@ public final class DeepSeekClient implements LlmClient {
                 .post(RequestBody.create(body, JSON))
                 .build();
 
-        // 流式不做重试：内容可能已经打到用户屏幕上了，重来一次会把前半段重复输出一遍。
-        // 失败就抛出去，由 Agent 统一把这一轮封口（现场留在历史里，用户说「继续」就能接上）。
-        Call call = http.newCall(request);
-        currentCall = call;
-        try (Response response = call.execute()) {
-            if (!response.isSuccessful()) {
+        // 流式只重试**收到响应头之前**的失败：TLS 握手被掐、连接被重置、限流 / 5xx——
+        // 这时一个字都还没打到用户屏幕上，重来不会重复输出。
+        // 读流途中断了不重试：前半段已经出去了，由 Agent 统一把这一轮封口。
+        for (int attempt = 0; ; attempt++) {
+            if (attempt > 0) {
+                sleepBackoff(attempt);
+                log.warn("流式请求重试第 {} 次", attempt);
+            }
+            Call call = http.newCall(request);
+            currentCall = call;
+            Response response;
+            try {
+                response = call.execute();
+            } catch (IOException e) {
+                currentCall = null;
+                if (call.isCanceled()) {
+                    throw new LlmException("请求已取消", e);
+                }
+                if (attempt < MAX_RETRIES) {
+                    log.warn("流式请求还没拿到响应就失败，准备重试: {}", e.getMessage());
+                    continue;
+                }
+                throw new LlmException("流式请求失败: " + e.getMessage(), e);
+            }
+            try (response) {
+                if (!response.isSuccessful()) {
+                    ResponseBody rb = response.body();
+                    String text = rb == null ? "" : rb.string();
+                    if (isRetryable(response.code()) && attempt < MAX_RETRIES) {
+                        log.warn("HTTP {}，准备重试: {}", response.code(), brief(text));
+                        continue;
+                    }
+                    throw new LlmException(explain(response.code()) + " (HTTP " + response.code()
+                            + "): " + brief(text), response.code(), null);
+                }
                 ResponseBody rb = response.body();
-                String text = rb == null ? "" : rb.string();
-                throw new LlmException(explain(response.code()) + " (HTTP " + response.code()
-                        + "): " + brief(text), response.code(), null);
+                if (rb == null) {
+                    throw new LlmException("流式响应没有 body");
+                }
+                return readEventStream(rb.charStream(), listener);
+            } catch (IOException e) {
+                if (call.isCanceled()) {
+                    throw new LlmException("请求已取消", e);
+                }
+                throw new LlmException("流式请求失败: " + e.getMessage(), e);
+            } finally {
+                currentCall = null;
             }
-            ResponseBody rb = response.body();
-            if (rb == null) {
-                throw new LlmException("流式响应没有 body");
-            }
-            return readEventStream(rb.charStream(), listener);
-        } catch (IOException e) {
-            if (call.isCanceled()) {
-                throw new LlmException("请求已取消", e);
-            }
-            throw new LlmException("流式请求失败: " + e.getMessage(), e);
-        } finally {
-            currentCall = null;
         }
     }
 
