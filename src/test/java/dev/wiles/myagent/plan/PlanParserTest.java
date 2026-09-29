@@ -236,6 +236,20 @@ class PlanParserTest {
     }
 
     @Test
+    @DisplayName("files 是可选数组：写了就进任务，写成字符串要报错，没写就是空")
+    void parsesFiles() {
+        String json = validJson().replace("\"description\": \"补测试\"",
+                "\"files\": [\"tests/test_x.py\", \"tests/test_x.py\"], \"description\": \"补测试\"");
+        var tasks = PlanParser.parse(json).tasks();
+        assertTrue(tasks.stream().anyMatch(t -> t.files().equals(List.of("tests/test_x.py"))));
+        assertTrue(tasks.stream().anyMatch(t -> t.files().isEmpty()), "没写 files 的任务是空");
+
+        String bad = validJson().replace("\"description\": \"补测试\"",
+                "\"files\": \"tests/test_x.py\", \"description\": \"补测试\"");
+        assertTrue(parseError(bad).getMessage().contains("files"));
+    }
+
+    @Test
     @DisplayName("acceptance 里的占位符一样要声明依赖")
     void checksPlaceholdersInAcceptanceToo() {
         String json = validJson().replace("\"acceptance\": \"测试全部通过\"",

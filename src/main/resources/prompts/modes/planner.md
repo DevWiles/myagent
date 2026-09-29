@@ -17,10 +17,12 @@
     {"id": "t3", "role": "coder",
      "description": "按 {{t1}} 说明的状态机，给 Task 加上重试次数字段和 retry() 方法",
      "acceptance": "Task 里有重试次数字段和 retry() 方法，状态迁移仍然合法",
+     "files": ["src/plan/Task.java"],
      "dependsOn": ["t1"]},
     {"id": "t4", "role": "coder",
      "description": "按 {{t2}} 说明的调度逻辑，让任务失败时先重试，用尽了才往下游传播失败",
      "acceptance": "失败分支里会先调 retry()，重试用尽才走原来的传播逻辑",
+     "files": ["src/plan/PlanExecutor.java"],
      "dependsOn": ["t2", "t3"]},
     {"id": "t5", "role": "verifier",
      "description": "跑 mvn -q test，确认改动没弄坏现有测试",
@@ -52,6 +54,10 @@
   执行前它会被换成那个任务真正的产出。写了 {{t1}} 就必须把 t1 写进 dependsOn，
   否则执行时 t1 可能还没跑，那儿换进来的会是一片空白。
   别写「根据上游的结果」——有三个上游时，执行的人根本不知道你指的是哪个。
+- **会改文件的任务（coder）必须写 `files`**：这一步会新建或修改的文件，相对工作区的路径。
+  调度器靠它决定谁能同时动手——两个 coder 声明的文件不相交就并行跑，
+  没写 files 的 coder 只能独占进场。所以拆任务时尽量让每个 coder 各管各的文件；
+  两步都要改同一个文件就别拆成两步。files 只写真的会动的，别把整个目录填进去。
 - **每个任务都要有 acceptance**，一句话说清「做到什么算这一步完成」。
   执行这一步的模型靠它决定什么时候收口：少了它，它要么没做完就宣布成功，
   要么做完了还在原地打转。

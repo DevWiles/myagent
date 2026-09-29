@@ -187,9 +187,10 @@ public final class PlanParser {
 
         List<String> dependsOn = parseDependsOn(node, where, id);
         requireRefsDeclared(where, id, description, acceptance, dependsOn, knownIds);
+        List<String> files = parseFiles(node, where, id);
         return parent == null
-                ? new Task(id, description, role, dependsOn, acceptance)
-                : parent.subTask(id, description, role, dependsOn, acceptance);
+                ? new Task(id, description, role, dependsOn, acceptance, files)
+                : parent.subTask(id, description, role, dependsOn, acceptance, files);
     }
 
     /**
@@ -268,6 +269,29 @@ public final class PlanParser {
         List<String> result = new ArrayList<>(deps.size());
         for (JsonNode dep : deps) {
             String value = dep.asText().strip();
+            if (!value.isEmpty() && !result.contains(value)) {
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 这一步会动的文件。可选：没写就是空，按「不知道要碰什么」处理（独占进场）。
+     * 写了但不是数组要报错——模型偶尔会把它写成一个字符串，静默吞掉等于永远没并行。
+     */
+    private static List<String> parseFiles(JsonNode node, String where, String id) {
+        JsonNode files = node.get("files");
+        if (files == null || files.isNull()) {
+            return List.of();
+        }
+        if (!files.isArray()) {
+            throw new IllegalArgumentException(where + "（" + id
+                    + "）的 files 必须是数组，里面放这一步会新建或修改的文件路径。");
+        }
+        List<String> result = new ArrayList<>(files.size());
+        for (JsonNode f : files) {
+            String value = f.asText().strip();
             if (!value.isEmpty() && !result.contains(value)) {
                 result.add(value);
             }

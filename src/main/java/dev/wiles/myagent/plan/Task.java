@@ -55,6 +55,14 @@ public class Task {
      * <p>老的构造入口不带它，这时是 {@code null}——测试和历史代码照常能造任务。
      */
     private final String acceptance;
+    /**
+     * 这一步会新建或修改的文件（相对工作区）。规划器填的，可以为空。
+     *
+     * <p>它是并行的钥匙：两个会动手的任务，声明的文件集合不相交就可以同时进场
+     * （见 {@code PlanExecutor.launchReady}）。没声明的仍按老规矩独占——
+     * 不知道它要碰什么，只能当它什么都可能碰。
+     */
+    private final List<String> files;
     private final List<String> dependencies;
     private final List<String> dependents = new ArrayList<>();
 
@@ -79,19 +87,25 @@ public class Task {
      * 三者都属于这一类，没必要逼它们各自去查一遍默认角色。
      */
     public Task(String id, String description, TaskType type, List<String> dependencies) {
-        this(id, description, AgentRoles.defaultFor(type), dependencies, null, null, 0);
+        this(id, description, AgentRoles.defaultFor(type), dependencies, null, List.of(), null, 0);
     }
 
     /** 带验收标准、只说类型。 */
     public Task(String id, String description, TaskType type, List<String> dependencies,
                 String acceptance) {
-        this(id, description, AgentRoles.defaultFor(type), dependencies, acceptance, null, 0);
+        this(id, description, AgentRoles.defaultFor(type), dependencies, acceptance, List.of(), null, 0);
     }
 
     /** 造一个根任务，指名角色。规划器走的是这条路。 */
     public Task(String id, String description, AgentRole role, List<String> dependencies,
                 String acceptance) {
-        this(id, description, role, dependencies, acceptance, null, 0);
+        this(id, description, role, dependencies, acceptance, List.of(), null, 0);
+    }
+
+    /** 造一个根任务，指名角色并声明它要动的文件。 */
+    public Task(String id, String description, AgentRole role, List<String> dependencies,
+                String acceptance, List<String> files) {
+        this(id, description, role, dependencies, acceptance, files, null, 0);
     }
 
     /**
@@ -102,7 +116,7 @@ public class Task {
      * 把约束做成「写不出来」，比做成「写出来会被校验拦下」更硬。
      */
     private Task(String id, String description, AgentRole role, List<String> dependencies,
-                 String acceptance, String parentId, int depth) {
+                 String acceptance, List<String> files, String parentId, int depth) {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("任务 id 不能为空");
         }
@@ -121,6 +135,7 @@ public class Task {
         this.role = role;
         // 空白和 null 一视同仁：模型很爱塞一个 "" 进来，让下游各自判空是自找麻烦
         this.acceptance = acceptance == null || acceptance.isBlank() ? null : acceptance.strip();
+        this.files = normalizeFiles(id, files);
         this.parentId = parentId;
         this.depth = depth;
         // 防御性拷贝：调用方后面改它的 list，不该动到已经成型的计划
@@ -143,10 +158,10 @@ public class Task {
      * 就等于把状态机的全部约束作废了——谁都能随手把一个任务改成 SUCCEEDED。
      */
     static Task restore(String id, String description, AgentRole role, List<String> dependencies,
-                        String acceptance, String parentId, int depth,
+                        String acceptance, List<String> files, String parentId, int depth,
                         TaskStatus status, String result, String error,
                         long startTime, long endTime) {
-        Task task = new Task(id, description, role, dependencies, acceptance, parentId, depth);
+        Task task = new Task(id, description, role, dependencies, acceptance, files, parentId, depth);
         task.status = status == null ? TaskStatus.PENDING : status;
         task.result = result;
         task.error = error;
@@ -218,11 +233,17 @@ public class Task {
     /** 带验收标准的子任务，指名角色。 */
     public Task subTask(String id, String description, AgentRole role, List<String> dependencies,
                         String acceptance) {
+        return subTask(id, description, role, dependencies, acceptance, List.of());
+    }
+
+    /** 带验收标准和文件声明的子任务。 */
+    public Task subTask(String id, String description, AgentRole role, List<String> dependencies,
+                        String acceptance, List<String> files) {
         if (!canSpawnSubtasks()) {
             throw new IllegalStateException("任务 " + this.id + " 已经在第 " + depth
                     + " 层，不能再拆子任务（最深 " + PlanLimits.MAX_DEPTH + " 层）");
         }
-        return new Task(id, description, role, dependencies, acceptance, this.id, depth + 1);
+        return new Task(id, description, role, dependencies, acceptance, files, this.id, depth + 1);
     }
 
     public String result() {
@@ -236,6 +257,58 @@ public class Task {
     /** 我依赖谁。不可变。 */
     public List<String> dependencies() {
         return dependencies;
+    }
+
+    /** 我声明要动的文件（相对路径、已规范化、去重）。空表示没声明。不可变。 */
+    public List<String> files() {
+        return files;
+    }
+
+    /**
+     * 两个任务声明的文件会不会撞：同一个文件，或者一个是另一个的上级目录
+     * （声明 {@code src/} 的任务和声明 {@code src/a.py} 的任务不能同时动手）。
+     * 任一方没声明就当作会撞——不知道要碰什么，只能当它什么都可能碰。
+     */
+    public boolean filesConflictWith(Task other) {
+        if (files.isEmpty() || other.files.isEmpty()) {
+            return true;
+        }
+        for (String a : files) {
+            for (String b : other.files) {
+                if (a.equals(b) || a.startsWith(b + "/") || b.startsWith(a + "/")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static List<String> normalizeFiles(String id, List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (String f : raw) {
+            if (f == null) {
+                continue;
+            }
+            String v = f.strip().replace('\\', '/');
+            while (v.startsWith("./")) {
+                v = v.substring(2);
+            }
+            while (v.endsWith("/")) {
+                v = v.substring(0, v.length() - 1);
+            }
+            if (v.isEmpty() || v.startsWith("/") || v.equals("..") || v.startsWith("../")
+                    || v.contains("/../") || v.endsWith("/..")) {
+                throw new IllegalArgumentException("任务 " + id + " 的 files 里有非法路径 \"" + f
+                        + "\"：只能是工作区内的相对路径");
+            }
+            if (!out.contains(v)) {
+                out.add(v);
+            }
+        }
+        return List.copyOf(out);
     }
 
     /** 谁依赖我。由建图阶段补齐，对外只读。 */

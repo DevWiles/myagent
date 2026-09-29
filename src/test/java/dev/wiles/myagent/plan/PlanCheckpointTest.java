@@ -178,12 +178,29 @@ class PlanCheckpointTest {
     }
 
     @Test
+    @DisplayName("files 声明往返保住；老存档没有这个字段读出来是 null，按空处理")
+    void filesSurviveRoundTripAndDefaultToEmpty() {
+        Task coder = new Task("t1", "改两个文件", AgentRoles.CODER, List.of(), "改完",
+                List.of("src/a.py", "./src/b.py/"));
+        Plan plan = new Plan("目标", TaskGraph.of(List.of(coder)));
+
+        Plan back = PlanCheckpoint.of(plan, WS, 1L).toPlan();
+        assertEquals(List.of("src/a.py", "src/b.py"), back.graph().get("t1").files());
+
+        PlanCheckpoint old = new PlanCheckpoint(
+                PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ", null,
+                        List.of(), "读到了", null, null, 0, "PENDING", null, null, 0, 0)));
+        assertEquals(List.of(), old.toPlan().graph().get("t1").files());
+    }
+
+    @Test
     @DisplayName("老存档没有 role 字段：按 type 落到默认角色，照样能续")
     void oldArchiveWithoutRoleStillResumes() {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ", null,
-                        List.of(), "读到了", null, 0, "PENDING", null, null, 0, 0)));
+                        List.of(), "读到了", null, null, 0, "PENDING", null, null, 0, 0)));
 
         assertEquals(AgentRoles.EXPLORER, checkpoint.toPlan().graph().get("t1").role());
     }
@@ -194,7 +211,7 @@ class PlanCheckpointTest {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ",
-                        "archaeologist", List.of(), "读到了", null, 0, "PENDING", null, null, 0, 0)));
+                        "archaeologist", List.of(), "读到了", null, null, 0, "PENDING", null, null, 0, 0)));
 
         Task restored = checkpoint.toPlan().graph().get("t1");
         assertEquals(AgentRoles.EXPLORER, restored.role(),
@@ -208,7 +225,7 @@ class PlanCheckpointTest {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "FILE_READ", null, List.of(),
-                        "干完", null, 0, "ZOMBIE", null, null, 0, 0)));
+                        "干完", null, null, 0, "ZOMBIE", null, null, 0, 0)));
 
         assertEquals(TaskStatus.PENDING, checkpoint.toPlan().graph().get("t1").status());
     }
@@ -219,7 +236,7 @@ class PlanCheckpointTest {
         PlanCheckpoint checkpoint = new PlanCheckpoint(
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(new PlanCheckpoint.TaskSnapshot("t1", "干活", "TELEPORT", null, List.of(),
-                        "干完", null, 0, "PENDING", null, null, 0, 0)));
+                        "干完", null, null, 0, "PENDING", null, null, 0, 0)));
 
         assertTrue(assertThrows(IllegalArgumentException.class, checkpoint::toPlan)
                 .getMessage().contains("TELEPORT"));
@@ -232,9 +249,9 @@ class PlanCheckpointTest {
                 PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
                 List.of(
                         new PlanCheckpoint.TaskSnapshot("t1", "甲", "FILE_READ", null, List.of("t2"),
-                                "完", null, 0, "PENDING", null, null, 0, 0),
+                                "完", null, null, 0, "PENDING", null, null, 0, 0),
                         new PlanCheckpoint.TaskSnapshot("t2", "乙", "FILE_READ", null, List.of("t1"),
-                                "完", null, 0, "PENDING", null, null, 0, 0)));
+                                "完", null, null, 0, "PENDING", null, null, 0, 0)));
 
         assertTrue(assertThrows(IllegalArgumentException.class, checkpoint::toPlan)
                 .getMessage().contains("循环依赖"));

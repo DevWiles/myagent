@@ -301,8 +301,8 @@ public final class PlanExecutor {
                 continue;
             }
             if (task.role().mutates()) {
-                if (!inFlight.isEmpty()) {
-                    continue;       // 等场上清空，独占进场
+                if (!canEnterScoped(task, inFlight)) {
+                    continue;       // 等场上清空（或等和它撞文件的人出去），再进
                 }
             } else if (mutatingInFlight || inFlight.size() >= parallelism) {
                 continue;
@@ -318,10 +318,44 @@ public final class PlanExecutor {
             inFlight.put(task.id(), new Running(task, future,
                     System.nanoTime() + taskTimeoutMillis * 1_000_000L));
 
-            if (task.role().mutates()) {
+            if (task.role().mutates() && !scoped(task)) {
                 return;             // 独占：这一轮不再放任何人
             }
         }
+    }
+
+    /**
+     * 会动手的任务什么时候能进场。
+     *
+     * <p>老规矩是「场上空着才进」——于是编码任务从来没并行过（真机 82 个席位 0 对重叠）。
+     * 现在分两种：
+     * <ul>
+     *   <li><b>划了范围的</b>（角色只有文件工具、任务声明了 files）：场上只有别的划了范围的写任务、
+     *       且文件互不相撞时，可以一起进；宽度仍受 {@link #parallelism} 封顶。</li>
+     *   <li><b>没划范围的</b>（有 bash 之类能碰任何东西的工具，或没声明 files）：照旧独占。</li>
+     * </ul>
+     * 只读任务不和写任务同场——它读到一半别人把文件改了，产出就是脏的。
+     */
+    private boolean canEnterScoped(Task task, Map<String, Running> inFlight) {
+        if (inFlight.isEmpty()) {
+            return true;
+        }
+        if (!scoped(task) || inFlight.size() >= parallelism) {
+            return false;
+        }
+        for (Running running : inFlight.values()) {
+            Task other = running.task();
+            if (!scoped(other) || task.filesConflictWith(other)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 划了范围：只会碰自己声明的文件。有 bash 或通配工具的角色碰得到任何东西，不算。 */
+    static boolean scoped(Task task) {
+        return task.role().mutates() && !task.files().isEmpty() && !task.role().matches("bash")
+                && task.role().tools().stream().noneMatch(t -> t.endsWith("*"));
     }
 
     /**

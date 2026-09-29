@@ -354,7 +354,8 @@ public final class Pipeline {
             if (review != null) {
                 deps.add(review.id());
             }
-            out.add(plan.subTask(renames.get(raw.id()), description, raw.role(), deps, acceptance));
+            out.add(plan.subTask(renames.get(raw.id()), description, raw.role(), deps, acceptance,
+                    raw.files()));
         }
         return out;
     }

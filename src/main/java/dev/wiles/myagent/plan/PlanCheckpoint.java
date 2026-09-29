@@ -73,6 +73,8 @@ public record PlanCheckpoint(
             String role,
             List<String> dependsOn,
             String acceptance,
+            /** 声明要动的文件。老存档里没有这个字段，读出来是 null，按空处理——纯新增，FORMAT 不用 +1。 */
+            List<String> files,
             String parentId,
             int depth,
             String status,
@@ -88,7 +90,7 @@ public record PlanCheckpoint(
             snapshots.add(new TaskSnapshot(
                     task.id(), task.description(), task.type().name(), task.role().id(),
                     task.dependencies(),
-                    task.acceptance(), task.parentId(), task.depth(),
+                    task.acceptance(), task.files(), task.parentId(), task.depth(),
                     task.status().name(), task.result(), task.error(),
                     task.startTime(), task.endTime()));
         }
@@ -153,7 +155,9 @@ public record PlanCheckpoint(
             restored.add(Task.restore(
                     snapshot.id(), snapshot.description(), agentRole(snapshot),
                     snapshot.dependsOn() == null ? List.of() : snapshot.dependsOn(),
-                    snapshot.acceptance(), snapshot.parentId(), snapshot.depth(),
+                    snapshot.acceptance(),
+                    snapshot.files() == null ? List.of() : snapshot.files(),
+                    snapshot.parentId(), snapshot.depth(),
                     interrupted ? TaskStatus.PENDING : status,
                     snapshot.result(), snapshot.error(),
                     interrupted ? 0 : snapshot.startTime(),

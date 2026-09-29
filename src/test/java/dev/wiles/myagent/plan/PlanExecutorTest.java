@@ -165,6 +165,100 @@ class PlanExecutorTest {
         assertEquals(5, result.succeeded());
     }
 
+    private static Task coder(String id, String... files) {
+        return new Task(id, "改 " + id, AgentRoles.CODER, List.of(), null, List.of(files));
+    }
+
+    /** 让每个任务等对方开跑再结束；等不到就报失败——这样"同时"是被证明的，不是碰巧的。 */
+    private static TaskRunner meetingRunner(Map<String, java.util.concurrent.CountDownLatch> started,
+                                            Map<String, String> partner) {
+        return (task, upstream) -> {
+            started.get(task.id()).countDown();
+            String other = partner.get(task.id());
+            if (other == null) {
+                return TaskOutcome.ok("干完了");
+            }
+            try {
+                return started.get(other).await(3, java.util.concurrent.TimeUnit.SECONDS)
+                        ? TaskOutcome.ok("和 " + other + " 同时跑了")
+                        : TaskOutcome.failed("等不到 " + other + "——没有并行");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return TaskOutcome.failed("被打断");
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("声明的文件互不相交的两个 coder 真的同时跑——这是并行修复的全部意义")
+    void disjointCodersRunConcurrently() {
+        Map<String, java.util.concurrent.CountDownLatch> started = Map.of(
+                "a", new java.util.concurrent.CountDownLatch(1),
+                "b", new java.util.concurrent.CountDownLatch(1));
+        TaskGraph graph = TaskGraph.of(List.of(coder("a", "src/a.py"), coder("b", "src/b.py")));
+
+        PlanResult result = new PlanExecutor(meetingRunner(started, Map.of("a", "b", "b", "a")))
+                .execute(plan(graph));
+
+        assertEquals(2, result.succeeded(), graph.get("a").error() + " / " + graph.get("b").error());
+    }
+
+    @Test
+    @DisplayName("文件相撞、没声明文件、或者带 bash 的角色：不许和任何人同场；各管各的才能同场")
+    void conflictingOrUnscopedWritersStayExclusive() {
+        Map<String, Task> inFlight = new java.util.concurrent.ConcurrentHashMap<>();
+        List<String> violations = java.util.Collections.synchronizedList(new ArrayList<>());
+        TaskRunner counting = (task, upstream) -> {
+            for (Task other : inFlight.values()) {
+                // 同场的两个人必须都划了范围且文件不撞；否则就是调度放错了人
+                boolean bothScoped = PlanExecutor.scoped(task) && PlanExecutor.scoped(other);
+                if (!bothScoped || task.filesConflictWith(other)) {
+                    violations.add(task.id() + " 和 " + other.id() + " 同场了");
+                }
+            }
+            inFlight.put(task.id(), task);
+            try {
+                Thread.sleep(15);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            inFlight.remove(task.id());
+            return TaskOutcome.ok("干完了");
+        };
+        TaskGraph graph = TaskGraph.of(List.of(
+                coder("same1", "src/x.py"), coder("same2", "src/x.py"),       // 同一个文件
+                coder("dir", "src"), coder("inside", "src/y.py"),             // 目录包含
+                coder("blank"),                                              // 没声明
+                new Task("v", "跑测试", AgentRoles.VERIFIER, List.of(), null, List.of("src/z.py"))));  // 有 bash
+
+        PlanResult result = new PlanExecutor(counting).execute(plan(graph));
+
+        assertTrue(violations.isEmpty(), violations.toString());
+        assertEquals(6, result.succeeded());
+    }
+
+    @Test
+    @DisplayName("并行宽度照样封顶：三个互不相撞的 coder，宽度 2 时同一时刻最多两个")
+    void scopedWritersRespectParallelism() {
+        java.util.concurrent.atomic.AtomicInteger inFlight = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger peak = new java.util.concurrent.atomic.AtomicInteger();
+        TaskRunner counting = (task, upstream) -> {
+            peak.accumulateAndGet(inFlight.incrementAndGet(), Math::max);
+            try {
+                Thread.sleep(30);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            inFlight.decrementAndGet();
+            return TaskOutcome.ok("干完了");
+        };
+        TaskGraph graph = TaskGraph.of(List.of(coder("a", "a.py"), coder("b", "b.py"), coder("c", "c.py")));
+
+        new PlanExecutor(counting).parallelism(2).execute(plan(graph));
+
+        assertTrue(peak.get() <= 2, "峰值 " + peak.get());
+    }
+
     // ── 超时 ────────────────────────────────────────────────────
 
     @Test
