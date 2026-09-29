@@ -37,6 +37,10 @@ public final class Main {
             relayServe(options);     // 公网那台机器上的角色：只对接两条连接，不起 agent
             return;
         }
+        if (options.once() != null) {
+            System.exit(dev.wiles.myagent.cli.Headless.run(options));
+            return;
+        }
         if (!options.serve()) {
             // 不默认起服务：手滑敲一下 java -jar 不该在当前目录上悄悄开一个能读写文件、
             // 能跑命令的服务。要什么就说什么

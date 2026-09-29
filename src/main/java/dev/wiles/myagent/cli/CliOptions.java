@@ -41,6 +41,20 @@ public record CliOptions(
         boolean lan,
         String relay,
         boolean relayReset,
-        boolean relayServe
+        boolean relayServe,
+        /** 无头单次运行：提示词文件路径（"-" 读 stdin）。null 表示不是这个模式。 */
+        String once,
+        /** 单次运行用哪种方式：react（默认）或 team。 */
+        String onceMode,
+        /** 单次运行的结果摘要（JSON）写到哪；null 就打到 stderr。 */
+        String onceOut,
+        /** 单次运行的步数上限；0 用默认。 */
+        int maxSteps
 ) {
+    public CliOptions(Path workspace, String model, boolean readOnly, boolean unsafe, boolean help,
+                      boolean version, boolean serve, int port, boolean lan, String relay,
+                      boolean relayReset, boolean relayServe) {
+        this(workspace, model, readOnly, unsafe, help, version, serve, port, lan, relay,
+                relayReset, relayServe, null, "react", null, 0);
+    }
 }
