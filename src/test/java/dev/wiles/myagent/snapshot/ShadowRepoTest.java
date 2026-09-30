@@ -115,6 +115,30 @@ class ShadowRepoTest {
         assertTrue(repo.diff(s1.tree()).contains("-1") && repo.diff(s1.tree()).contains("+2"));
     }
 
+    @Test
+    @DisplayName("非代码文件一样回得去：二进制、中文文件名、子目录里的文档，按字节还原")
+    void restoresNonCodeFilesByteForByte() throws Exception {
+        Path ws = tmp.resolve("docs");
+        ShadowRepo repo = open(ws);
+        Files.createDirectories(ws.resolve("资料/图"));
+        byte[] png = new byte[]{(byte) 0x89, 'P', 'N', 'G', 0, 1, 2, (byte) 0xff, 0, 0, 3};
+        Files.write(ws.resolve("资料/图/封面.png"), png);
+        Files.writeString(ws.resolve("资料/方案.md"), "# 方案\n第一版\n");
+        Files.writeString(ws.resolve("data.csv"), "a,b\n1,2\n");
+
+        ShadowRepo.Snapshot snap = repo.capture("文档");
+
+        Files.write(ws.resolve("资料/图/封面.png"), new byte[]{1, 2, 3});
+        Files.writeString(ws.resolve("资料/方案.md"), "# 方案\n被改坏了\n");
+        Files.delete(ws.resolve("data.csv"));
+        List<String> touched = repo.restore(snap.tree());
+
+        assertArrayEquals(png, Files.readAllBytes(ws.resolve("资料/图/封面.png")));
+        assertEquals("# 方案\n第一版\n", Files.readString(ws.resolve("资料/方案.md")));
+        assertEquals("a,b\n1,2\n", Files.readString(ws.resolve("data.csv")));
+        assertEquals(3, touched.size(), touched.toString());
+    }
+
     private static String run(Path dir, String... cmd) throws Exception {
         Process p = new ProcessBuilder(cmd).directory(dir.toFile()).redirectErrorStream(true).start();
         String out = new String(p.getInputStream().readAllBytes());
