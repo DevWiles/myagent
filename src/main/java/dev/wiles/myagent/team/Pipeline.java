@@ -89,6 +89,13 @@ public final class Pipeline {
      */
     public static final int REVIEW_STEPS = 28;
 
+    /**
+     * worker 的步数。以前和规划席共用 {@link #STAGE_STEPS}——16 步在真实仓库上不够：
+     * 读几张几十 KB 的表、写、跑测试、再改，AsynCodeBench wcwidth 的 coder 40 秒就撞上限，
+     * 明明已经写了 160 行却被判失败、下游全跳、验收打回、下一轮同样预算同样结果。
+     */
+    public static final int WORKER_STEPS = 32;
+
     /** 单道工序的时限，毫秒。worker 也按它算（交给 {@link PlanExecutor#taskTimeout}）。 */
     public static final long DEFAULT_STAGE_TIMEOUT_MILLIS = 900_000;
 
@@ -96,6 +103,11 @@ public final class Pipeline {
 
     /** 验收席用的执行体：步数按 {@link #REVIEW_STEPS}。测试注入执行体时和 {@link #runner} 是同一个。 */
     private final TaskRunner reviewRunner;
+
+    /** worker 用的执行体：步数按 {@link #WORKER_STEPS}。测试注入执行体时和 {@link #runner} 是同一个。 */
+    private final TaskRunner workerRunner;
+
+    private final AgentTaskRunner workerCancellable;
 
     /** 内建执行体时留一份引用，取消要掐它。外部注入执行体（测试）时是 null。 */
     private final AgentTaskRunner cancellable;
@@ -138,10 +150,14 @@ public final class Pipeline {
         built.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
         AgentTaskRunner reviewing = new AgentTaskRunner(clients, tools, workspaceRoot, REVIEW_STEPS);
         reviewing.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
+        AgentTaskRunner working = new AgentTaskRunner(clients, tools, workspaceRoot, WORKER_STEPS);
+        working.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
         this.runner = built;
         this.reviewRunner = reviewing;
+        this.workerRunner = working;
         this.cancellable = built;
         this.reviewCancellable = reviewing;
+        this.workerCancellable = working;
         this.planner = planner;
         this.changeRoot = workspaceRoot;
     }
@@ -150,8 +166,10 @@ public final class Pipeline {
     Pipeline(TaskRunner runner) {
         this.runner = runner;
         this.reviewRunner = runner;
+        this.workerRunner = runner;
         this.cancellable = null;
         this.reviewCancellable = null;
+        this.workerCancellable = null;
         this.planner = null;
     }
 
@@ -184,6 +202,9 @@ public final class Pipeline {
         }
         if (reviewCancellable != null) {
             reviewCancellable.cancel();
+        }
+        if (workerCancellable != null) {
+            workerCancellable.cancel();
         }
         if (planner != null) {
             planner.cancel();
@@ -389,7 +410,7 @@ public final class Pipeline {
         if (review != null) {
             nodes.add(review);
         }
-        PlanExecutor executor = new PlanExecutor(runner)
+        PlanExecutor executor = new PlanExecutor(workerRunner)
                 .onTaskStarted(listener::onStageStarted)
                 .onTaskFinished(listener::onStageFinished)
                 .taskTimeout(Duration.ofMillis(stageTimeoutMillis));

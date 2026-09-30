@@ -49,6 +49,24 @@ public final class Headless {
     private Headless() {
     }
 
+    /**
+     * 每次工具调用打一行到 stderr。无头模式没有界面，事后能看的只有这份日志——
+     * 「t1 为什么 40 秒撞了 16 步」这种问题，没有它就只能猜。
+     */
+    private static void trace(String stage, AgentEvent event) {
+        if (event instanceof AgentEvent.ToolStarted t) {
+            String args = t.arguments() == null ? "" : t.arguments().replaceAll("\\s+", " ");
+            System.err.println("[trace] " + stage + " → " + t.tool() + " "
+                    + (args.length() > 160 ? args.substring(0, 160) + "…" : args));
+        } else if (event instanceof AgentEvent.ToolFinished t && !t.ok()) {
+            String out = t.output() == null ? "" : t.output().replaceAll("\\s+", " ");
+            System.err.println("[trace] " + stage + " ✗ " + t.tool() + " "
+                    + (out.length() > 200 ? out.substring(0, 200) + "…" : out));
+        } else if (event instanceof AgentEvent.Failed f) {
+            System.err.println("[trace] " + stage + " FAILED " + f.reason());
+        }
+    }
+
     /** 时间上有重叠的席位对数——0 就说明这一场没有任何并行。 */
     static int overlaps(java.util.Map<String, long[]> spans) {
         java.util.List<long[]> list = new java.util.ArrayList<>(spans.values());
@@ -120,6 +138,7 @@ public final class Headless {
                         if (event instanceof AgentEvent.Thinking) {
                             steps.incrementAndGet();
                         }
+                        trace(stage.id(), event);
                     }
 
                     @Override
@@ -163,6 +182,7 @@ public final class Headless {
                     } else if (event instanceof AgentEvent.Failed f) {
                         failed.set(f.reason());
                     }
+                    trace("agent", event);
                 });
                 text = agent.run(prompt);
                 summary.put("status", failed.get() == null ? "COMPLETED" : "FAILED");
