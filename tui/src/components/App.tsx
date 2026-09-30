@@ -376,6 +376,9 @@ export function App(props: AppProps) {
       case "compact":
         session.compact()
         return
+      case "undo":
+        session.undo()
+        return
       case "memory": {
         // 子命令在这儿解析而不是各注册一条命令，理由见 commands.ts 里那段注释。
         // 认不出的参数当场说清楚，不发给后端——后端也会拒，但那要多一个往返，

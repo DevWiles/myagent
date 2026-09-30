@@ -223,7 +223,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 ```json
 "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
-             "compact", "memory", "roles", "team"]
+             "compact", "memory", "roles", "team", "undo"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -892,7 +892,27 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 
 ---
 
-### 3.15 用户说的话也要广播（feature: `user_echo`）
+### 3.15 撤销上一轮的改动（feature: `undo`）
+
+后端在每条会动手的命令（`prompt` / `plan` / `team` / `continue`）开跑后、**第一次写文件或跑
+bash 之前**，把工作区拍进一个影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，
+只产生 tree 对象，不 commit、不动分支、**不碰工作区自己的 .git**）。同一轮再写不再拍。
+
+```
+界面 → {"t":"undo"}
+后端 → {"t":"busy","busy":true}
+后端 → {"t":"undone","label":"给配置模块加环境变量覆盖","restored":["src/config.py","tests/new_test.py"],"remaining":2}
+后端 → {"t":"busy","busy":false}
+```
+
+- `restored`：被还原或删除的相对路径。快照后新建的文件会被**删掉**，改过的按快照写回，删掉的会回来；
+  其余文件一个不动。`.gitignore` 和构建产物、`.git/` 这些既不进快照也不会被恢复动到。
+- `remaining`：还能再撤几轮。
+- 只回文件，**不回对话**：用户多半是想换个说法再来，历史留着才接得上。
+- 没有可撤销的快照时回 `error`；一轮正在跑时回 `error`（撤销要等它跑完）。
+- 拍快照失败（机器上没有 git 等）不影响那一轮的执行，只是那一轮不可撤销。
+
+### 3.16 用户说的话也要广播（feature: `user_echo`）
 
 有第二块屏之后，最先露馅的是这个：**用户消息从来没进过协议**。
 两个界面各自把「我刚说的那句」写进自己的转录，然后发一条 `prompt` 给后端——

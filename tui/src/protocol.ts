@@ -183,6 +183,8 @@ export type ServerEvent =
   | { t: 'compacting'; phase: 'map' | 'reduce' | 'done'; done: number; total: number; percent: number }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
+  /** 上一轮的文件改动被撤销了：`restored` 是被还原或删除的相对路径，`remaining` 是还能再撤几轮。 */
+  | { t: 'undone'; label: string; restored: string[]; remaining: number }
   | { t: 'memory_list'; entries: MemoryRow[] }
   | {
       t: 'memory_changed'
@@ -404,6 +406,11 @@ export type ClientCommand =
    * 压的只是发给模型的那份窗口。
    */
   | { t: 'compact' }
+  /**
+   * 撤销上一轮对工作区的改动（feature: `undo`）：回到那一轮第一次动手之前的快照。
+   * 只回文件不回对话。没有可撤的、或正忙时回 error；成功回一条 `undone`。
+   */
+  | { t: 'undo' }
   | { t: 'memory'; action: 'list' | 'undo' | 'clear_auto' }
   /** 要会话历史列表，后端回 session_list。 */
   | { t: 'sessions' }

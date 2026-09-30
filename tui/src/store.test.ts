@@ -1363,3 +1363,24 @@ describe('审批被别的屏答掉（协议 3.3）', () => {
     expect(store.getSnapshot().planConfirm).toBeNull()
   })
 })
+
+// ── undo ────────────────────────────────────────────────────
+
+test("undone 落成一行通知：列出还原的文件和还能撤几轮", () => {
+  const store = new SessionStore()
+  store.apply({ t: "undone", label: "加环境变量覆盖", restored: ["src/config.py", "new.py"], remaining: 1 } as any)
+  const entries = store.getSnapshot().entries
+  const last = entries[entries.length - 1] as any
+  expect(last.kind).toBe("notice")
+  expect(last.text).toContain("加环境变量覆盖")
+  expect(last.text).toContain("2 个文件")
+  expect(last.text).toContain("src/config.py")
+  expect(last.text).toContain("还可再撤 1 轮")
+})
+
+test("undone 没改过文件时也要说清楚", () => {
+  const store = new SessionStore()
+  store.apply({ t: "undone", label: "", restored: [], remaining: 0 } as any)
+  const entries = store.getSnapshot().entries
+  expect((entries[entries.length - 1] as any).text).toContain("没有改过文件")
+})

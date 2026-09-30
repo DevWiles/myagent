@@ -789,6 +789,20 @@ export class SessionStore {
         })
         return
 
+      case 'undone': {
+        const files = event.restored ?? []
+        const shown = files.slice(0, 8).join('、') + (files.length > 8 ? ` 等 ${files.length} 个` : '')
+        const label = event.label ? `「${event.label}」` : '上一轮'
+        this.notice(
+          'info',
+          files.length === 0
+            ? `已撤销${label}：那一轮没有改过文件`
+            : `已撤销${label}：还原 ${files.length} 个文件（${shown}）` +
+                (event.remaining > 0 ? `，还可再撤 ${event.remaining} 轮` : ''),
+        )
+        return
+      }
+
       case 'memory_list':
         this.append({ kind: 'memory', key: this.nextKey('memory'), rows: event.entries ?? [] })
         return

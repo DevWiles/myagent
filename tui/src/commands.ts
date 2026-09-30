@@ -35,6 +35,7 @@ export type CommandId =
   | "resume"
   | "resume-plan"
   | "compact"
+  | "undo"
   | "memory"
   | "clear"
   | "qr"
@@ -111,6 +112,12 @@ const SPECS: CommandSpec[] = [
     name: "/compact",
     description: "现在就把早先的对话压成摘要（原文留在存档里，不会丢）",
     anyFeature: ["compact"],
+  },
+  {
+    id: "undo",
+    name: "/undo",
+    description: "撤销上一轮对文件的改动（回到那一轮开工前的快照；对话不回退）",
+    anyFeature: ["undo"],
   },
   {
     id: "memory",

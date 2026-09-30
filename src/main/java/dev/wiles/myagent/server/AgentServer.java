@@ -125,6 +125,9 @@ public final class AgentServer extends WebSocketServer {
      * <p>字段初始化器在构造体之前跑完，所以构造体里的 {@code newClient()} 拿得到它。
      */
     private final TokenMeter meter = new TokenMeter();
+
+    /** 写之前拍快照的闸门；构造时装上。 */
+    private final dev.wiles.myagent.snapshot.SnapshotGate snapshots;
     private final Agent agent;
     private final RemoteApproval approval;
     /** 审批的总入口。{@link #approval} 只是它问不出答案时才走的那一层。 */
@@ -261,6 +264,17 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
+        // 影子仓库快照：会动工作区的工具写之前先拍一张，/undo 能回到那一轮开工前。
+        // 只读模式没有会动手的工具，闸门套了也是空转
+        this.snapshots = new dev.wiles.myagent.snapshot.SnapshotGate(options.readOnly() ? null
+                : dev.wiles.myagent.snapshot.ShadowRepo.open(workspace.root(),
+                        dev.wiles.myagent.snapshot.ShadowRepo.defaultBase()));
+        for (Tool tool : List.copyOf(tools.all())) {
+            Tool guarded = snapshots.guard(tool);
+            if (guarded != tool) {
+                tools.replace(guarded);
+            }
+        }
 
         // 技能：用户自己写的说明书，标准 SKILL.md 格式。一份都没有就不注册这个工具——
         // 清单挂在它的描述上，注册了就是每一轮的固定开销。只读模式照接：
@@ -696,6 +710,7 @@ public final class AgentServer extends WebSocketServer {
                 }
             }
             case "compact" -> handleCompact(peer);
+            case "undo" -> handleUndo(peer);
             case "memory" -> handleMemory(peer, Protocol.str(cmd, "action", "list"));
             case "reset" -> handleReset(peer);
             // 中继来的客户端用它要首帧 + 补发（本机连接靠握手参数，见 greet）
@@ -722,6 +737,7 @@ public final class AgentServer extends WebSocketServer {
         // 少了这一条，另一块屏上会凭空冒出一段回答（协议 3.15）
         publish(Protocol.encodeUserMessage(text, "normal", cid));
         publish(Protocol.event("busy").put("busy", true));
+        snapshots.arm(brief(text));
 
         // 看一眼这句话该不该改走规划。**ASK 在这儿并到 PLAN**：无头模式问不了，
         // 而规划本来就带一道确认（plan_confirm_request），「问一句」的效果它已经有了，
@@ -777,6 +793,7 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.encodeUserMessage(goal, "plan", cid));
         publish(Protocol.event("busy").put("busy", true));
+        snapshots.arm("计划: " + brief(goal));
         worker.submit(() -> runPlan(goal));
     }
 
@@ -810,6 +827,7 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.encodeUserMessage(goal, "team", cid));
         publish(Protocol.event("busy").put("busy", true));
+        snapshots.arm("流水线: " + brief(goal));
         worker.submit(() -> runTeam(goal));
     }
 
@@ -1033,6 +1051,45 @@ public final class AgentServer extends WebSocketServer {
      * 摘要边界正好落在语义边界上，比等到 93.5% 时机器随便挑一个切点干净得多。
      * 有后台算好的现货就直接用，没有就现算。
      */
+    /**
+     * 撤销最近一轮对工作区的改动：恢复到那一轮第一次动手之前的快照。
+     * 只动文件，不动对话——用户多半是想换个说法再来，历史留着才接得上。
+     */
+    private void handleUndo(Peer peer) {
+        if (!busy.compareAndSet(false, true)) {
+            peer.send(error("正在处理中，撤销要等这一轮跑完"));
+            return;
+        }
+        publish(Protocol.event("busy").put("busy", true));
+        worker.submit(() -> {
+            try {
+                dev.wiles.myagent.snapshot.ShadowRepo.Snapshot snap = snapshots.last();
+                List<String> restored = snapshots.undo();
+                if (restored == null) {
+                    publish(error("没有可撤销的改动——这次会话里还没有哪一轮动过文件"));
+                    return;
+                }
+                var frame = Protocol.event("undone")
+                        .put("label", snap == null ? "" : snap.label())
+                        .put("remaining", snapshots.depth());
+                var arr = frame.putArray("restored");
+                restored.forEach(arr::add);
+                publish(frame);
+            } catch (java.io.IOException | RuntimeException e) {
+                log.error("撤销失败", e);
+                publish(error("撤销失败: " + e.getMessage()));
+            } finally {
+                busy.set(false);
+                publish(Protocol.event("busy").put("busy", false));
+            }
+        });
+    }
+
+    private static String brief(String text) {
+        String t = text == null ? "" : text.strip().replaceAll("\\s+", " ");
+        return t.length() > 60 ? t.substring(0, 60) + "…" : t;
+    }
+
     private void handleCompact(Peer peer) {
         if (agent == null) {
             peer.send(error("没配 API key，压缩无从谈起"));
@@ -1045,6 +1102,7 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
+        snapshots.arm("继续");
         long startedAt = System.currentTimeMillis();
 
         // 必须扔到 worker 上。原先是直接在这儿跑的，而这里是 WebSocket 的解码线程：

@@ -80,7 +80,7 @@ public final class Pipeline {
      * <p>沿用圆桌一席的数字：真机教训是角色自带上限按「计划里的一小步」调，
      * 而这两道工序面对的是整个目标，给小了撞上限直接作废。
      */
-    public static final int STAGE_STEPS = 16;
+    public static final int STAGE_STEPS = 24;
 
     /**
      * 验收席单独的步数。它要跑测试、对每条需求写探针、再读改动清单里的每个文件——

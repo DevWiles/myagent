@@ -71,6 +71,7 @@ export type Session = {
   confirmPlan: (id: number, approved: boolean) => void
   /** 现在就压一次上下文。原文留在存档里，压的只是发给模型的那份窗口。 */
   compact: () => void
+  undo: () => void
   /** 查看 / 清理长期记忆。后端没宣告 memory 能力时不要调。 */
   memory: (action: "list" | "undo" | "clear_auto") => void
   /** 清空对话、开一段新会话（旧存档留着，见 protocol 3.9）。 */
@@ -319,6 +320,11 @@ export function createSession(options: BackendOptions): Session {
       // 记一条：压缩要发模型调用，有肉眼可见的停顿，屏幕上不留痕像是按键丢了
       store.submitPrompt("/compact")
       send({ t: "compact" })
+    },
+    undo() {
+      // 同理留痕：结果是一行「已撤销」的通知，不记这一句的话它像是凭空冒出来的
+      store.submitPrompt("/undo")
+      send({ t: "undo" })
     },
     memory(action) {
       // 记一条：三个动作都会在转录里留下结果，不记的话那段结果像是凭空冒出来的

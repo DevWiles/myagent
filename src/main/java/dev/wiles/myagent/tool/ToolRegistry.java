@@ -37,6 +37,12 @@ public final class ToolRegistry {
         return this;
     }
 
+    /** 有意换掉同名工具（比如给它套一层闸门）——和误重复注册不同，不打警告。 */
+    public ToolRegistry replace(Tool tool) {
+        tools.put(tool.name(), tool);
+        return this;
+    }
+
     public ToolRegistry registerAll(Collection<Tool> list) {
         list.forEach(this::register);
         return this;

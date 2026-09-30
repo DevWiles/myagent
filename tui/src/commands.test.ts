@@ -14,7 +14,7 @@ import {
 /** 后端啥都支持、存档也都有的情况。 */
 const full: CommandContext = {
   features: ["plan", "team", "replan", "resume", "resume_plan", "auto_mode", "session",
-    "sessions", "compact", "memory"],
+    "sessions", "compact", "memory", "undo"],
   hasContinuable: true,
   hasResumablePlan: true,
 }
@@ -48,6 +48,7 @@ describe("边打边筛", () => {
       "/resume",
       "/resume-plan",
       "/compact",
+      "/undo",
       "/memory",
       "/clear",
       "/qr",
@@ -165,7 +166,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(8)
+    expect(entries).toHaveLength(9)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -173,7 +174,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(8)
+    expect(lines).toHaveLength(9)
     expect(lines.some((l) => l.includes("/compact"))).toBe(true)
     expect(lines.every((l) => !l.includes("/plan ") && !l.includes("/team")),
     ).toBe(true)
