@@ -69,7 +69,7 @@ public final class Protocol {
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
                     "session", "sessions", "compact", "memory", "roles", "team",
-                    "events_resume", "user_echo", "undo");
+                    "events_resume", "user_echo", "undo", "rewind");
 
     /**
      * 角色名册，进首帧。

@@ -223,7 +223,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 ```json
 "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
-             "compact", "memory", "roles", "team", "undo"]
+             "compact", "memory", "roles", "team", "undo", "rewind"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -892,25 +892,38 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 
 ---
 
-### 3.15 撤销上一轮的改动（feature: `undo`）
+### 3.15 检查点与回退（feature: `rewind`，兼容 `undo`）
 
-后端在每条会动手的命令（`prompt` / `plan` / `team` / `continue`）开跑后、**第一次写文件或跑
-bash 之前**，把工作区拍进一个影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，
-只产生 tree 对象，不 commit、不动分支、**不碰工作区自己的 .git**）。同一轮再写不再拍。
+形状照 Claude Code：**每条会动手的命令（`prompt` / `plan` / `team` / `continue`）开跑前**拍一个检查点，
+绑在会话和那一刻的对话长度上；`/rewind` 可以只回代码、只回对话、或者都回。
+
+快照存在影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，只产生 tree 对象，
+不 commit、不动分支，**不碰工作区自己的 .git**）。检查点随会话持久化：后端重启、
+`/resume` 接回老会话之后照样能回。保留期默认 30 天（`config.json` 的 `snapshotDays` /
+环境变量 `MYAGENT_SNAPSHOT_DAYS`），过期的对象和记录在启动时清掉。
 
 ```
-界面 → {"t":"undo"}
+界面 → {"t":"checkpoints"}
+后端 → {"t":"checkpoint_list","available":true,"retentionDays":30,
+        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0},
+                 {"id":2,"label":"再加个单测","time":1790733601002,"turn":1}]}
+
+界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个
 后端 → {"t":"busy","busy":true}
-后端 → {"t":"undone","label":"给配置模块加环境变量覆盖","restored":["src/config.py","tests/new_test.py"],"remaining":2}
+后端 → {"t":"rewound","id":1,"label":"给配置模块加环境变量覆盖","scope":"both",
+        "restored":["src/config.py","tests/new_test.py"],"userTurn":0,"remaining":1,"tokens":812}
 后端 → {"t":"busy","busy":false}
+
+界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个、scope=code（老界面用）
 ```
 
-- `restored`：被还原或删除的相对路径。快照后新建的文件会被**删掉**，改过的按快照写回，删掉的会回来；
-  其余文件一个不动。`.gitignore` 和构建产物、`.git/` 这些既不进快照也不会被恢复动到。
-- `remaining`：还能再撤几轮。
-- 只回文件，**不回对话**：用户多半是想换个说法再来，历史留着才接得上。
-- 没有可撤销的快照时回 `error`；一轮正在跑时回 `error`（撤销要等它跑完）。
-- 拍快照失败（机器上没有 git 等）不影响那一轮的执行，只是那一轮不可撤销。
+- `turn` / `userTurn`：那个点之前用户说过几句。界面按它截转录——回对话之后，第 `userTurn` 句及之后的都不该再画。
+- `restored`：被还原或删除的相对路径（`scope=conversation` 时为空）。快照后新建的文件会被**删掉**，
+  改过的按快照写回，删掉的会回来；其余文件一个不动。`.gitignore`、构建产物、`.git/` 既不进快照也不会被恢复动到。
+- 回对话：agent 的记录截到那一刻的长度并立即存档，它后面的检查点作废（`remaining` 变小）；
+  只回代码时后面的点还在。被截掉的那段不再是当前会话，但影子里的快照还在。
+- 没有检查点、编号不存在、快照过期被回收、一轮正在跑，都回 `error` 说明原因；不会静默什么都没恢复。
+- 拍检查点失败（机器上没有 git 等）不影响那一轮的执行，只是那一轮回不去；`checkpoint_list.available` 为 false。
 
 ### 3.16 用户说的话也要广播（feature: `user_echo`）
 

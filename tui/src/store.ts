@@ -789,16 +789,66 @@ export class SessionStore {
         })
         return
 
-      case 'undone': {
-        const files = event.restored ?? []
-        const shown = files.slice(0, 8).join('、') + (files.length > 8 ? ` 等 ${files.length} 个` : '')
-        const label = event.label ? `「${event.label}」` : '上一轮'
+      case 'checkpoint_list': {
+        if (!event.available) {
+          this.notice('warn', '检查点不可用：这台机器上没有 git，或者影子仓库初始化失败')
+          return
+        }
+        const items = event.items ?? []
+        if (items.length === 0) {
+          this.notice('info', '这段会话还没有检查点——每跑一轮才会拍一个')
+          return
+        }
+        const lines = items.map((c) => {
+          const t = new Date(c.time)
+          const hh = String(t.getHours()).padStart(2, '0')
+          const mm = String(t.getMinutes()).padStart(2, '0')
+          return `#${c.id}  ${hh}:${mm}  第 ${c.turn + 1} 句前  ${c.label}`
+        })
         this.notice(
           'info',
-          files.length === 0
-            ? `已撤销${label}：那一轮没有改过文件`
-            : `已撤销${label}：还原 ${files.length} 个文件（${shown}）` +
-                (event.remaining > 0 ? `，还可再撤 ${event.remaining} 轮` : ''),
+          `检查点（保留 ${event.retentionDays} 天）：\n${lines.join('\n')}\n` +
+            `用法：/rewind <编号> 回文件；/rewind <编号> conversation 回对话；/rewind <编号> both 都回`,
+        )
+        return
+      }
+
+      case 'rewound': {
+        const files = event.restored ?? []
+        const shown = files.slice(0, 8).join('、') + (files.length > 8 ? ` 等 ${files.length} 个` : '')
+        if (event.userTurn >= 0) {
+          // 对话回去了：第 userTurn 句用户消息及之后的都不该再画。
+          // 按用户消息数截，而不是按后端的消息条数——转录里一条用户消息对应后端的一条 user 消息，
+          // 中间的助手/工具行数量两边不一致，只有这个数是可靠的锚
+          let users = 0
+          let cut = this.state.entries.length
+          for (let i = 0; i < this.state.entries.length; i++) {
+            if (this.state.entries[i].kind === 'user') {
+              if (users === event.userTurn) {
+                cut = i
+                break
+              }
+              users++
+            }
+          }
+          this.set({ entries: this.state.entries.slice(0, cut) })
+          if (event.tokens !== undefined) this.set({ tokens: event.tokens })
+        }
+        const what =
+          event.scope === 'conversation'
+            ? '对话已回到'
+            : event.scope === 'both'
+              ? '文件和对话已回到'
+              : '文件已回到'
+        this.notice(
+          'info',
+          `${what}检查点 #${event.id}「${event.label}」` +
+            (event.scope === 'conversation'
+              ? ''
+              : files.length === 0
+                ? '（文件没有差别）'
+                : `：还原 ${files.length} 个文件（${shown}）`) +
+            (event.remaining > 0 ? `，还有 ${event.remaining} 个检查点` : ''),
         )
         return
       }

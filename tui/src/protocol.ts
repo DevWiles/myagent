@@ -183,8 +183,27 @@ export type ServerEvent =
   | { t: 'compacting'; phase: 'map' | 'reduce' | 'done'; done: number; total: number; percent: number }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
-  /** 上一轮的文件改动被撤销了：`restored` 是被还原或删除的相对路径，`remaining` 是还能再撤几轮。 */
-  | { t: 'undone'; label: string; restored: string[]; remaining: number }
+  /** 当前会话的检查点清单。`turn` 是那个点之前用户说过几句。 */
+  | {
+      t: 'checkpoint_list'
+      available: boolean
+      retentionDays: number
+      items: { id: number; label: string; time: number; turn: number }[]
+    }
+  /**
+   * 回到了某个检查点。`userTurn` ≥ 0 表示对话也回了：第 userTurn 句用户消息及之后的都不该再画；
+   * -1 表示只回了文件。`remaining` 是回退之后还剩几个检查点。
+   */
+  | {
+      t: 'rewound'
+      id: number
+      label: string
+      scope: 'code' | 'conversation' | 'both'
+      restored: string[]
+      userTurn: number
+      remaining: number
+      tokens?: number
+    }
   | { t: 'memory_list'; entries: MemoryRow[] }
   | {
       t: 'memory_changed'
@@ -411,6 +430,13 @@ export type ClientCommand =
    * 只回文件不回对话。没有可撤的、或正忙时回 error；成功回一条 `undone`。
    */
   | { t: 'undo' }
+  /** 列当前会话的检查点（feature: `rewind`），后端回 checkpoint_list。 */
+  | { t: 'checkpoints' }
+  /**
+   * 回到某个检查点（feature: `rewind`）。id 省略或 0 = 最近一个；
+   * scope：code 只回文件、conversation 只回对话、both 都回。成功回一条 `rewound`。
+   */
+  | { t: 'rewind'; id?: number; scope: 'code' | 'conversation' | 'both' }
   | { t: 'memory'; action: 'list' | 'undo' | 'clear_auto' }
   /** 要会话历史列表，后端回 session_list。 */
   | { t: 'sessions' }

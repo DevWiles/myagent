@@ -126,8 +126,8 @@ public final class AgentServer extends WebSocketServer {
      */
     private final TokenMeter meter = new TokenMeter();
 
-    /** 写之前拍快照的闸门；构造时装上。 */
-    private final dev.wiles.myagent.snapshot.SnapshotGate snapshots;
+    /** 检查点：每条会动手的命令开跑前拍一张，绑在会话和对话长度上；/rewind 靠它。 */
+    private final dev.wiles.myagent.snapshot.Checkpoints checkpoints;
     private final Agent agent;
     private final RemoteApproval approval;
     /** 审批的总入口。{@link #approval} 只是它问不出答案时才走的那一层。 */
@@ -235,7 +235,7 @@ public final class AgentServer extends WebSocketServer {
         Config loaded = Config.load();
         this.config = options.model() == null ? loaded
                 : new Config(loaded.apiKey(), loaded.baseUrl(), options.model(),
-                        loaded.contextTokens(), loaded.thinking());
+                        loaded.contextTokens(), loaded.thinking(), loaded.snapshotDays());
 
         this.workspace = new Workspace(options.workspace());
         this.token = newToken();
@@ -264,16 +264,18 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
-        // 影子仓库快照：会动工作区的工具写之前先拍一张，/undo 能回到那一轮开工前。
-        // 只读模式没有会动手的工具，闸门套了也是空转
-        this.snapshots = new dev.wiles.myagent.snapshot.SnapshotGate(options.readOnly() ? null
+        // 检查点：每条会动手的命令开跑前把工作区拍进影子仓库（不碰工作区自己的 .git）。
+        // 只读模式不会改任何东西，不拍
+        dev.wiles.myagent.snapshot.ShadowRepo shadow = options.readOnly() ? null
                 : dev.wiles.myagent.snapshot.ShadowRepo.open(workspace.root(),
-                        dev.wiles.myagent.snapshot.ShadowRepo.defaultBase()));
-        for (Tool tool : List.copyOf(tools.all())) {
-            Tool guarded = snapshots.guard(tool);
-            if (guarded != tool) {
-                tools.replace(guarded);
-            }
+                        dev.wiles.myagent.snapshot.ShadowRepo.defaultBase());
+        this.checkpoints = new dev.wiles.myagent.snapshot.Checkpoints(shadow);
+        checkpoints.session(sessionId);
+        if (shadow != null) {
+            // 过了保留期的快照后台清掉，别挡启动；失败不要紧，下次再清
+            Thread gc = new Thread(() -> shadow.gc(config.snapshotDays()), "snapshot-gc");
+            gc.setDaemon(true);
+            gc.start();
         }
 
         // 技能：用户自己写的说明书，标准 SKILL.md 格式。一份都没有就不注册这个工具——
@@ -710,7 +712,9 @@ public final class AgentServer extends WebSocketServer {
                 }
             }
             case "compact" -> handleCompact(peer);
-            case "undo" -> handleUndo(peer);
+            case "undo" -> handleRewind(peer, 0, "code");
+            case "checkpoints" -> handleCheckpoints(peer);
+            case "rewind" -> handleRewind(peer, cmd.path("id").asInt(0), Protocol.str(cmd, "scope", "code"));
             case "memory" -> handleMemory(peer, Protocol.str(cmd, "action", "list"));
             case "reset" -> handleReset(peer);
             // 中继来的客户端用它要首帧 + 补发（本机连接靠握手参数，见 greet）
@@ -737,7 +741,7 @@ public final class AgentServer extends WebSocketServer {
         // 少了这一条，另一块屏上会凭空冒出一段回答（协议 3.15）
         publish(Protocol.encodeUserMessage(text, "normal", cid));
         publish(Protocol.event("busy").put("busy", true));
-        snapshots.arm(brief(text));
+        checkpoints.mark(brief(text), agent.history().size());
 
         // 看一眼这句话该不该改走规划。**ASK 在这儿并到 PLAN**：无头模式问不了，
         // 而规划本来就带一道确认（plan_confirm_request），「问一句」的效果它已经有了，
@@ -793,7 +797,7 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.encodeUserMessage(goal, "plan", cid));
         publish(Protocol.event("busy").put("busy", true));
-        snapshots.arm("计划: " + brief(goal));
+        checkpoints.mark("计划: " + brief(goal), agent.history().size());
         worker.submit(() -> runPlan(goal));
     }
 
@@ -827,7 +831,7 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.encodeUserMessage(goal, "team", cid));
         publish(Protocol.event("busy").put("busy", true));
-        snapshots.arm("流水线: " + brief(goal));
+        checkpoints.mark("流水线: " + brief(goal), agent.history().size());
         worker.submit(() -> runTeam(goal));
     }
 
@@ -974,6 +978,7 @@ public final class AgentServer extends WebSocketServer {
         meter.seed(snapshot.ledger());
         sessionId = snapshot.id();
         sessionStartedAt = snapshot.startedAt();
+        checkpoints.session(sessionId);
         ObjectNode done = Protocol.event("session_restored");
         done.put("id", snapshot.id());
         done.put("messages", restored);
@@ -1051,38 +1056,100 @@ public final class AgentServer extends WebSocketServer {
      * 摘要边界正好落在语义边界上，比等到 93.5% 时机器随便挑一个切点干净得多。
      * 有后台算好的现货就直接用，没有就现算。
      */
+    /** 列出当前会话的检查点，给 /rewind 挑。 */
+    private void handleCheckpoints(Peer peer) {
+        ObjectNode frame = Protocol.event("checkpoint_list");
+        frame.put("available", checkpoints.available());
+        frame.put("retentionDays", config.snapshotDays());
+        var arr = frame.putArray("items");
+        for (dev.wiles.myagent.snapshot.Checkpoints.Checkpoint cp : checkpoints.list()) {
+            ObjectNode row = arr.addObject();
+            row.put("id", cp.id());
+            row.put("label", cp.label());
+            row.put("time", cp.time());
+            row.put("turn", userTurnsBefore(cp.historySize()));
+        }
+        peer.send(frame);
+    }
+
     /**
-     * 撤销最近一轮对工作区的改动：恢复到那一轮第一次动手之前的快照。
-     * 只动文件，不动对话——用户多半是想换个说法再来，历史留着才接得上。
+     * 回到某个检查点。三种范围，照 Claude Code：
+     * {@code code} 只回文件，{@code conversation} 只回对话，{@code both} 都回。
+     * 回对话是把 agent 的记录截到那一刻的长度，之后的检查点跟着作废；存档随即重写——
+     * 被截掉的那段不再是「当前会话」，但影子里的快照和它们的标签都还在。
+     *
+     * @param id 0 表示最近的一个（/undo）
      */
-    private void handleUndo(Peer peer) {
+    private void handleRewind(Peer peer, int id, String scope) {
+        if (agent == null) {
+            peer.send(error("没配 API key，没有会话可回"));
+            return;
+        }
+        if (!scope.equals("code") && !scope.equals("conversation") && !scope.equals("both")) {
+            peer.send(error("scope 只认 code / conversation / both，收到: " + scope));
+            return;
+        }
+        dev.wiles.myagent.snapshot.Checkpoints.Checkpoint cp =
+                id == 0 ? checkpoints.latest() : checkpoints.get(id);
+        if (cp == null) {
+            peer.send(error(id == 0 ? "没有可回的检查点——这段会话里还没有跑过任何一轮"
+                    : "没有 #" + id + " 这个检查点，用 /rewind 看清单"));
+            return;
+        }
         if (!busy.compareAndSet(false, true)) {
-            peer.send(error("正在处理中，撤销要等这一轮跑完"));
+            peer.send(error("正在处理中，回退要等这一轮跑完"));
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
         worker.submit(() -> {
             try {
-                dev.wiles.myagent.snapshot.ShadowRepo.Snapshot snap = snapshots.last();
-                List<String> restored = snapshots.undo();
-                if (restored == null) {
-                    publish(error("没有可撤销的改动——这次会话里还没有哪一轮动过文件"));
-                    return;
+                List<String> restored = List.of();
+                if (!scope.equals("conversation")) {
+                    restored = checkpoints.rewindCode(cp);
                 }
-                var frame = Protocol.event("undone")
-                        .put("label", snap == null ? "" : snap.label())
-                        .put("remaining", snapshots.depth());
+                int userTurn = -1;
+                if (!scope.equals("code")) {
+                    List<dev.wiles.myagent.llm.ChatMessage> hist = agent.history();
+                    int n = Math.max(1, Math.min(cp.historySize(), hist.size()));
+                    agent.restore(n <= 1 ? List.of() : hist.subList(1, n));
+                    sessions.save(sessionId, agent.history(), workspace.root(),
+                            config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+                    checkpoints.truncateAfter(cp);
+                    userTurn = userTurnsBefore(n);
+                }
+                ObjectNode frame = Protocol.event("rewound")
+                        .put("id", cp.id())
+                        .put("label", cp.label())
+                        .put("scope", scope)
+                        .put("userTurn", userTurn)
+                        .put("remaining", checkpoints.list().size());
                 var arr = frame.putArray("restored");
                 restored.forEach(arr::add);
+                if (userTurn >= 0) {
+                    frame.put("tokens", agent.estimatedTokens());
+                }
                 publish(frame);
             } catch (java.io.IOException | RuntimeException e) {
-                log.error("撤销失败", e);
-                publish(error("撤销失败: " + e.getMessage()));
+                log.error("回退失败", e);
+                publish(error("回退失败: " + e.getMessage()));
             } finally {
                 busy.set(false);
                 publish(Protocol.event("busy").put("busy", false));
             }
         });
+    }
+
+    /** 记录前 {@code historySize} 条里有几条是用户说的——界面按这个数截转录。 */
+    private int userTurnsBefore(int historySize) {
+        List<dev.wiles.myagent.llm.ChatMessage> hist = agent == null ? List.of() : agent.history();
+        int n = Math.max(0, Math.min(historySize, hist.size()));
+        int users = 0;
+        for (int i = 0; i < n; i++) {
+            if ("user".equals(hist.get(i).role())) {
+                users++;
+            }
+        }
+        return users;
     }
 
     private static String brief(String text) {
@@ -1102,7 +1169,7 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         publish(Protocol.event("busy").put("busy", true));
-        snapshots.arm("继续");
+        checkpoints.mark("继续", agent.history().size());
         long startedAt = System.currentTimeMillis();
 
         // 必须扔到 worker 上。原先是直接在这儿跑的，而这里是 WebSocket 的解码线程：
@@ -1197,6 +1264,7 @@ public final class AgentServer extends WebSocketServer {
         // 两边不一致的话，同一个存档在两个界面里表现不同，那种 bug 没人查得动
         sessionId = SessionId.create(System.currentTimeMillis());
         sessionStartedAt = System.currentTimeMillis();
+        checkpoints.session(sessionId);
         meter.reset();      // 新会话新账本，和终端的 /clear 是同一条语义
         // 授权规则**不清**。以前这里有一句 approval.reset()，清的是那个
         // 「本会话都同意」的全局开关——它本来就该跟着会话走。

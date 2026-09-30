@@ -36,6 +36,7 @@ export type CommandId =
   | "resume-plan"
   | "compact"
   | "undo"
+  | "rewind"
   | "memory"
   | "clear"
   | "qr"
@@ -118,6 +119,14 @@ const SPECS: CommandSpec[] = [
     name: "/undo",
     description: "撤销上一轮对文件的改动（回到那一轮开工前的快照；对话不回退）",
     anyFeature: ["undo"],
+  },
+  {
+    id: "rewind",
+    name: "/rewind",
+    // 子命令走参数（理由见 /memory 那段注释）：不带参数列清单，`/rewind 2` 回第 2 个点的文件，
+    // `/rewind 2 conversation` 只回对话，`/rewind 2 both` 都回
+    description: "回到某个检查点：不带参数列清单；「/rewind 2」回文件，「/rewind 2 conversation」回对话，「/rewind 2 both」都回",
+    anyFeature: ["rewind"],
   },
   {
     id: "memory",

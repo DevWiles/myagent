@@ -1364,23 +1364,42 @@ describe('审批被别的屏答掉（协议 3.3）', () => {
   })
 })
 
-// ── undo ────────────────────────────────────────────────────
-
-test("undone 落成一行通知：列出还原的文件和还能撤几轮", () => {
+test("rewound 回对话：按用户消息数截转录，第 userTurn 句及之后的都不留", () => {
   const store = new SessionStore()
-  store.apply({ t: "undone", label: "加环境变量覆盖", restored: ["src/config.py", "new.py"], remaining: 1 } as any)
+  store.submitPrompt("第一句")
+  store.apply({ t: "text", text: "答一" } as any)
+  store.submitPrompt("第二句")
+  store.apply({ t: "text", text: "答二" } as any)
+  store.submitPrompt("/rewind 1 both")
+  store.apply({ t: "rewound", id: 1, label: "第一句", scope: "both", restored: ["a.py"], userTurn: 0, remaining: 0 } as any)
   const entries = store.getSnapshot().entries
+  const users = entries.filter((e) => e.kind === "user")
+  expect(users).toHaveLength(0)
   const last = entries[entries.length - 1] as any
   expect(last.kind).toBe("notice")
-  expect(last.text).toContain("加环境变量覆盖")
-  expect(last.text).toContain("2 个文件")
-  expect(last.text).toContain("src/config.py")
-  expect(last.text).toContain("还可再撤 1 轮")
+  expect(last.text).toContain("文件和对话已回到检查点 #1")
+  expect(last.text).toContain("a.py")
 })
 
-test("undone 没改过文件时也要说清楚", () => {
+test("rewound 只回文件：转录不动", () => {
   const store = new SessionStore()
-  store.apply({ t: "undone", label: "", restored: [], remaining: 0 } as any)
+  store.submitPrompt("第一句")
+  store.submitPrompt("第二句")
+  store.apply({ t: "rewound", id: 1, label: "第一句", scope: "code", restored: [], userTurn: -1, remaining: 2 } as any)
   const entries = store.getSnapshot().entries
-  expect((entries[entries.length - 1] as any).text).toContain("没有改过文件")
+  expect(entries.filter((e) => e.kind === "user")).toHaveLength(2)
+  expect((entries[entries.length - 1] as any).text).toContain("文件没有差别")
+})
+
+test("checkpoint_list 列成编号清单；不可用时说清楚", () => {
+  const store = new SessionStore()
+  store.apply({ t: "checkpoint_list", available: true, retentionDays: 30, items: [
+    { id: 1, label: "加环境变量", time: 0, turn: 0 }, { id: 2, label: "补单测", time: 0, turn: 1 }] } as any)
+  let last = store.getSnapshot().entries.at(-1) as any
+  expect(last.text).toContain("#1")
+  expect(last.text).toContain("#2")
+  expect(last.text).toContain("补单测")
+  store.apply({ t: "checkpoint_list", available: false, retentionDays: 30, items: [] } as any)
+  last = store.getSnapshot().entries.at(-1) as any
+  expect(last.level).toBe("warn")
 })

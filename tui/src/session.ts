@@ -72,6 +72,8 @@ export type Session = {
   /** 现在就压一次上下文。原文留在存档里，压的只是发给模型的那份窗口。 */
   compact: () => void
   undo: () => void
+  checkpoints: () => void
+  rewind: (id: number, scope: "code" | "conversation" | "both") => void
   /** 查看 / 清理长期记忆。后端没宣告 memory 能力时不要调。 */
   memory: (action: "list" | "undo" | "clear_auto") => void
   /** 清空对话、开一段新会话（旧存档留着，见 protocol 3.9）。 */
@@ -322,9 +324,17 @@ export function createSession(options: BackendOptions): Session {
       send({ t: "compact" })
     },
     undo() {
-      // 同理留痕：结果是一行「已撤销」的通知，不记这一句的话它像是凭空冒出来的
+      // /undo = 回到最近一个检查点、只回文件；后端回的是 rewound
       store.submitPrompt("/undo")
       send({ t: "undo" })
+    },
+    checkpoints() {
+      store.submitPrompt("/rewind")
+      send({ t: "checkpoints" })
+    },
+    rewind(id, scope) {
+      store.submitPrompt(scope === "code" ? `/rewind ${id}` : `/rewind ${id} ${scope}`)
+      send({ t: "rewind", id, scope })
     },
     memory(action) {
       // 记一条：三个动作都会在转录里留下结果，不记的话那段结果像是凭空冒出来的

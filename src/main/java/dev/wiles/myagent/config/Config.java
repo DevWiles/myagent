@@ -22,11 +22,19 @@ import java.nio.file.Path;
  *                 每步多几秒、多一截 reasoning_tokens，评测和日常用都不需要。
  *                 只在显式配置时才发字段：DeepSeek 官方接口不认这个字段，乱发会 400
  */
-public record Config(String apiKey, String baseUrl, String model, int contextTokens, Boolean thinking) {
+public record Config(String apiKey, String baseUrl, String model, int contextTokens, Boolean thinking,
+                     int snapshotDays) {
+
+    /** 检查点默认保留 30 天，和 Claude Code 的 cleanupPeriodDays 一个数。 */
+    public static final int DEFAULT_SNAPSHOT_DAYS = 30;
 
     /** 老签名：不碰思考开关。 */
     public Config(String apiKey, String baseUrl, String model, int contextTokens) {
-        this(apiKey, baseUrl, model, contextTokens, null);
+        this(apiKey, baseUrl, model, contextTokens, null, DEFAULT_SNAPSHOT_DAYS);
+    }
+
+    public Config(String apiKey, String baseUrl, String model, int contextTokens, Boolean thinking) {
+        this(apiKey, baseUrl, model, contextTokens, thinking, DEFAULT_SNAPSHOT_DAYS);
     }
 
     public static final String DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -51,7 +59,8 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
                 pick(System.getenv("DEEPSEEK_MODEL"), text(file, "model"), DEFAULT_MODEL),
                 contextTokens(pick(System.getenv("MYAGENT_CONTEXT_TOKENS"),
                         text(file, "contextTokens"), null)),
-                thinking(pick(System.getenv("MYAGENT_THINKING"), text(file, "thinking"), null)));
+                thinking(pick(System.getenv("MYAGENT_THINKING"), text(file, "thinking"), null)),
+                snapshotDays(pick(System.getenv("MYAGENT_SNAPSHOT_DAYS"), text(file, "snapshotDays"), null)));
     }
 
     public boolean hasApiKey() {
@@ -115,6 +124,23 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
         }
         System.err.println("警告: thinking \"" + raw + "\" 不是 true/false，已忽略");
         return null;
+    }
+
+    /** 检查点保留天数；不是正整数就按默认值。 */
+    static int snapshotDays(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_SNAPSHOT_DAYS;
+        }
+        try {
+            int v = Integer.parseInt(raw.strip());
+            if (v >= 1) {
+                return v;
+            }
+        } catch (NumberFormatException ignored) {
+            // 走下面的警告
+        }
+        System.err.println("警告: snapshotDays \"" + raw + "\" 不是正整数，已按默认值 " + DEFAULT_SNAPSHOT_DAYS + " 处理");
+        return DEFAULT_SNAPSHOT_DAYS;
     }
 
     private static String text(JsonNode node, String field) {

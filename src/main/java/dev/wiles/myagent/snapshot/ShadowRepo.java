@@ -46,8 +46,11 @@ public final class ShadowRepo {
             ".venv/", "venv/", "__pycache__/", ".pytest_cache/", ".mypy_cache/",
             ".idea/", ".gradle/", ".tox/", ".myagent/");
 
-    /** 一次快照。 */
-    public record Snapshot(String tree, String label, long time) {
+    /**
+     * 一次快照。{@code sessionId} 和 {@code historySize} 是检查点语义（属于哪段会话、
+     * 拍的时候对话记录有几条），老记录里没有，读出来是 null / -1。
+     */
+    public record Snapshot(String tree, String label, long time, String sessionId, int historySize) {
     }
 
     private final Path workspace;
@@ -93,14 +96,36 @@ public final class ShadowRepo {
 
     /** 拍一张。同样内容第二次拍得到同一个 sha。 */
     public Snapshot capture(String label) throws IOException {
+        return capture(label, null, -1);
+    }
+
+    /** 拍一张并记下它属于哪段会话、当时对话有几条——这就是一个检查点。 */
+    public Snapshot capture(String label, String sessionId, int historySize) throws IOException {
         git(List.of("add", "-A", "--", "."), true);
         String tree = git(List.of("write-tree"), true).strip();
-        Snapshot snap = new Snapshot(tree, label == null ? "" : label, System.currentTimeMillis());
-        Files.writeString(dir.resolve("history.jsonl"),
-                "{\"tree\":\"" + tree + "\",\"label\":" + quote(snap.label()) + ",\"time\":" + snap.time() + "}\n",
+        Snapshot snap = new Snapshot(tree, label == null ? "" : label, System.currentTimeMillis(),
+                sessionId, historySize);
+        StringBuilder line = new StringBuilder("{\"tree\":\"").append(tree)
+                .append("\",\"label\":").append(quote(snap.label()))
+                .append(",\"time\":").append(snap.time());
+        if (sessionId != null) {
+            line.append(",\"session\":").append(quote(sessionId))
+                    .append(",\"history\":").append(historySize);
+        }
+        Files.writeString(dir.resolve("history.jsonl"), line.append("}\n").toString(),
                 StandardCharsets.UTF_8,
                 java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         return snap;
+    }
+
+    /** 某张快照的对象还在不在（gc 会回收过期的）。 */
+    public boolean exists(String tree) {
+        try {
+            git(List.of("cat-file", "-e", tree + "^{tree}"), false);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -158,15 +183,38 @@ public final class ShadowRepo {
                 continue;
             }
             com.fasterxml.jackson.databind.JsonNode n = m.readTree(line);
-            out.add(new Snapshot(n.get("tree").asText(), n.path("label").asText(""), n.path("time").asLong()));
+            out.add(new Snapshot(n.get("tree").asText(), n.path("label").asText(""), n.path("time").asLong(),
+                    n.hasNonNull("session") ? n.get("session").asText() : null,
+                    n.path("history").asInt(-1)));
         }
         return out;
     }
 
-    /** 收拾一下：一周前没人引用的对象丢掉。偶尔调一次就行。 */
-    public void gc() {
+    /**
+     * 收拾一下：{@code days} 天前没人引用的对象丢掉，history.jsonl 里同样老的记录也清掉。
+     * 这就是检查点的保留期——过了期的检查点回不去了。偶尔调一次就行。
+     */
+    public void gc(int days) {
         try {
-            git(List.of("gc", "-q", "--prune=7.days.ago"), true);
+            git(List.of("gc", "-q", "--prune=" + Math.max(1, days) + ".days.ago"), true);
+            Path file = dir.resolve("history.jsonl");
+            if (Files.exists(file)) {
+                long cutoff = System.currentTimeMillis() - Math.max(1, days) * 86_400_000L;
+                List<String> keep = new ArrayList<>();
+                for (Snapshot snap : history()) {
+                    if (snap.time() >= cutoff) {
+                        StringBuilder line = new StringBuilder("{\"tree\":\"").append(snap.tree())
+                                .append("\",\"label\":").append(quote(snap.label()))
+                                .append(",\"time\":").append(snap.time());
+                        if (snap.sessionId() != null) {
+                            line.append(",\"session\":").append(quote(snap.sessionId()))
+                                    .append(",\"history\":").append(snap.historySize());
+                        }
+                        keep.add(line.append("}").toString());
+                    }
+                }
+                Files.writeString(file, keep.isEmpty() ? "" : String.join("\n", keep) + "\n", StandardCharsets.UTF_8);
+            }
         } catch (IOException | RuntimeException e) {
             log.debug("影子仓库 gc 失败（不要紧）: {}", e.getMessage());
         }
