@@ -1105,6 +1105,11 @@ public final class AgentServer extends WebSocketServer {
             try {
                 List<String> restored = List.of();
                 if (!scope.equals("conversation")) {
+                    // 回退本身也要能反悔：先把眼前的现场拍下来，回错了还能回到「回退之前」。
+                    // 只在只回文件时拍——回对话会把它后面的点一起作废，拍了也留不住
+                    if (scope.equals("code")) {
+                        checkpoints.mark("回退到 #" + cp.id() + " 之前的现场", agent.history().size());
+                    }
                     restored = checkpoints.rewindCode(cp);
                 }
                 int userTurn = -1;
