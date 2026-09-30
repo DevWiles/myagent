@@ -2,6 +2,7 @@ package dev.wiles.myagent.tool;
 
 import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.tool.builtin.BashTool;
+import dev.wiles.myagent.tool.builtin.RunTestsTool;
 import dev.wiles.myagent.tool.builtin.CreateProjectTool;
 import dev.wiles.myagent.tool.builtin.GlobTool;
 import dev.wiles.myagent.tool.builtin.GrepTool;
@@ -117,6 +118,7 @@ public final class BuiltinTools {
                 .register(new GrepTool(workspace))
                 .register(new GlobTool(workspace))
                 .register(new BashTool(workspace, new CommandGuard(), approval))
+                .register(new RunTestsTool(workspace))
                 .register(new CreateProjectTool(workspace, new FileWriteGuard(), approval))
                 .register(new WebSearchTool(Web.CLIENT))
                 .register(new WebFetchTool(Web.CLIENT));

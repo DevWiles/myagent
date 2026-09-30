@@ -193,6 +193,15 @@ class AgentRolesTest {
     }
 
     @Test
+    @DisplayName("coder 有 run_tests 没有 bash：改完能自己验，又删不了库，还保得住按文件并行")
+    void coderCanRunTestsButHasNoShell() {
+        assertTrue(AgentRoles.CODER.matches("run_tests"));
+        assertFalse(AgentRoles.CODER.matches("bash"));
+        Task coder = new Task("c", "改", AgentRoles.CODER, List.of(), null, List.of("src/a.py"));
+        assertTrue(PlanExecutor.scoped(coder), "有了 run_tests 仍然算划了范围的写任务");
+    }
+
+    @Test
     @DisplayName("验收席认得出、能跑 bash、但不在规划器的名册里——工人不能给自己派验收")
     void acceptorIsRegisteredButNotPlannable() {
         AgentRole acceptor = AgentRoles.require("acceptor");

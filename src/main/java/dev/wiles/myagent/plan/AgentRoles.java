@@ -65,7 +65,9 @@ public final class AgentRoles {
             "coder", "编码",
             "新建或修改文件",
             TaskType.FILE_WRITE,
-            List.of("read_file", "list_dir", "grep", "glob", "write_file", "create_project"),
+            // run_tests 不是 bash：只能跑白名单里的测试运行器，删不了任何文件，
+            // 所以 coder 改完能自己验，又不失去按文件集合并行的资格
+            List.of("read_file", "list_dir", "grep", "glob", "write_file", "create_project", "run_tests"),
             12, true, false);
 
     public static final AgentRole OPERATOR = new AgentRole(

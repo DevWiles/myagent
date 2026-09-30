@@ -4,11 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolResult;
 import dev.wiles.myagent.tool.Workspace;
-import java.util.concurrent.TimeUnit;
-import java.nio.charset.StandardCharsets;
-import java.io.InputStream;
 import java.io.IOException;
-import java.io.ByteArrayOutputStream;
 import dev.wiles.myagent.tool.Args;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.safety.ApprovalRequest;
@@ -107,72 +103,21 @@ public final class BashTool implements Tool {
             }
         }
 
-        Process process;
+        ProcessRunner.Outcome out;
         try {
-            process = new ProcessBuilder("sh", "-c", command)
-                    .directory(workspace.root().toFile())   // 限定工作目录
-                    .redirectErrorStream(true)              // stderr 并入 stdout，模型要看完整报错
-                    .start();
+            out = ProcessRunner.run(java.util.List.of("sh", "-c", command), workspace.root(), timeout);
         } catch (IOException e) {
             return ToolResult.error("无法启动命令: " + e.getMessage());
         }
-
-        // 关掉子进程的标准输入，等待输入的命令会立刻读到 EOF 而不是永远挂着
-        try {
-            process.getOutputStream().close();
-        } catch (IOException ignored) {
-            // 关不上也不影响后面
-        }
-
-        // 必须用独立线程读输出：
-        //  - 若先 waitFor 再读，管道缓冲区（几十 KB）写满后子进程阻塞在写、我们阻塞在等，死锁
-        //  - 若在主线程同步读到 EOF，又会让 waitFor 的超时形同虚设（比如 sleep 30 不产出任何输出）
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        Thread reader = new Thread(() -> {
-            try (InputStream in = process.getInputStream()) {
-                byte[] chunk = new byte[8192];
-                int n;
-                while ((n = in.read(chunk)) != -1) {
-                    synchronized (buffer) {
-                        buffer.write(chunk, 0, n);
-                    }
-                }
-            } catch (IOException ignored) {
-                // 进程被强杀时读流会抛异常，已读到的部分仍然有用
-            }
-        });
-        reader.setDaemon(true);
-        reader.start();
-
-        boolean finished;
-        try {
-            finished = process.waitFor(timeout, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            process.destroyForcibly();
-            Thread.currentThread().interrupt();       // 恢复中断标志，别把信号吞掉
+        if (out.interrupted()) {
             return ToolResult.error("命令执行被中断");
         }
-
-        if (!finished) {
-            process.destroyForcibly();                // 不杀掉的话进程会留在后台
-            try {
-                process.waitFor(2, TimeUnit.SECONDS);
-                reader.join(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        if (!out.finished()) {
             return ToolResult.error("命令执行超时（超过 " + timeout + " 秒），已强制终止。"
-                    + "已产生的输出:\n" + truncate(snapshot(buffer)));
+                    + "已产生的输出:\n" + ProcessRunner.truncate(out.output(), MAX_OUTPUT_CHARS));
         }
-
-        try {
-            reader.join(5000);   // 进程结束后给读线程一点时间收尾
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        String output = truncate(snapshot(buffer));
-        int exitCode = process.exitValue();
+        String output = ProcessRunner.truncate(out.output(), MAX_OUTPUT_CHARS);
+        int exitCode = out.exitCode();
 
         // 退出码非 0 依然算工具执行成功：命令跑完了，只是结果失败（比如测试没过）。
         // 这和「工具本身没能执行」是两回事，模型需要看到完整输出去分析原因。
@@ -189,24 +134,5 @@ public final class BashTool implements Tool {
         return ToolResult.ok(sb.toString());
     }
 
-    private static String snapshot(ByteArrayOutputStream buffer) {
-        synchronized (buffer) {
-            return buffer.toString(StandardCharsets.UTF_8);
-        }
-    }
 
-    /**
-     * 截断时保留头尾各一半，而不是只留开头——
-     * 编译错误、测试失败的关键信息通常都在末尾。
-     */
-    private static String truncate(String text) {
-        if (text.length() <= MAX_OUTPUT_CHARS) {
-            return text;
-        }
-        int half = MAX_OUTPUT_CHARS / 2;
-        int omitted = text.length() - half * 2;
-        return text.substring(0, half)
-                + "\n\n... (中间 " + omitted + " 个字符已截断) ...\n\n"
-                + text.substring(text.length() - half);
-    }
 }
