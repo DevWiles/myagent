@@ -103,6 +103,7 @@ public final class BashTool implements Tool {
             }
         }
 
+        long startedAt = System.currentTimeMillis();
         ProcessRunner.Outcome out;
         try {
             out = ProcessRunner.run(java.util.List.of("sh", "-c", command), workspace.root(), timeout);
@@ -110,7 +111,8 @@ public final class BashTool implements Tool {
             return ToolResult.error("无法启动命令: " + e.getMessage());
         }
         if (out.interrupted()) {
-            return ToolResult.error("命令执行被中断");
+            return ToolResult.error(ProcessRunner.stoppedMessage(
+                    System.currentTimeMillis() - startedAt, out.output(), MAX_OUTPUT_CHARS));
         }
         if (!out.finished()) {
             return ToolResult.error("命令执行超时（超过 " + timeout + " 秒），已强制终止。"

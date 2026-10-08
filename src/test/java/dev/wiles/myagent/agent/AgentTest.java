@@ -977,6 +977,87 @@ class AgentTest {
                 "那一轮明明说完了，还提示「继续」就是在误导");
     }
 
+    // ---------- 工具跑着时按停 ----------
+
+    /** 从另一个线程（监听 Esc 的那个）在 delay 毫秒后按停。 */
+    private static void cancelLater(Agent agent, long delay) {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException ignored) {
+            }
+            agent.cancel();
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @Test
+    @DisplayName("工具跑着时按停：当场打断它，不是干等它跑完；工具自己交代的结果原样回填")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelInterruptsRunningTool() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "slow", "{}"));
+        ToolRegistry tools = new ToolRegistry().register(tool("slow", a -> {
+            try {
+                Thread.sleep(30_000);            // 好比一次 mvn test
+                return ToolResult.ok("跑完了");
+            } catch (InterruptedException e) {
+                return ToolResult.error("跑了一半被叫停，已产生的输出: BUILD 进行中");
+            }
+        }));
+        Agent agent = agent(llm, tools);
+        cancelLater(agent, 300);
+
+        long t0 = System.nanoTime();
+        assertEquals("已取消。", agent.run("跑测试"));
+
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 3000, "按了停还在干等那 30 秒");
+        assertTrue(resultOf(agent.conversation(), "c1").contains("跑了一半被叫停，已产生的输出: BUILD 进行中"),
+                "工具知道自己跑到哪了，它的话比任何占位都准");
+        assertFalse(Thread.currentThread().isInterrupted(),
+                "中断标志不能漏到跑循环的线程上——那是个复用的工作线程，下一轮一开跑就会误以为被叫停");
+    }
+
+    @Test
+    @DisplayName("工具不理会打断：等一小会儿就不等了，如实说结果未知、可能还在后台")
+    @org.junit.jupiter.api.Timeout(10)
+    void stubbornToolIsAbandoned() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "stubborn", "{}"));
+        ToolRegistry tools = new ToolRegistry().register(tool("stubborn", a -> {
+            long end = System.currentTimeMillis() + 20_000;
+            while (System.currentTimeMillis() < end) {   // 好比卡在网络读上，中断叫不醒
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException ignored) {
+                    // 故意吞掉
+                }
+            }
+            return ToolResult.ok("终于完了");
+        }));
+        Agent agent = agent(llm, tools).toolStopGrace(500);
+        cancelLater(agent, 200);
+
+        long t0 = System.nanoTime();
+        agent.run("查点东西");
+
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 3000, "工具不配合也不能把用户扣住");
+        String result = resultOf(agent.conversation(), "c1");
+        assertTrue(result.contains("已取消") && result.contains("结果未知") && result.contains("后台"),
+                "不能写「没有执行」——它确实跑了，而且可能还在跑: " + result);
+        assertTrue(HistoryRepair.isIntact(agent.conversation()));
+    }
+
+    @Test
+    @DisplayName("没按停时工具照常跑完，换了线程不改变任何结果")
+    void toolsStillRunNormally() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("好了");
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> ToolResult.ok("结果")));
+
+        Agent agent = agent(llm, tools);
+        assertEquals("好了", agent.run("做"));
+        assertEquals("结果", resultOf(agent.conversation(), "c1"));
+    }
+
     private static String resultOf(List<ChatMessage> messages, String toolCallId) {
         return messages.stream()
                 .filter(m -> toolCallId.equals(m.toolCallId()))

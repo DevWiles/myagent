@@ -97,6 +97,7 @@ public final class RunTestsTool implements Tool {
             return ToolResult.error("run_tests 拒绝了这条命令: " + e.getMessage()
                     + "。它只跑测试运行器，不是 shell；请只给测试命令本身，不要重试同样的写法。");
         }
+        long startedAt = System.currentTimeMillis();
         ProcessRunner.Outcome out;
         try {
             out = ProcessRunner.run(argv, workspace.root(), timeout);
@@ -104,7 +105,8 @@ public final class RunTestsTool implements Tool {
             return ToolResult.error("无法启动命令: " + e.getMessage());
         }
         if (out.interrupted()) {
-            return ToolResult.error("命令执行被中断");
+            return ToolResult.error(ProcessRunner.stoppedMessage(
+                    System.currentTimeMillis() - startedAt, out.output(), MAX_OUTPUT_CHARS));
         }
         String output = ProcessRunner.truncate(out.output(), MAX_OUTPUT_CHARS);
         if (!out.finished()) {

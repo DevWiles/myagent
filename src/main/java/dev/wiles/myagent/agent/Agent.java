@@ -187,6 +187,12 @@ public final class Agent {
      */
     private final StringBuilder streamed = new StringBuilder();
 
+    /** 正在跑的那个串行工具所在的线程。{@link #cancel()} 靠它叫停工具。 */
+    private volatile Thread toolThread;
+
+    /** 叫停之后再等工具多久。它不配合（卡在网络读上，中断叫不醒）就不等了。 */
+    private long toolStopGraceMillis = 3_000;
+
     /** 断点记时刻、续做时算隔了多久都用它。测试里换成拨得动的钟。 */
     private java.util.function.LongSupplier clock = System::currentTimeMillis;
 
@@ -267,6 +273,16 @@ public final class Agent {
     public void cancel() {
         cancelled = true;
         client.cancel();
+        Thread running = toolThread;
+        if (running != null) {
+            running.interrupt();   // 正在跑的工具：bash 会当场杀掉子进程，见 runInterruptibly
+        }
+    }
+
+    /** 叫停后等工具收尾的时限。仅供测试：真实的 3 秒太慢。 */
+    Agent toolStopGrace(long millis) {
+        this.toolStopGraceMillis = millis;
+        return this;
     }
 
     /** 换一个钟。仅供测试：「隔了 45 分钟才接」不能真等 45 分钟。 */
@@ -505,10 +521,73 @@ public final class Agent {
     private void executeOne(ToolCall call) {
         int id = nextToolId();
         emit(new AgentEvent.ToolStarted(id, call.name(), call.argumentsJson()));
-        ToolResult result = tools.execute(call);   // 它保证不抛异常
+        ToolResult result = runInterruptibly(call);
         emit(new AgentEvent.ToolFinished(
                 id, call.name(), result.ok(), result.content(), result.diff()));
         history.add(ChatMessage.toolResult(call.id(), result.content()));
+    }
+
+    /**
+     * 在单独的线程上跑一个工具，按停时能当场叫停它。
+     *
+     * <h3>为什么要换线程</h3>
+     * 原来工具就在跑循环的线程上同步执行，{@link #cancel()} 只设标志、掐 HTTP 请求，
+     * 碰不到它——一次 {@code mvn test} 按了 Esc 也得等它跑完（或者等满超时）。
+     * 换到单独的线程上，cancel 就能打断<b>那个</b>线程：bash 收到中断当场杀子进程，
+     * 带着叫停前的输出回来（{@code ProcessRunner}）。
+     * 不直接打断跑循环的线程，是因为它是复用的工作线程，中断标志漏到下一轮就是一次误取消。
+     *
+     * <h3>工具不配合就不等了</h3>
+     * 中断能不能叫醒工具取决于它卡在哪：sleep / waitFor 能醒，阻塞的网络读不一定。
+     * 叫停后再给它 {@link #toolStopGraceMillis}，还不回来就<b>不等了</b>，回填「结果未知」——
+     * 不能写「没有执行」，它确实跑了，而且可能还在后台跑（Codex 的提示里也特意写了这一句）。
+     *
+     * <p>上层超时（计划、流水线 {@code Future.cancel(true)}）打断的是跑循环的线程，
+     * 这里接住、照样叫停工具，最后把中断标志还回去，让 {@link #shouldStop()} 看得见。
+     */
+    private ToolResult runInterruptibly(ToolCall call) {
+        java.util.concurrent.CompletableFuture<ToolResult> result = new java.util.concurrent.CompletableFuture<>();
+        Thread worker = new Thread(() -> {
+            try {
+                result.complete(tools.execute(call));   // 它保证不抛异常，兜的是 Error
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        }, "tool-" + call.name());
+        worker.setDaemon(true);
+        toolThread = worker;
+        worker.start();
+        boolean selfInterrupted = false;
+        long giveUpAt = -1;
+        try {
+            while (true) {
+                if (giveUpAt < 0 && (cancelled || selfInterrupted)) {
+                    worker.interrupt();          // cancel() 已经打过一次；这里兜「它赶在 toolThread 赋值前就来了」
+                    giveUpAt = System.nanoTime() + toolStopGraceMillis * 1_000_000L;
+                }
+                if (giveUpAt >= 0 && System.nanoTime() > giveUpAt) {
+                    log.warn("工具 {} 叫停后 {} 毫秒仍未结束，不再等它", call.name(), toolStopGraceMillis);
+                    return ToolResult.error("(已取消：叫停时这个工具还在跑，等了 "
+                            + Math.max(1, toolStopGraceMillis / 1000) + " 秒没停下来，结果未知。"
+                            + "它可能已经部分生效，甚至还在后台继续——先检查现状再决定是否重试)");
+                }
+                try {
+                    return result.get(50, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    // 接着等，顺便看一眼有没有人按停
+                } catch (InterruptedException e) {
+                    selfInterrupted = true;      // 标志被这个异常吃掉了，记下来最后还回去
+                } catch (ExecutionException e) {
+                    log.error("工具 {} 执行时炸了", call.name(), e.getCause());
+                    return ToolResult.error("工具执行失败: " + e.getCause());
+                }
+            }
+        } finally {
+            toolThread = null;
+            if (selfInterrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**

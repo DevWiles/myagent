@@ -54,12 +54,20 @@ final class ProcessRunner {
         try {
             finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            process.destroyForcibly();
+            // 用户按了停（Agent.cancel 打断了跑工具的线程）。先杀进程，
+            // 再给读流线程一小会儿把管道里剩下的读完——叫停前的输出是现场的一部分
+            killTree(process);
+            try {
+                process.waitFor(1, TimeUnit.SECONDS);
+                reader.join(500);
+            } catch (InterruptedException again) {
+                // 已经在收尾了，再被打断就不等了
+            }
             Thread.currentThread().interrupt();
             return new Outcome(false, -1, snapshot(buffer), true);
         }
         if (!finished) {
-            process.destroyForcibly();
+            killTree(process);
             try {
                 process.waitFor(2, TimeUnit.SECONDS);
                 reader.join(1000);
@@ -76,10 +84,39 @@ final class ProcessRunner {
         return new Outcome(true, process.exitValue(), snapshot(buffer), false);
     }
 
+    /**
+     * 连根带叶杀掉。
+     *
+     * <p>只杀 {@code sh} 不够：{@code sh -c "mvn test"} 起的 JVM 是它的子进程，
+     * sh 一死它就被过继给 init，在后台接着跑、接着改文件——用户以为按停了，其实没有。
+     * 而且孙进程还握着输出管道，读流线程等不到 EOF。
+     * <b>先</b>收集整棵子孙树再动手：先杀 sh 的话它们已经认不出是谁家的了。
+     */
+    private static void killTree(Process process) {
+        List<ProcessHandle> descendants = process.descendants().toList();
+        descendants.forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly();
+    }
+
     private static String snapshot(ByteArrayOutputStream buffer) {
         synchronized (buffer) {
             return buffer.toString(StandardCharsets.UTF_8);
         }
+    }
+
+    /**
+     * 命令被用户叫停时回给模型的话。
+     *
+     * <p>照 Codex（{@code aborted by user after Xs}）和 Gemini CLI（取消前的输出照样带上）：
+     * 跑了多久、已经杀掉、<b>可能已部分生效</b>、叫停前的输出。
+     * 不能说成超时——模型会去调大时限原样重跑；也不能说「没有执行」——它确实跑了。
+     */
+    static String stoppedMessage(long elapsedMillis, String partialOutput, int maxChars) {
+        String head = "(已取消：命令跑了 " + Math.max(1, Math.round(elapsedMillis / 1000.0))
+                + " 秒被用户叫停，进程已强制终止。它可能已经部分生效——先检查现状再决定是否重试)";
+        return partialOutput == null || partialOutput.isBlank()
+                ? head + "\n(叫停前没有输出)"
+                : head + "\n叫停前的输出:\n" + truncate(partialOutput, maxChars);
     }
 
     /** 截断时保留头尾各一半：编译错误、测试失败的关键信息通常都在末尾。 */
