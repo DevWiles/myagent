@@ -224,4 +224,12 @@ class TaskPromptTest {
         assertEquals(TaskPrompt.user(task, List.of()), TaskPrompt.user(task, List.of(), TaskBrief.NONE));
         assertFalse(TaskPrompt.user(task, List.of()).contains("用户原话"));
     }
+
+    @Test
+    @DisplayName("coder 不许自己往测试目录里加文件来自证——那会留在用户仓库里")
+    void coderDoesNotWriteProbeTests() {
+        Task task = new Task("t3", "改 tpl.py", AgentRoles.CODER, List.of(), "改完");
+
+        assertTrue(TaskPrompt.system(task, ROOT).contains("不要新建或修改测试文件"));
+    }
 }

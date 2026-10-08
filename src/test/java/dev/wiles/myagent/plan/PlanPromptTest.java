@@ -278,4 +278,12 @@ class PlanPromptTest {
         assertTrue(PlanPrompt.replanUser(plan, t1, "测试挂了").contains("parse_date 的两位年要报错"));
         assertTrue(PlanPrompt.subPlanUser(t1, "看了一圈", TaskBrief.of(plan)).contains("R1 两位年报错"));
     }
+
+    @Test
+    @DisplayName("三份规划提示词都只把探针派给 verifier，不派 coder 往测试目录里加文件")
+    void probesGoToVerifierOnly() {
+        assertTrue(PlanPrompt.system().contains("探针只派给 verifier"));
+        assertTrue(PlanPrompt.subPlanSystem().contains("探针只派给 verifier"));
+        assertTrue(PlanPrompt.replanSystem().contains("不要派 coder 写探针测试"));
+    }
 }

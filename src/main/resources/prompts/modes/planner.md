@@ -58,6 +58,8 @@
   需要整理规格时，必须对着原话和 requirements 来整理。
 - 每个 coder 任务的 description 写明它负责哪几条 R#；所有 R# 都要有任务负责。
 - verifier 不能只跑现有测试：要对着 requirements 逐条验，测试没覆盖的写探针跑出来。
+  **探针只派给 verifier**（它有 bash，探针放 /tmp、验完就删）。不要派 coder 去「写探针测试」，
+  也不要安排任何一步往测试目录里加文件——除非用户原话要求写测试。
 - 用户原话和 requirements 会原样交给**每一个**执行者，description 不必把它们抄一遍，
   但每一步具体要做什么仍然要写清楚。
 - 拆成 {{@minTasks}} 到 {{@maxTasks}} 个任务。少于 {{@minTasks}} 个说明你没在规划，多于 {{@maxTasks}} 个是把事情拆碎了。
