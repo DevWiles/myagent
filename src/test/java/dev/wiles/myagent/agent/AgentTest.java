@@ -13,8 +13,18 @@ import dev.wiles.myagent.context.HistoryRepair;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
+import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.builtin.ReadFileTool;
+import dev.wiles.myagent.tool.builtin.WriteFileTool;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
+import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -676,6 +686,50 @@ class AgentTest {
 
         assertEquals("已取消。", agent.run("第一次"));
         assertEquals("这次好了", agent.run("第二次"), "取消不该把会话搞坏");
+    }
+
+    @Test
+    @DisplayName("等审批时按停，再说「继续」：模型看到的是「没执行」，不是「用户拒绝」")
+    void continueAfterCancelDuringApproval(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("Main.java"), "原有代码");
+        FakeLlm llm = new FakeLlm()
+                .calls("改一下再读回来",
+                        ToolCall.of("c1", "write_file", "{\"path\":\"Main.java\",\"content\":\"新代码\"}"),
+                        ToolCall.of("c2", "read_file", "{\"path\":\"Main.java\"}"))
+                .says("接着改完了");
+        Agent[] holder = new Agent[1];
+        // 照 RemoteApproval 的真实顺序：用户按停 → cancel() 先到 → 卡着的审批被放行成「取消」
+        ApprovalPolicy stoppedWhileAsking = request -> {
+            holder[0].cancel();
+            return ApprovalVerdict.interrupted();
+        };
+        Workspace workspace = new Workspace(dir);
+        ToolRegistry tools = new ToolRegistry()
+                .register(new WriteFileTool(workspace, new FileWriteGuard(), stoppedWhileAsking))
+                .register(new ReadFileTool(workspace));
+        Agent agent = agent(llm, tools);
+        holder[0] = agent;
+
+        assertEquals("已取消。", agent.run("把 Main 改了"));
+        agent.run("继续");
+
+        List<ChatMessage> sent = llm.received.get(1);
+        String c1 = resultOf(sent, "c1");
+        String c2 = resultOf(sent, "c2");
+        assertFalse(c1.contains("拒绝"),
+                "用户只是按了停。写成拒绝，模型听到「继续」会绕开这次修改: " + c1);
+        assertTrue(c1.contains("已取消") && c1.contains("没有执行"), c1);
+        assertTrue(c2.contains("已取消") && c2.contains("没有执行"), "排在后面的调用是封口补的: " + c2);
+        assertEquals("继续", sent.get(sent.size() - 1).content(), "「继续」就是一条普通的话，不做特殊处理");
+        assertEquals("原有代码", Files.readString(dir.resolve("Main.java")));
+    }
+
+    private static String resultOf(List<ChatMessage> messages, String toolCallId) {
+        return messages.stream()
+                .filter(m -> toolCallId.equals(m.toolCallId()))
+                .map(ChatMessage::content)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(toolCallId + " 没有结果，下一次请求会 400"));
     }
 
     @Test

@@ -183,7 +183,9 @@ class RemoteApprovalTest {
         awaitRequest();
 
         approval.cancelPending();
-        assertFalse(asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).approved());
+        ApprovalVerdict verdict = asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertFalse(verdict.approved());
+        assertTrue(verdict.cancelled(), "被叫停不是被拒绝——用户没表态，回头说「继续」还得照原样再问");
     }
 
     @Test

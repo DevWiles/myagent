@@ -161,6 +161,22 @@ class AuditLogTest {
     }
 
     @Test
+    @DisplayName("被叫停的审批要和拒绝分开记——查账时「没人批」和「用户说不」是两回事")
+    void recordsCancelledApproval(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("run.jsonl");
+
+        try (AuditLog audit = new AuditLog(file)) {
+            audit.approval(ApprovalRequest.bash("rm -rf build", "HIGH"), ApprovalVerdict.interrupted());
+            audit.approval(ApprovalRequest.bash("rm -rf dist", "HIGH"), ApprovalVerdict.no());
+        }
+
+        List<JsonNode> lines = read(file);
+        assertFalse(lines.get(0).get("approved").asBoolean());
+        assertTrue(lines.get(0).path("cancelled").asBoolean());
+        assertFalse(lines.get(1).has("cancelled"), "真拒绝不该带这个字段");
+    }
+
+    @Test
     @DisplayName("写不进去也不能把 agent 拖垮——审计失败是小事，任务跑一半崩了是大事")
     void ioFailureNeverPropagates(@TempDir Path dir) {
         // 用一个「父目录是文件」的路径，保证打不开
