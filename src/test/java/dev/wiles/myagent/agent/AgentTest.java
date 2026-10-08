@@ -5,6 +5,7 @@ import dev.wiles.myagent.llm.ChatMessage;
 import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
+import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
@@ -722,6 +723,114 @@ class AgentTest {
         assertTrue(c2.contains("已取消") && c2.contains("没有执行"), "排在后面的调用是封口补的: " + c2);
         assertEquals("继续", sent.get(sent.size() - 1).content(), "「继续」就是一条普通的话，不做特殊处理");
         assertEquals("原有代码", Files.readString(dir.resolve("Main.java")));
+    }
+
+    // ---------- 流式输出到一半断掉 ----------
+
+    /** 能控制流式分片的假模型：每一步拿到 listener，自己决定吐几个字、然后成功还是断掉。 */
+    static final class StreamingLlm implements LlmClient {
+        final List<java.util.function.Function<StreamListener, ChatResponse>> script = new ArrayList<>();
+        final List<List<ChatMessage>> received = new ArrayList<>();
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+            throw new AssertionError("Agent 应当走流式那条路");
+        }
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools, StreamListener listener) {
+            received.add(List.copyOf(messages));
+            return script.remove(0).apply(listener);
+        }
+
+        @Override
+        public String modelName() {
+            return "fake";
+        }
+
+        StreamingLlm then(java.util.function.Function<StreamListener, ChatResponse> step) {
+            script.add(step);
+            return this;
+        }
+
+        static ChatResponse reply(ChatMessage message) {
+            return new ChatResponse("id", "fake", List.of(new ChatResponse.Choice(0, message,
+                    message.hasToolCalls() ? "tool_calls" : "stop")), null);
+        }
+    }
+
+    @Test
+    @DisplayName("说到一半按停：屏幕上出过的半段话留在历史里，接着做时模型知道自己说到哪了")
+    void partialTextSurvivesCancel() {
+        Agent[] holder = new Agent[1];
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("问题出在 Parser 第 42 行，");
+                    listener.onTextDelta("空指针是因为");
+                    holder[0].cancel();                       // 用户按停，请求被掐断
+                    throw new LlmException("请求已取消");
+                })
+                .then(listener -> StreamingLlm.reply(ChatMessage.assistant("接着说：token 为 null 时没判空")));
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys");
+        holder[0] = agent;
+
+        assertEquals("已取消。", agent.run("为什么崩了"));
+        agent.run("继续");
+
+        List<ChatMessage> sent = llm.received.get(1);
+        assertTrue(HistoryRepair.isIntact(sent.subList(1, sent.size() - 1)), "去掉 system 和刚说的「继续」，前面得自洽");
+        ChatMessage partial = sent.get(sent.size() - 2);
+        assertEquals(ChatMessage.ROLE_ASSISTANT, partial.role());
+        assertTrue(partial.content().startsWith("问题出在 Parser 第 42 行，空指针是因为"),
+                "用户看着它说了半句，模型自己却不知道——「继续」时它只能从头再分析一遍: " + partial.content());
+        assertTrue(partial.content().contains("已取消") && partial.content().contains("没说完"),
+                "得标明是被打断的，否则模型会把半句话当成说完了的结论: " + partial.content());
+        assertEquals(1, sent.stream().filter(m -> ChatMessage.ROLE_ASSISTANT.equals(m.role())).count(),
+                "半段话自己就是封口，不该再多补一条「上一轮没有做完」");
+    }
+
+    @Test
+    @DisplayName("说到一半断网：半段话同样留下，标的是断网的原因")
+    void partialTextSurvivesNetworkFailure() {
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("我的方案是先改接口，");
+                    throw new LlmException("流式请求失败: connection reset");
+                });
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys");
+
+        agent.run("怎么改");
+
+        ChatMessage last = agent.history().get(agent.history().size() - 1);
+        assertTrue(last.content().startsWith("我的方案是先改接口，"), last.content());
+        assertTrue(last.content().contains("网络或模型调用失败"), last.content());
+        assertTrue(agent.unfinished().isPresent(), "断网要能接着做");
+    }
+
+    @Test
+    @DisplayName("上一个请求说完整了的话不能被当成半段话再补一遍")
+    void completedTextIsNotDuplicated() {
+        Agent[] holder = new Agent[1];
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("我先看看配置");
+                    return StreamingLlm.reply(ChatMessage.assistant("我先看看配置",
+                            List.of(ToolCall.of("c1", "t", "{}"))));
+                });
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            holder[0].cancel();                               // 工具跑着时按停，此刻没有请求在途
+            return ToolResult.ok("ok");
+        }));
+        Agent agent = new Agent(llm, tools, "sys");
+        holder[0] = agent;
+
+        agent.run("看看");
+
+        long mentions = agent.history().stream()
+                .filter(m -> m.content() != null && m.content().contains("我先看看配置")).count();
+        assertEquals(1, mentions, "那句话已经随 assistant 消息进了历史，再补一遍模型会以为自己说了两次");
+        assertEquals("(上一轮已取消，没有做完)",
+                agent.history().get(agent.history().size() - 1).content());
     }
 
     private static String resultOf(List<ChatMessage> messages, String toolCallId) {

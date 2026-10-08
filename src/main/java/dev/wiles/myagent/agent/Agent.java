@@ -171,10 +171,26 @@ public final class Agent {
      */
     private Interruption unfinished;
 
-    /** 把模型的流式增量转成 agent 事件发出去。 */
+    /**
+     * 在途这个请求已经吐到屏幕上的字。
+     *
+     * <p>请求断在半路（按停、断网）时，响应拼不完整，原来整条丢掉——
+     * 可用户已经看着它说了半句「问题出在 Parser 第 42 行，空指针是因为」。
+     * 他说「继续」，模型却不知道自己说过什么，只能从头再分析一遍，
+     * 说出来的还可能和屏幕上那半句对不上。封口时把它补进历史，
+     * 守住一条不变量：<b>屏幕上出现过的，历史里就有</b>。
+     *
+     * <p>就记在发 TextDelta 的这一处，而不是让客户端在异常里带出来：
+     * 这里正是「用户看到了什么」的定义，换哪家模型客户端都一样成立。
+     * 只有跑循环的线程读写它（流式回调是在发请求的线程上同步读出来的）。
+     */
+    private final StringBuilder streamed = new StringBuilder();
+
+    /** 把模型的流式增量转成 agent 事件发出去，顺手记下说过的字。 */
     private final StreamListener stream = new StreamListener() {
         @Override
         public void onTextDelta(String delta) {
+            streamed.append(delta);
             emit(new AgentEvent.TextDelta(delta));
         }
     };
@@ -384,7 +400,9 @@ public final class Agent {
                     return tooBigToSend(prepared, specs, userInput, step);
                 }
 
+                streamed.setLength(0);
                 ChatResponse response = client.chat(prepared.window(), specs, stream);
+                streamed.setLength(0);       // 说完整了，这些字会随 assistant 消息进历史，不再是半段话
                 calibrate(response, prepared.tokensAfter());
                 ChatMessage assistant = response.message();
 
@@ -928,9 +946,27 @@ public final class Agent {
      * 而有些失败重试一万次也还是同一个结果，那时候提示续做就是在骗人。
      */
     private void sealWithoutInterruption(String reason) {
+        keepPartialReply(reason);
         List<ChatMessage> sealed = HistoryRepair.seal(conversation(), reason);
         history.subList(1, history.size()).clear();   // 留下 system
         history.addAll(sealed);
+    }
+
+    /**
+     * 请求断在半路时，把已经吐到屏幕上的半段话收进历史。
+     *
+     * <p>末尾要标明是被打断的：不标的话，模型会把半句话当成自己说完了的结论。
+     * 有了这条以 assistant 收尾的消息，{@link HistoryRepair#seal} 就不会再补
+     * 「上一轮没有做完」——半段话自己就是封口，同一件事不说两遍。
+     *
+     * <p>半截的 tool_calls 不留：参数可能只到一半，留下就是一次必然失败的调用。
+     */
+    private void keepPartialReply(String reason) {
+        if (streamed.isEmpty()) {
+            return;
+        }
+        history.add(ChatMessage.assistant(streamed + "\n\n(上一轮" + reason + "，这段话没说完)"));
+        streamed.setLength(0);
     }
 
     /**
@@ -948,7 +984,9 @@ public final class Agent {
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {
             // tools 传 null = 没得调。发的是窗口，脚手架刚追加进记录，组装时自然带上
+            streamed.setLength(0);
             ChatResponse response = client.chat(buildWindow(null).window(), null, stream);
+            streamed.setLength(0);
             history.remove(history.size() - 1);      // 摘掉脚手架，理由见上
             ChatMessage conclusion = response.message();
             if (conclusion.hasToolCalls()) {
