@@ -833,6 +833,33 @@ class AgentTest {
                 agent.history().get(agent.history().size() - 1).content());
     }
 
+    @Test
+    @DisplayName("被打断时发出的 failed 带着断点，正常说完后断点清掉")
+    void failedEventCarriesInterruption() {
+        Agent[] holder = new Agent[1];
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "t", "{}"))
+                .says("接上了");
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            holder[0].cancel();
+            return ToolResult.ok("ok");
+        }));
+        List<AgentEvent> events = new ArrayList<>();
+        Agent agent = agent(llm, tools).onEvent(events::add);
+        holder[0] = agent;
+
+        agent.run("把 Main 改了");
+
+        AgentEvent.Failed failed = events.stream()
+                .filter(AgentEvent.Failed.class::isInstance).map(AgentEvent.Failed.class::cast)
+                .findFirst().orElseThrow();
+        assertNotNull(failed.interrupted(), "界面全靠它决定要不要提示「继续」");
+        assertEquals("把 Main 改了", failed.interrupted().userInput());
+
+        agent.run("继续");
+        assertTrue(agent.unfinished().isEmpty(), "接上并说完了，再提示「继续」就是误导");
+    }
+
     private static String resultOf(List<ChatMessage> messages, String toolCallId) {
         return messages.stream()
                 .filter(m -> toolCallId.equals(m.toolCallId()))

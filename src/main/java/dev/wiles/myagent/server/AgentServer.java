@@ -1345,6 +1345,13 @@ public final class AgentServer extends WebSocketServer {
             resumable.put("total", checkpoint.tasks().size());
             resumable.put("savedAt", checkpoint.savedAt());
         });
+        // 眼前这段断在了半路。晚连上来的界面（手机扫码进来时，终端那边早按过停了）
+        // 没看见那条 failed，只能从首帧知道「说一句继续就能接上」。忙着的时候不发：
+        // 那说明已经接上了，断点马上就要作废
+        if (agent != null && !busy.get()) {
+            agent.unfinished().ifPresent(
+                    cut -> Protocol.encodeInterruption(n.putObject("interrupted"), cut));
+        }
         // 上次没聊完的对话，同理放进首帧
         if (agent != null) {
             List<SessionSummary> history = sessions.list(workspace.root());

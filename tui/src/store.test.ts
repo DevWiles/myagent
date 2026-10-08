@@ -1403,3 +1403,48 @@ test("checkpoint_list 列成编号清单；不可用时说清楚", () => {
   last = store.getSnapshot().entries.at(-1) as any
   expect(last.level).toBe("warn")
 })
+
+describe('断在半路之后提示「继续」', () => {
+  const cut = { reason: '已取消', prompt: '把 Main 改了', steps: 3, at: 1758100000000 }
+
+  test('failed 带断点：原因之后紧跟一行「继续」提示，并记下断点', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut })
+
+    const notices = store.getSnapshot().entries.filter(e => e.kind === 'notice')
+    expect(notices.map(n => (n as { text: string }).text)).toEqual([
+      '已取消',
+      '现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求',
+    ])
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('续不了的失败不提示——说「继续」只会原地再撞一次', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '上下文超限' })
+
+    expect(store.getSnapshot().entries.filter(e => e.kind === 'notice')).toHaveLength(1)
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
+  test('下一句话一跑起来断点就作废，不管说的是不是「继续」', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, { t: 'busy', busy: true })
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
+  test('晚连上来的界面从 ready 拿断点——手机扫码进来时终端早按过停了', () => {
+    const store = new SessionStore()
+    feed(store, { ...ready(), interrupted: cut } as ServerEvent)
+
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('清空对话后断点不作数', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, { t: 'reset_done' })
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+})

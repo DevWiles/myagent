@@ -15,6 +15,7 @@ import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
+import { continueHint } from "../store.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
@@ -879,7 +880,9 @@ export function App(props: AppProps) {
                 ? "输入即搜索（标题或分支）· ↑↓ 选 · Enter 接着聊 · Esc 取消"
                 : state().busy
                   ? "正在跑…（Esc 或 Ctrl-C 中断）"
-                  : "交代一件事，比如「把 README 里的启动命令补全」"
+                  : state().interrupted
+                    ? continueHint(state().interrupted!)
+                    : "交代一件事，比如「把 README 里的启动命令补全」"
           }
           busy={state().busy}
           suspended={pending()}

@@ -169,7 +169,7 @@ public final class Agent {
      * <p>断点本身留在历史里（见 {@link Interruption}），这个字段只是让界面
      * 知道该不该提醒一句。下一轮正常跑完就清掉——那时候「上一轮没做完」已经不成立了。
      */
-    private Interruption unfinished;
+    private volatile Interruption unfinished;   // 跑循环的线程写，首帧那边（WebSocket 线程）读
 
     /**
      * 在途这个请求已经吐到屏幕上的字。
@@ -463,7 +463,7 @@ public final class Agent {
             // 回滚的代价是用户以为这一轮白干了，实际上白干的只是最后那个请求。
             seal("网络或模型调用失败（" + brief(e.getMessage()) + "）", userInput, step);
             log.error("模型调用失败，已把现场封口留在历史里", e);
-            emit(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "调用模型失败: " + e.getMessage();
         }
     }
@@ -909,7 +909,7 @@ public final class Agent {
      */
     private String abort(String userInput, int step) {
         seal("已取消", userInput, step);
-        emit(new AgentEvent.Failed("已取消"));
+        emit(new AgentEvent.Failed("已取消", unfinished));
         return "已取消。";
     }
 
@@ -999,12 +999,12 @@ public final class Agent {
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
             unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
                     System.currentTimeMillis());
-            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾"));
+            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {
             history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
             seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
-            emit(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
         }
     }

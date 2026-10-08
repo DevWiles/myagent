@@ -1,5 +1,6 @@
 package dev.wiles.myagent.client.state
 
+import dev.wiles.myagent.client.protocol.Interrupted
 import dev.wiles.myagent.client.protocol.PlanTaskWire
 import dev.wiles.myagent.client.protocol.ServerEvent
 import dev.wiles.myagent.client.protocol.TeamSeatWire
@@ -86,6 +87,7 @@ class SessionStore {
                     link = Link.CONNECTED,
                     closedReason = null,
                     busy = event.busy,
+                    interrupted = event.interrupted,
                     tokens = event.tokens,
                     sentTokens = event.sentTokens,
                     contextLimit = event.contextLimit,
@@ -179,7 +181,12 @@ class SessionStore {
                 else st.copy(entries = st.entries + Entry.Assistant(nextKey("text"), event.text))
             }
 
-            is ServerEvent.Failed -> notice(Entry.Notice.Level.ERROR, event.reason)
+            is ServerEvent.Failed -> {
+                notice(Entry.Notice.Level.ERROR, event.reason)
+                // 紧跟在原因后面（同 TUI）：光有「已取消」，用户会以为得把要求从头再说一遍
+                event.interrupted?.let { notice(Entry.Notice.Level.INFO, continueHint(it)) }
+                _state.update { it.copy(interrupted = event.interrupted) }
+            }
 
             is ServerEvent.ApprovalRequest -> _state.update {
                 it.copy(approval = Approval(
@@ -201,6 +208,7 @@ class SessionStore {
                 _state.update {
                     it.copy(
                         busy = event.busy,
+                        interrupted = if (event.busy) null else it.interrupted,
                         approval = if (event.busy) it.approval else null,
                         planConfirm = if (event.busy) it.planConfirm else null,
                         step = if (event.busy) it.step else 0,
@@ -235,6 +243,7 @@ class SessionStore {
                     it.copy(
                         entries = emptyList(),
                         step = 0,
+                        interrupted = null,
                         // 后端 reset 后 continuable 入口该收（同 TUI clearContinuable）
                         ready = it.ready?.copy(continuable = null),
                     )
@@ -258,6 +267,7 @@ class SessionStore {
                     it.copy(
                         ready = it.ready?.copy(continuable = null),
                         sessionPicker = null,
+                        interrupted = null,
                         tokens = event.tokens ?: it.tokens,
                         sentTokens = event.sentTokens ?: it.sentTokens,
                         contextLimit = event.contextLimit ?: it.contextLimit,
@@ -459,3 +469,7 @@ class SessionStore {
         status = seat.status,
     )
 }
+
+/** 「继续」那行提示。转录和输入框占位共用，措辞和 TUI 的 continueHint 一字不差。 */
+fun continueHint(cut: Interrupted): String =
+    "现场还在（断在第 ${cut.steps} 步）· 说「继续」接着做，或者直接交代新的要求"

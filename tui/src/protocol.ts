@@ -122,6 +122,8 @@ export type ServerEvent =
        * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
        */
       resumable?: { goal: string; remaining: number; total: number; savedAt: number }
+      /** 眼前这段对话断在了半路。晚连上来的界面靠它补上「继续」的提示（协议 3.1）。 */
+      interrupted?: Interrupted
       /**
        * 这个工作区上次没聊完的对话。没有就没这个字段。
        *
@@ -215,7 +217,8 @@ export type ServerEvent =
       removed?: number
     }
   | { t: 'done'; text: string; steps: number }
-  | { t: 'failed'; reason: string }
+  /** `interrupted` 在 = 现场封口留着，说一句「继续」就能接上（协议 3.2）。 */
+  | { t: 'failed'; reason: string; interrupted?: Interrupted }
   /**
    * 某个审批已经被**某块屏**答掉了（可能不是这块）。所有界面收到后立刻收框，
    * id 对不上就忽略——自己答的那块屏，框早就本地收掉了（协议 3.3）。
@@ -474,4 +477,14 @@ export function parseEvent(raw: string): ServerEvent | null {
   } catch {
     return null
   }
+}
+
+/** 断点：被打断的那一轮。`failed` 和 `ready` 共用这个形状（协议 3.2）。 */
+export type Interrupted = {
+  reason: string
+  /** 被打断的那一轮，用户原本说的话。 */
+  prompt: string
+  /** 断掉之前跑到第几步。 */
+  steps: number
+  at: number
 }

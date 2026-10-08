@@ -169,3 +169,66 @@ class UserEchoTest {
         assertEquals(1, s.state.value.entries.size)
     }
 }
+
+/** 断在半路之后提示「继续」：用例和 tui/src/store.test.ts 那组逐条对应。 */
+class ContinueHintTest {
+
+    private fun SessionStore.feed(vararg lines: String) {
+        for (line in lines) apply(parseServerEvent(line)!!)
+    }
+
+    private fun store() = SessionStore()
+
+
+    private val cut = """{"reason":"已取消","prompt":"把 Main 改了","steps":3,"at":1758100000000}"""
+
+    @Test
+    fun `failed 带断点，原因之后紧跟一行「继续」提示`() {
+        val s = store()
+        s.feed("""{"t":"failed","reason":"已取消","interrupted":$cut}""")
+        val notices = s.state.value.entries.filterIsInstance<Entry.Notice>().map { it.text }
+        assertEquals(
+            listOf("已取消", "现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求"),
+            notices,
+        )
+        assertEquals("把 Main 改了", s.state.value.interrupted?.prompt)
+    }
+
+    @Test
+    fun `续不了的失败不提示`() {
+        val s = store()
+        s.feed("""{"t":"failed","reason":"上下文超限"}""")
+        assertEquals(1, s.state.value.entries.size)
+        assertNull(s.state.value.interrupted)
+    }
+
+    @Test
+    fun `下一句话一跑起来断点就作废`() {
+        val s = store()
+        s.feed(
+            """{"t":"failed","reason":"已取消","interrupted":$cut}""",
+            """{"t":"busy","busy":true}""",
+        )
+        assertNull(s.state.value.interrupted)
+    }
+
+    @Test
+    fun `晚连上来从 ready 拿断点`() {
+        val s = store()
+        s.feed(
+            """{"t":"ready","protocol":1,"version":"x","workspace":"/w","model":"m",""" +
+                """"planMode":false,"hasApiKey":true,"busy":false,"interrupted":$cut}""",
+        )
+        assertEquals(3, s.state.value.interrupted?.steps)
+    }
+
+    @Test
+    fun `清空对话后断点不作数`() {
+        val s = store()
+        s.feed(
+            """{"t":"failed","reason":"已取消","interrupted":$cut}""",
+            """{"t":"reset_done"}""",
+        )
+        assertNull(s.state.value.interrupted)
+    }
+}

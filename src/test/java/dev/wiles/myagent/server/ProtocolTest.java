@@ -3,6 +3,7 @@ package dev.wiles.myagent.server;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.Interruption;
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.team.TeamStatus;
@@ -97,6 +98,35 @@ class ProtocolTest {
         ObjectNode n = Protocol.encode(new AgentEvent.ToolFinished(3, "read_file", true, "内容"));
 
         assertFalse(n.has("diff"));
+    }
+
+    @Test
+    @DisplayName("断在半路的 failed 带上断点：界面据此提示「说一句继续就能接上」")
+    void failedCarriesInterruption() {
+        Interruption cut = new Interruption("已取消", "把 Main 改了", 3, 1758100000000L);
+
+        ObjectNode n = Protocol.encode(new AgentEvent.Failed("已取消", cut));
+
+        JsonNode i = n.get("interrupted");
+        assertNotNull(i, "没有这个字段，用户看到「已取消」就以为这一轮白干了: " + n);
+        assertEquals("把 Main 改了", i.get("prompt").asText());
+        assertEquals(3, i.get("steps").asInt());
+        assertEquals("已取消", i.get("reason").asText());
+        assertEquals(1758100000000L, i.get("at").asLong());
+    }
+
+    @Test
+    @DisplayName("续不了的失败不带断点：撑破窗口那种，说「继续」只会原地再撞一次")
+    void failedWithoutInterruptionHasNoField() {
+        assertFalse(Protocol.encode(new AgentEvent.Failed("上下文超限")).has("interrupted"));
+    }
+
+    @Test
+    @DisplayName("子任务的断点不往外发：计划有自己的续跑，「继续」接的是主对话")
+    void subTaskFailureHasNoInterruption() {
+        Interruption cut = new Interruption("已取消", "x", 1, 1L);
+
+        assertFalse(Protocol.encode(new AgentEvent.Failed("已取消", cut), "t3").has("interrupted"));
     }
 
     @Test
