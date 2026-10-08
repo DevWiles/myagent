@@ -2,7 +2,7 @@
 """agent 任务成功率评测驱动：每个任务在独立 Docker 容器里跑一个 agent，自动审批，跑隐藏测试判定，并记录评分所需的过程数据。
 
 用法：
-  python3 bench/run_bench.py --agent myagent --mode react [--tasks a,b] [--label L] [--timeout 900]
+  python3 bench/run_bench.py --agent myagent --mode react [--tasks a,b] [--label L] [--timeout 3600]
   python3 bench/run_bench.py --agent claude                 # Claude Code 无头模式，接同一个 DeepSeek 模型
 agent：myagent（WebSocket 协议驱动）/ claude（`claude -p` + stream-json）
 mode（仅 myagent）：react / prompt / plan / team
@@ -304,7 +304,7 @@ def main():
     ap.add_argument("--label", default=None)
     ap.add_argument("--tasks", default="")
     ap.add_argument("--only-source", default="", help="hand / exercism")
-    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--timeout", type=int, default=3600, help="单题上限（秒）。默认一小时：规划/流水线一题要跑好几道工序，15 分钟偏紧")
     ap.add_argument("--jar", default=None, help="换一个后端 jar（默认 target/myagent.jar），用来做同模型的新旧版本对照")
     args = ap.parse_args()
     if args.jar:

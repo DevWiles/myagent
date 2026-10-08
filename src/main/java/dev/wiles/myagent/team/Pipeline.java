@@ -96,8 +96,12 @@ public final class Pipeline {
      */
     public static final int WORKER_STEPS = 32;
 
-    /** 单道工序的时限，毫秒。worker 也按它算（交给 {@link PlanExecutor#taskTimeout}）。 */
-    public static final long DEFAULT_STAGE_TIMEOUT_MILLIS = 900_000;
+    /**
+     * 单道工序的时限，毫秒。worker 也按它算（交给 {@link PlanExecutor#taskTimeout}）。
+     * 一小时，和 {@link PlanExecutor#DEFAULT_TASK_TIMEOUT_MILLIS} 同一个理由：是止损线不是性能阈值，
+     * 验收席要跑测试、写探针、读每个改过的文件，给紧了撞线就是整轮作废。
+     */
+    public static final long DEFAULT_STAGE_TIMEOUT_MILLIS = 3_600_000;
 
     private final TaskRunner runner;
 
