@@ -88,6 +88,12 @@ public final class RemoteApproval implements ApprovalPolicy {
     // 后到的排队等前一问答完，而不是把前一问的现场覆盖掉。
     @Override
     public synchronized ApprovalVerdict decide(ApprovalRequest incoming) {
+        // 还没弹框就已经按了停（Agent.cancel 先一步打断了跑工具的线程）：不弹。
+        // 弹出去的框会在 busy:false 时闪一下就没，用户看着像是自己点掉了什么。
+        // 按取消放行——模型拿到「用户还没表态」，下次说「继续」会原样重发，那时候再问
+        if (Thread.currentThread().isInterrupted()) {
+            return ApprovalVerdict.interrupted();
+        }
         if (!hasClients.getAsBoolean()) {
             return ApprovalVerdict.no("当前没有界面连着，没人能确认这个动作。");
         }
