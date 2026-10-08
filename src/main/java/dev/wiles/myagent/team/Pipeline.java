@@ -18,9 +18,11 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -236,6 +238,10 @@ public final class Pipeline {
 
         Task review = null;
         TeamStatus status;
+        // 蓝本 id → 它最近一次落地的那道工序。返工只重跑挑出来的那几道，其余的拿这张表当锚点
+        Map<String, Task> latest = new LinkedHashMap<>();
+        Set<String> redo = null;                // null = 整份蓝本都跑（第一轮、重拟之后、验收没点名）
+        RoundGuard guard = RoundGuard.open(changeRoot);
 
         List<Task> blueprint = advancePlan(plan, List.of());
         if (blueprint == null) {
@@ -243,18 +249,22 @@ public final class Pipeline {
         } else {
             status = null;
             while (status == null) {
-                List<Task> workers = materialize(blueprint, round, plan, review);
+                List<Task> workers = materialize(blueprint, round, plan, review, latest, redo);
                 stages.addAll(workers);
                 listener.onStagesAdded(workers);
                 Map<String, String> before = ChangeSet.snapshot(changeRoot);
-                runWorkers(goal, workers, plan, review);
+                runWorkers(goal, workers, anchorsFor(workers, latest), plan, review);
                 if (cancelled) {
                     status = TeamStatus.CANCELLED;
                     break;
                 }
+                for (Task worker : workers) {
+                    latest.put(blueprintId(worker.id()), worker);
+                }
                 String changes = ChangeSet.report(before, ChangeSet.snapshot(changeRoot));
 
-                review = reviewSeat(round, goal, plan, workers, changes);
+                // 验收看的是<b>整份</b>活的现状，不只是这一轮返工的那几道
+                review = reviewSeat(round, goal, plan, List.copyOf(latest.values()), changes);
                 stages.add(review);
                 listener.onStagesAdded(List.of(review));
                 boolean reviewed = advance(review, List.of(), reviewRunner);
@@ -262,6 +272,10 @@ public final class Pipeline {
                     status = TeamStatus.CANCELLED;
                 } else if (!reviewed) {
                     status = TeamStatus.PARTIAL;        // 没审成：活在，担保不在
+                } else if (guard.regressed(round, testScoreOf(review.result()))) {
+                    // 返工把测试改少了：工作区退回最好的那一轮，不再接着返工——
+                    // 再来一轮多半是在更差的底子上继续改，cookiecutter 上就是这么从好改到差的
+                    status = TeamStatus.PARTIAL;
                 } else {
                     switch (verdictOf(review.result())) {
                         case PASS -> status = TeamStatus.COMPLETED;
@@ -269,8 +283,10 @@ public final class Pipeline {
                             if (round >= MAX_ROUNDS) {
                                 status = TeamStatus.PARTIAL;
                             } else {
-                                // 蓝本不变：按原方案再来一遍，打回意见走锚点进 worker 的上游
+                                // 蓝本不变；只重跑验收点名的那几道（加上没跑成的和它们的下游），
+                                // 打回意见走锚点进 worker 的上游
                                 round++;
+                                redo = reworkSet(blueprint, latest, reworkIdsOf(review.result()));
                             }
                         }
                         case REPLAN -> {
@@ -284,6 +300,8 @@ public final class Pipeline {
                             listener.onStagesAdded(List.of(plan));
                             // 打回意见作上游：新方案是对着验收的问题拟的，不是从零再想一遍
                             blueprint = advancePlan(plan, List.of(review));
+                            latest.clear();     // 新蓝本，旧工序的 id 对不上了
+                            redo = null;
                             if (blueprint == null) {
                                 status = cancelled ? TeamStatus.CANCELLED : TeamStatus.PARTIAL;
                             }
@@ -292,6 +310,8 @@ public final class Pipeline {
                 }
             }
         }
+
+        guard.close();
 
         // 没轮到的工序也要落终态，不然界面上那一道永远转圈
         String reason = cancelled ? "已取消" : "上游没跑成";
@@ -355,16 +375,25 @@ public final class Pipeline {
      * <p>三件事：id 带上轮次前缀（第 2 轮起，{@code r2.t1}——蓝本会被返工反复使用，
      * 座位表上的 id 必须全场唯一）；依赖和 <code>{{引用}}</code> 跟着 id 一起改写；
      * 挂上锚点依赖（方案席、上一轮验收席），worker 的上游材料全靠这两条边。
+     *
+     * <p>{@code redo} 不为 null 时只落这几道：其余的不重跑，它们的依赖和引用改指向
+     * {@code latest} 里上一次落地的那道工序（由 {@link #anchorsFor} 作为已成功的锚点送进图）。
      */
-    private static List<Task> materialize(List<Task> blueprint, int round,
-                                          Task plan, Task review) {
+    private static List<Task> materialize(List<Task> blueprint, int round, Task plan, Task review,
+                                          Map<String, Task> latest, Set<String> redo) {
         Map<String, String> renames = new LinkedHashMap<>();
         for (Task raw : blueprint) {
-            renames.put(raw.id(), round == 1 ? raw.id() : "r" + round + "." + raw.id());
+            boolean rerun = redo == null || redo.contains(raw.id()) || !latest.containsKey(raw.id());
+            renames.put(raw.id(), rerun
+                    ? (round == 1 ? raw.id() : "r" + round + "." + raw.id())
+                    : latest.get(raw.id()).id());
         }
 
         List<Task> out = new ArrayList<>(blueprint.size());
         for (Task raw : blueprint) {
+            if (redo != null && !redo.contains(raw.id()) && latest.containsKey(raw.id())) {
+                continue;               // 这一道不返工，上一轮的成果原样留着
+            }
             String description = rewriteRefs(raw.description(), renames);
             String acceptance = raw.acceptance() == null ? null
                     : rewriteRefs(raw.acceptance(), renames);
@@ -383,6 +412,79 @@ public final class Pipeline {
                     raw.files()));
         }
         return out;
+    }
+
+    /**
+     * 这一轮的 worker 依赖、但这一轮不重跑的那些上一轮工序。
+     *
+     * <p>送进图的是<b>没有依赖的成功副本</b>：原件挂着上上一轮的验收席之类的依赖，
+     * 那些节点不在这张图里，建图会报悬空依赖。副本只带 id、描述和产出——
+     * 下游要的 <code>{{引用}}</code> 和上游材料就这么多。
+     */
+    private static List<Task> anchorsFor(List<Task> workers, Map<String, Task> latest) {
+        Set<String> running = new HashSet<>();
+        workers.forEach(w -> running.add(w.id()));
+        Map<String, Task> byId = new LinkedHashMap<>();
+        latest.values().forEach(t -> byId.put(t.id(), t));
+        List<Task> anchors = new ArrayList<>();
+        Set<String> added = new HashSet<>();
+        for (Task worker : workers) {
+            for (String dep : worker.dependencies()) {
+                Task prev = byId.get(dep);
+                if (prev != null && !running.contains(dep) && added.add(dep)) {
+                    Task copy = new Task(prev.id(), prev.description(), prev.role(), List.of(),
+                            prev.acceptance());
+                    copy.start();
+                    copy.succeed(prev.result() == null ? "" : prev.result());
+                    anchors.add(copy);
+                }
+            }
+        }
+        return anchors;
+    }
+
+    /** {@code r3.t2} → {@code t2}：返工的工序和蓝本里那一道对上号。 */
+    static String blueprintId(String id) {
+        return id.matches("r\\d+\\..+") ? id.substring(id.indexOf('.') + 1) : id;
+    }
+
+    /**
+     * 这一轮返工要重跑哪几道。
+     *
+     * <p>验收点名的（{@code 返工: t2, t5}）+ 上一轮没跑成的 + 它们在蓝本里的全部下游——
+     * 上游改了，下游拿到的就是过期材料，得跟着重来。验收没点名、或者点的名一个都对不上，
+     * 返回 null：退回老做法，整份蓝本重跑。宁可多跑，也不能因为一行没写对就什么都不修。
+     */
+    static Set<String> reworkSet(List<Task> blueprint, Map<String, Task> latest, List<String> named) {
+        Set<String> ids = new HashSet<>();
+        blueprint.forEach(t -> ids.add(t.id()));
+        Set<String> redo = new HashSet<>();
+        for (String n : named) {
+            String id = blueprintId(n);
+            if (ids.contains(id)) {
+                redo.add(id);
+            }
+        }
+        if (redo.isEmpty()) {
+            return null;
+        }
+        for (Task raw : blueprint) {
+            Task prev = latest.get(raw.id());
+            if (prev == null || prev.status() != TaskStatus.SUCCEEDED) {
+                redo.add(raw.id());
+            }
+        }
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (Task raw : blueprint) {
+                if (!redo.contains(raw.id()) && raw.dependencies().stream().anyMatch(redo::contains)) {
+                    redo.add(raw.id());
+                    grew = true;
+                }
+            }
+        }
+        return redo;
     }
 
     private static String rewriteRefs(String text, Map<String, String> renames) {
@@ -405,11 +507,13 @@ public final class Pipeline {
      * 由它决定重新执行还是重新规划。所以这里不配失败重规划（{@code withReplanner}），
      * 两套补救叠在一起，谁救的、救没救成就说不清了。
      */
-    private void runWorkers(String goal, List<Task> workers, Task plan, Task review) {
+    private void runWorkers(String goal, List<Task> workers, List<Task> anchors, Task plan,
+                            Task review) {
         if (cancelled) {
             return;
         }
         List<Task> nodes = new ArrayList<>(workers);
+        nodes.addAll(anchors);
         nodes.add(plan);
         if (review != null) {
             nodes.add(review);
@@ -517,6 +621,41 @@ public final class Pipeline {
      * 「打回」单独出现按重新执行算——那是这套提示词上一版的用词，模型的语感里还留着；
      * 三个词都没有按通过算，和验证任务「找不到否决词就是过」同向。
      */
+    /**
+     * 验收报的测试成绩：{@code 测试: 通过 133 / 共 202}。取最后一次出现的那行；
+     * 没报（项目没有测试、或者模型漏写）返回 null，那一轮就不参与保底比较。
+     */
+    static int[] testScoreOf(String text) {
+        if (text == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("测试\\s*[:：]\\s*通过\\s*(\\d+)\\s*/\\s*共\\s*(\\d+)").matcher(text);
+        int[] score = null;
+        while (m.find()) {
+            score = new int[]{Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2))};
+        }
+        return score;
+    }
+
+    /** 验收点名要返工的工序：{@code 返工: t2, r2.t5}。没写就是空表。 */
+    static List<String> reworkIdsOf(String text) {
+        if (text == null) {
+            return List.of();
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("返工\\s*[:：]\\s*(.+)").matcher(text);
+        List<String> ids = new ArrayList<>();
+        while (m.find()) {
+            ids.clear();        // 只认最后一行
+            for (String part : m.group(1).split("[,，、\\s]+")) {
+                if (part.matches("[A-Za-z0-9_.-]+")) {
+                    ids.add(part);
+                }
+            }
+        }
+        return ids;
+    }
+
     static Verdict verdictOf(String text) {
         if (text == null || text.isBlank()) {
             return Verdict.PASS;
