@@ -229,6 +229,23 @@ class StreamingTest {
     }
 
     @Test
+    @DisplayName("流式握手失败后的退避里按停：当场收手，不再发下一次")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelDuringBackoffStops() {
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("upstream busy"));
+        server.enqueue(new MockResponse().setBody("data: [DONE]\n\n"));
+        DeepSeekClientTest.cancelAfter(client, 300);
+
+        long t0 = System.nanoTime();
+        LlmException e = assertThrows(LlmException.class,
+                () -> client.chat(List.of(ChatMessage.user("x")), null, listener));
+
+        assertTrue(e.getMessage().contains("取消"), e.getMessage());
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 800, "按停了还睡满了退避");
+        assertEquals(1, server.getRequestCount(), "按停之后不该再发请求");
+    }
+
+    @Test
     @DisplayName("流式请求失败时抛 LlmException，不重试（内容可能已经打到屏幕上了）")
     void failsFastOnError() {
         server.enqueue(new MockResponse().setResponseCode(401).setBody("{\"error\":\"bad key\"}"));

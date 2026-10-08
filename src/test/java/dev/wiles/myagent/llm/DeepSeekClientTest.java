@@ -272,6 +272,66 @@ class DeepSeekClientTest {
     }
 
     @Test
+    @DisplayName("重试等待期间按停：当场收手，不再发下一次请求——原来这一下会被吞掉，白等一整次回答")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelDuringBackoffStops() {
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("upstream busy"));
+        server.enqueue(jsonResponse("""
+                {"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"不该拿到"},"finish_reason":"stop"}]}
+                """));
+        cancelAfter(client, 300);                // 第一次 503 早就回来了，此刻正睡在 1 秒的退避里
+
+        long t0 = System.nanoTime();
+        LlmException e = assertThrows(LlmException.class,
+                () -> client.chat(List.of(ChatMessage.user("在吗"))));
+
+        assertTrue(e.getMessage().contains("取消"), e.getMessage());
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 800, "按停了还睡满了退避");
+        assertEquals(1, server.getRequestCount(), "按停之后不该再发请求");
+    }
+
+    @Test
+    @DisplayName("请求进行中被掐断：不当成网络错误去重试——原来会睡一觉再发一次")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelledRequestIsNotRetried() {
+        server.enqueue(jsonResponse("{}").setHeadersDelay(5, java.util.concurrent.TimeUnit.SECONDS));
+        server.enqueue(jsonResponse("{}").setHeadersDelay(5, java.util.concurrent.TimeUnit.SECONDS));
+        cancelAfter(client, 300);
+
+        long t0 = System.nanoTime();
+        LlmException e = assertThrows(LlmException.class,
+                () -> client.chat(List.of(ChatMessage.user("在吗"))));
+
+        assertTrue(e.getMessage().contains("取消"), e.getMessage());
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 1500, "掐断后又重试了");
+        assertEquals(1, server.getRequestCount());
+    }
+
+    @Test
+    @DisplayName("上一次按停不连累下一次请求：客户端是跨轮复用的")
+    void cancelDoesNotPoisonNextCall() {
+        client.cancel();                         // 上一轮按过停，那时没有请求在途
+        server.enqueue(jsonResponse("""
+                {"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}
+                """));
+
+        assertEquals("ok", client.chat(List.of(ChatMessage.user("在吗"))).text());
+    }
+
+    /** 从另一个线程（监听 Esc 的那个）按停。 */
+    static void cancelAfter(LlmClient client, long millis) {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(millis);
+            } catch (InterruptedException ignored) {
+            }
+            client.cancel();
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @Test
     @DisplayName("没有 API key 时构造即失败，提示怎么配")
     void missingApiKey() {
         Config empty = new Config(null, Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL,
