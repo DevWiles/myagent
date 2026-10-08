@@ -52,6 +52,23 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("--once 一族：提示词文件、方式、摘要文件、步数；方式只认 react/team")
+    void onceFlags() {
+        CliOptions o = Cli.parse(new String[]{"--once", "p.txt", "--once-mode", "team",
+                "--once-out", "s.json", "--max-steps", "40", "-d", "/w"});
+        assertEquals("p.txt", o.once());
+        assertEquals("team", o.onceMode());
+        assertEquals("s.json", o.onceOut());
+        assertEquals(40, o.maxSteps());
+        assertNull(Cli.parse(new String[]{"--serve"}).once(), "不带 --once 就不是单次模式");
+        assertEquals("react", Cli.parse(new String[]{"--once", "-"}).onceMode());
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--once", "p", "--once-mode", "swarm"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}));
+    }
+
+    @Test
     @DisplayName("只影响终端渲染的老参数已经删了，敲了要当场报错")
     void terminalOnlyFlagsAreGone() {
         // 自带界面删掉之后，--no-color / --fullscreen 这些一个都不再有效果。

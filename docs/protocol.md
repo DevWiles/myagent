@@ -223,7 +223,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 ```json
 "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
-             "compact", "memory", "roles", "team"]
+             "compact", "memory", "roles", "team", "undo", "rewind"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -242,7 +242,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 |---|---|---|
 | `listening` | `port` `token` `protocol` | 打在 stdout，不走 WebSocket |
 | `ready` | 见下 | 连接建立后的首帧 |
-| `busy` | `busy`(bool)、结束时另有 `durationMs` `tokens` `contextLimit` | 忙/闲切换。`busy:true` 时界面应禁用输入 |
+| `busy` | `busy`(bool)、结束时另有 `durationMs` `tokens` `sentTokens` `completionTokens` `contextLimit` | 忙/闲切换。`busy:true` 时界面应禁用输入 |
 | `error` | `message` | 命令被拒（未知命令、正忙、没 API key 等）。只发给发命令的那个连接 |
 | `pong` | — | 对 `ping` 的回应 |
 | `reset_done` | — | `/clear` 成功。**不删存档**，见 3.9 |
@@ -273,9 +273,14 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "resumable": {
     "goal": "上次那份没跑完的计划的目标",
     "remaining": 3, "total": 7, "savedAt": 1758067200000
-  }
+  },
+  "interrupted": {"reason": "已取消", "prompt": "把 Main 改了", "steps": 3, "at": 1758100000000}
 }
 ```
+
+**`interrupted` 是眼前这段对话断在了半路**，形状和 `failed.interrupted` 一样（见 3.2）。
+手机扫码连进来时，终端那边可能早就按过停了，那条 `failed` 它没看见——
+首帧补上，两块屏才会给出同一句「说一句继续就能接上」。服务端正忙时不发。
 
 `branch` 是工作区**真正的 git 分支**（不在仓库里就是 `null`）。服务端直接读
 `.git/HEAD`，不起 git 子进程：状态栏每次重绘都要这个值，几十毫秒的子进程开销
@@ -307,7 +312,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `compacting` | `phase` `done` `total` `percent` | 压缩正在进行，画进度条。`phase:"done"` 是收尾 |
 | `compacted` | `tokensBefore` `tokensAfter` `summarized` | 上下文被压缩了 |
 | `done` | `text` `steps` | 最终答复，本轮结束 |
-| `failed` | `reason` | 跑不下去了（调用失败、被取消、超步数） |
+| `failed` | `reason` `interrupted?` | 跑不下去了（调用失败、被取消、超步数）。`interrupted` 见下 |
 
 **`tool_started` / `tool_finished` 的 `id` 是后端在发起调用那一刻编的流水号**（进程内
 全局唯一），界面靠它把「开始」和「结束」配成同一行做原地更新。并行安全的调用（读文件、
@@ -323,6 +328,28 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 > 以前 diff 只出现在 `approval_request` 的 `preview` 里。那条路**只在需要审批时才走**——
 > 用惯之后绝大多数写入会被 `~/.myagent/policy.json` 的规则直接放行，
 > 于是界面上从头到尾看不到任何改动内容。界面该把这个 diff 画在工具那一行下面。
+
+**`failed.interrupted` 在就表示「说一句继续就能接上」**：
+
+```json
+{"t":"failed","reason":"已取消",
+ "interrupted":{"reason":"已取消","prompt":"把 Main 改了","steps":3,"at":1758100000000}}
+```
+
+断掉的那一轮在服务端被**封口**留在了历史里：做完的工具结果原样保留，没轮到的补一条
+「已取消，这一步没有执行」，屏幕上出过的半段话也在。所以续做不需要任何专门的命令——
+用户发一条普通的 `prompt`（「继续」「接着来」都行），模型看着现场自己接上。
+**这个字段只回答界面一个问题：要不要提醒用户可以续。**不提醒的话，用户看到
+「已取消」「调用模型失败」就以为这一轮白干了，而现场其实全在。
+
+- 续了也白续的失败**不带**这个字段。比如最近几轮本身就撑破了上下文窗口——
+  说「继续」只会原地再撞一次同一堵墙，提示续做就是在骗人。
+- 子任务（带 `task` 的）的 `failed` **不带**：计划有自己的续跑（3.7），「继续」接的是主对话。
+- 提示该一直留到用户下一次发话；那一轮正常说完（`done`）后，断点就作废了。
+- 晚连上来的界面没看见这条 `failed`，从 `ready.interrupted` 拿同一份东西（3.1）。
+- 断点之后的第一句话，服务端会在**发给模型的那份**前面拼一段 `<turn_interrupted>` 说明
+  （断在第几步、「没有执行」怎么读、执行到一半的先检查、隔久了先核对文件）。
+  界面上显示的、`user_message` 广播的仍是用户原话——那段说明是写给模型的，不是给人看的。
 
 计划/流水线执行期间，子任务发出的 `text_delta` / `thought` / `tool_started` /
 `tool_finished` 会多带一个 **`task`** 字段（任务或工序的 id，如 `"t3"`、`"work"`）。
@@ -616,6 +643,11 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
  "tokens":8240,"contextLimit":64000}
 ```
 
+接回来的那段要是**断在了半路**（上次按了停、断了网，然后关了终端），回执里多一个
+`interrupted`，形状同 3.2：界面照样在「接上了」后面提示「说一句继续就能接上」。
+断点是跟着会话存档落盘的，接回来时要和历史**对得上账**（条数一致）才认——
+那段历史后来被 `rewind` 回退过的话，断点指的已经不是眼前的现场，不会出现。
+
 这条只是回执，**不会重播历史内容**。界面要显示上次聊了什么，
 自己留一份就好——服务端不负责替界面记住已经画过的东西。
 
@@ -892,7 +924,40 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 
 ---
 
-### 3.15 用户说的话也要广播（feature: `user_echo`）
+### 3.15 检查点与回退（feature: `rewind`，兼容 `undo`）
+
+形状照 Claude Code：**每条会动手的命令（`prompt` / `plan` / `team` / `continue`）开跑前**拍一个检查点，
+绑在会话和那一刻的对话长度上；`/rewind` 可以只回代码、只回对话、或者都回。
+
+快照存在影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，只产生 tree 对象，
+不 commit、不动分支，**不碰工作区自己的 .git**）。检查点随会话持久化：后端重启、
+`/resume` 接回老会话之后照样能回。保留期默认 30 天（`config.json` 的 `snapshotDays` /
+环境变量 `MYAGENT_SNAPSHOT_DAYS`），过期的对象和记录在启动时清掉。
+
+```
+界面 → {"t":"checkpoints"}
+后端 → {"t":"checkpoint_list","available":true,"retentionDays":30,
+        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0},
+                 {"id":2,"label":"再加个单测","time":1790733601002,"turn":1}]}
+
+界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个
+后端 → {"t":"busy","busy":true}
+后端 → {"t":"rewound","id":1,"label":"给配置模块加环境变量覆盖","scope":"both",
+        "restored":["src/config.py","tests/new_test.py"],"userTurn":0,"remaining":1,"tokens":812}
+后端 → {"t":"busy","busy":false}
+
+界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个、scope=code（老界面用）
+```
+
+- `turn` / `userTurn`：那个点之前用户说过几句。界面按它截转录——回对话之后，第 `userTurn` 句及之后的都不该再画。
+- `restored`：被还原或删除的相对路径（`scope=conversation` 时为空）。快照后新建的文件会被**删掉**，
+  改过的按快照写回，删掉的会回来；其余文件一个不动。`.gitignore`、构建产物、`.git/` 既不进快照也不会被恢复动到。
+- 回对话：agent 的记录截到那一刻的长度并立即存档，它后面的检查点作废（`remaining` 变小）；
+  只回代码时后面的点还在。被截掉的那段不再是当前会话，但影子里的快照还在。
+- 没有检查点、编号不存在、快照过期被回收、一轮正在跑，都回 `error` 说明原因；不会静默什么都没恢复。
+- 拍检查点失败（机器上没有 git 等）不影响那一轮的执行，只是那一轮回不去；`checkpoint_list.available` 为 false。
+
+### 3.16 用户说的话也要广播（feature: `user_echo`）
 
 有第二块屏之后，最先露馅的是这个：**用户消息从来没进过协议**。
 两个界面各自把「我刚说的那句」写进自己的转录，然后发一条 `prompt` 给后端——

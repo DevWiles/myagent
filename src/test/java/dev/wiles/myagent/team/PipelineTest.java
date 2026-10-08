@@ -150,6 +150,48 @@ class PipelineTest {
         assertTrue(brief.contains("t2 干完了"), brief);
     }
 
+    @Test
+    @DisplayName("验收席是 acceptor（带 bash），材料里有目标原话和程序算出来的改动清单")
+    void reviewGetsGoalAndComputedChanges(@org.junit.jupiter.api.io.TempDir java.nio.file.Path ws)
+            throws Exception {
+        java.nio.file.Files.writeString(ws.resolve("merge.py"), "old\n");
+        java.nio.file.Files.writeString(ws.resolve("tests.py"), "keep\n");
+        FakeRunner runner = happyRunner();
+        BiFunction<Task, List<Task>, TaskOutcome> base = runner.script;
+        runner.script = (task, up) -> {
+            if (task.id().equals("t1")) {
+                try {
+                    java.nio.file.Files.writeString(ws.resolve("merge.py"), "new\n");
+                    java.nio.file.Files.writeString(ws.resolve("extra.py"), "x\n");
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            return base.apply(task, up);
+        };
+
+        new Pipeline(runner).trackChanges(ws).run("给配置模块加环境变量覆盖");
+
+        Task review = runner.stageOf("review");
+        assertSame(AgentRoles.ACCEPTOR, review.role());
+        String brief = review.description();
+        assertTrue(brief.contains("【目标原话") && brief.contains("给配置模块加环境变量覆盖"), brief);
+        assertTrue(brief.contains("### 修改 merge.py") && brief.contains("-old") && brief.contains("+new"), brief);
+        assertTrue(brief.contains("### 新增 extra.py"), brief);
+        assertFalse(brief.contains("tests.py"), "没改的文件不进清单");
+        assertTrue(brief.indexOf("【改动清单") < brief.indexOf("【施工方案"), "事实在转述前面");
+    }
+
+    @Test
+    @DisplayName("不拍快照时验收材料明说没检测到改动，而不是留白让模型猜")
+    void reviewWithoutSnapshotSaysSo() {
+        FakeRunner runner = happyRunner();
+
+        run(runner);
+
+        assertTrue(runner.stageOf("review").description().contains("没有检测到任何文件改动"));
+    }
+
     // ── 三种结论 ────────────────────────────────────────────────
 
     @Test

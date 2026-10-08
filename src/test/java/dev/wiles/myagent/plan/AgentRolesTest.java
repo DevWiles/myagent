@@ -193,6 +193,30 @@ class AgentRolesTest {
     }
 
     @Test
+    @DisplayName("coder 有 run_tests 没有 bash：改完能自己验，又删不了库，还保得住按文件并行")
+    void coderCanRunTestsButHasNoShell() {
+        assertTrue(AgentRoles.CODER.matches("run_tests"));
+        assertFalse(AgentRoles.CODER.matches("bash"));
+        Task coder = new Task("c", "改", AgentRoles.CODER, List.of(), null, List.of("src/a.py"));
+        assertTrue(PlanExecutor.scoped(coder), "有了 run_tests 仍然算划了范围的写任务");
+    }
+
+    @Test
+    @DisplayName("验收席认得出、能跑 bash、但不在规划器的名册里——工人不能给自己派验收")
+    void acceptorIsRegisteredButNotPlannable() {
+        AgentRole acceptor = AgentRoles.require("acceptor");
+
+        assertSame(AgentRoles.ACCEPTOR, acceptor);
+        assertTrue(acceptor.matches("bash"), "验收要能跑测试和探针");
+        assertTrue(acceptor.matches("read_file"));
+        assertFalse(acceptor.matches("write_file"), "验收不改工作区");
+        assertTrue(acceptor.mutates(), "bash 会动世界，进场要独占");
+        assertFalse(AgentRoles.all().contains(acceptor));
+        assertFalse(AgentRoles.runnable(false).contains(acceptor));
+        assertFalse(acceptor.rules().isBlank(), "提示词文件要打包进来");
+    }
+
+    @Test
     @DisplayName("角色名认不出来时，报错要列出全部角色——这句话是发回给模型的")
     void unknownRoleErrorListsEveryRole() {
         String msg = assertThrows(IllegalArgumentException.class,

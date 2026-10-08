@@ -31,6 +31,10 @@ public final class Cli {
         String relay = null;
         boolean relayReset = false;
         boolean relayServe = false;
+        String once = null;
+        String onceMode = "react";
+        String onceOut = null;
+        int maxSteps = 0;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -61,6 +65,32 @@ public final class Cli {
                     requireValue(args, i, arg);
                     model = args[++i];
                 }
+                case "--once" -> {
+                    requireValue(args, i, arg);
+                    once = args[++i];
+                }
+                case "--once-mode" -> {
+                    requireValue(args, i, arg);
+                    onceMode = args[++i];
+                    if (!onceMode.equals("react") && !onceMode.equals("team")) {
+                        throw new IllegalArgumentException("--once-mode 只认 react 或 team，收到: " + onceMode);
+                    }
+                }
+                case "--once-out" -> {
+                    requireValue(args, i, arg);
+                    onceOut = args[++i];
+                }
+                case "--max-steps" -> {
+                    requireValue(args, i, arg);
+                    try {
+                        maxSteps = Integer.parseInt(args[++i]);
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException("--max-steps 要跟一个数字，收到: " + args[i]);
+                    }
+                    if (maxSteps < 1) {
+                        throw new IllegalArgumentException("--max-steps 必须大于 0");
+                    }
+                }
                 default -> throw new IllegalArgumentException(arg.startsWith("-")
                         ? "未知参数: " + arg + "（用 --help 查看用法）"
                         // 位置参数以前是「一次性提示词」，跑完就退。自带界面删掉之后
@@ -70,7 +100,7 @@ public final class Cli {
             }
         }
         return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port, lan,
-                relay, relayReset, relayServe);
+                relay, relayReset, relayServe, once, onceMode, onceOut, maxSteps);
     }
 
     private static int parsePort(String value) {
@@ -113,6 +143,12 @@ public final class Cli {
                       --relay-reset    换一套房间号和配对密钥，手机要重新扫码
                       --relay-serve    以中继服务端启动（部署在公网机器上），
                                        配合 --port；这条路径不起 agent
+                      --once <文件>    无头单次运行：读文件里的提示词（"-" 读 stdin），跑完就退。
+                                       危险动作一律自动批准——只在沙盒/容器里用。
+                                       最后的回答打到 stdout，退出码 0 = 正常收口
+                      --once-mode <m>  单次运行的方式：react（默认）或 team（规划→施工→验收）
+                      --once-out <文件> 单次运行的摘要（步数、token、状态）写成 JSON
+                      --max-steps <n>  单次运行的步数上限
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
                   -r, --readonly       只读模式：写文件和执行命令的工具压根不注册

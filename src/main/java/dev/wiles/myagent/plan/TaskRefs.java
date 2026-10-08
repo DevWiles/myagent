@@ -64,7 +64,10 @@ public final class TaskRefs {
         Matcher m = REF.matcher(text);
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
-            m.appendReplacement(sb, Matcher.quoteReplacement(render(m.group(1), upstream)));
+            String rendered = render(m.group(1), upstream);
+            // 上游里没有这个 id：多半不是引用，是正文里的花括号（模板语法之类），
+            // 连空格都原样留着。真正缺席的上游（失败、被跳过）在图里仍是一个 Task，render 认得出
+            m.appendReplacement(sb, Matcher.quoteReplacement(rendered == null ? m.group(0) : rendered));
         }
         m.appendTail(sb);
         return sb.toString();
@@ -79,6 +82,6 @@ public final class TaskRefs {
                         : "【" + id + " 的产出: " + result.strip() + "】";
             }
         }
-        return "【" + id + " 的产出不可用】";
+        return null;
     }
 }

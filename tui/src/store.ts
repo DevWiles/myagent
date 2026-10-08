@@ -18,7 +18,7 @@
 
 import { ASK_STAGE, askChoices, editFeedback, moveSelection, PLAN_CHOICES } from './approval.ts'
 import type { ApprovalStage, ApprovalSuggestion } from './approval.ts'
-import type { MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
+import type { Interrupted, MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
@@ -308,6 +308,14 @@ export type SessionState = {
    * 挑中的那个 id 可能已经不在了。
    */
   sessionPicker: { currentId: string; sessions: SessionRow[] } | null
+  /**
+   * 主对话断在了半路，说一句「继续」就能接上。null = 没有可续的。
+   *
+   * <p>现场在后端的历史里（封口留着），这里只管**提醒**：不提醒的话，
+   * 用户看到「已取消」就以为这一轮白干了。下一句话一发出去（busy 变真）就作废——
+   * 不管他说的是「继续」还是别的，那一轮都已经接着现场在跑了。
+   */
+  interrupted: Interrupted | null
 }
 
 const EMPTY_STATE: SessionState = {
@@ -331,6 +339,7 @@ const EMPTY_STATE: SessionState = {
   link: { phase: 'connecting' },
   bootStatus: '连接后端中…',
   sessionPicker: null,
+  interrupted: null,
 }
 
 export class SessionStore {
@@ -695,6 +704,7 @@ export class SessionStore {
             continuable: event.continuable,
           },
           busy: event.busy,
+          interrupted: event.interrupted ?? null,
           tokens: event.tokens ?? 0,
           sentTokens: event.sentTokens ?? 0,
           contextLimit: event.contextLimit ?? 0,
@@ -789,6 +799,70 @@ export class SessionStore {
         })
         return
 
+      case 'checkpoint_list': {
+        if (!event.available) {
+          this.notice('warn', '检查点不可用：这台机器上没有 git，或者影子仓库初始化失败')
+          return
+        }
+        const items = event.items ?? []
+        if (items.length === 0) {
+          this.notice('info', '这段会话还没有检查点——每跑一轮才会拍一个')
+          return
+        }
+        const lines = items.map((c) => {
+          const t = new Date(c.time)
+          const hh = String(t.getHours()).padStart(2, '0')
+          const mm = String(t.getMinutes()).padStart(2, '0')
+          return `#${c.id}  ${hh}:${mm}  第 ${c.turn + 1} 句前  ${c.label}`
+        })
+        this.notice(
+          'info',
+          `检查点（保留 ${event.retentionDays} 天）：\n${lines.join('\n')}\n` +
+            `用法：/rewind <编号> 回文件；/rewind <编号> conversation 回对话；/rewind <编号> both 都回`,
+        )
+        return
+      }
+
+      case 'rewound': {
+        const files = event.restored ?? []
+        const shown = files.slice(0, 8).join('、') + (files.length > 8 ? ` 等 ${files.length} 个` : '')
+        if (event.userTurn >= 0) {
+          // 对话回去了：第 userTurn 句用户消息及之后的都不该再画。
+          // 按用户消息数截，而不是按后端的消息条数——转录里一条用户消息对应后端的一条 user 消息，
+          // 中间的助手/工具行数量两边不一致，只有这个数是可靠的锚
+          let users = 0
+          let cut = this.state.entries.length
+          for (let i = 0; i < this.state.entries.length; i++) {
+            if (this.state.entries[i].kind === 'user') {
+              if (users === event.userTurn) {
+                cut = i
+                break
+              }
+              users++
+            }
+          }
+          this.set({ entries: this.state.entries.slice(0, cut) })
+          if (event.tokens !== undefined) this.set({ tokens: event.tokens })
+        }
+        const what =
+          event.scope === 'conversation'
+            ? '对话已回到'
+            : event.scope === 'both'
+              ? '文件和对话已回到'
+              : '文件已回到'
+        this.notice(
+          'info',
+          `${what}检查点 #${event.id}「${event.label}」` +
+            (event.scope === 'conversation'
+              ? ''
+              : files.length === 0
+                ? '（文件没有差别）'
+                : `：还原 ${files.length} 个文件（${shown}）`) +
+            (event.remaining > 0 ? `，还有 ${event.remaining} 个检查点` : ''),
+        )
+        return
+      }
+
       case 'memory_list':
         this.append({ kind: 'memory', key: this.nextKey('memory'), rows: event.entries ?? [] })
         return
@@ -824,6 +898,12 @@ export class SessionStore {
           level: 'error',
           text: event.reason,
         })
+        if (event.interrupted) {
+          // 紧跟在原因后面，就在用户眼睛停着的地方。光有「已取消」三个字，
+          // 他会以为得把要求从头再说一遍
+          this.notice('info', continueHint(event.interrupted))
+        }
+        this.set({ interrupted: event.interrupted ?? null })
         return
 
       case 'approval_request':
@@ -852,6 +932,7 @@ export class SessionStore {
         if (!event.busy) this.clearCompacting()
         this.set({
           busy: event.busy,
+          interrupted: event.busy ? null : this.state.interrupted,
           approval: event.busy ? this.state.approval : null,
           approvalStage: event.busy ? this.state.approvalStage : ASK_STAGE,
           planConfirm: event.busy ? this.state.planConfirm : null,
@@ -891,6 +972,7 @@ export class SessionStore {
 
       case 'reset_done':
         this.clearTranscript()
+        this.set({ interrupted: null })   // 那段对话不要了，它的断点也就不作数
         // 后端 reset 时会把会话存档一起删掉，入口留着的话点了只会得到一条 error
         this.set({ ready: this.clearContinuable() })
         this.notice('info', '对话已清空')
@@ -921,12 +1003,14 @@ export class SessionStore {
       case 'session_restored': {
         // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史。
         // 面板也收：挑完了还摆在屏幕上，下一次 ↑↓ 会落在一个已经接过的列表上
-        this.set({ ready: this.clearContinuable(), sessionPicker: null })
+        // 接回来的那段要是断在半路，断点跟着回来（协议 3.9）；没有就清掉上一段的
+        this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: event.interrupted ?? null })
         this.notice(
           'info',
           `接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。` +
             `上次首句：${event.firstMessage}`,
         )
+        if (event.interrupted) this.notice('info', continueHint(event.interrupted))
         if (event.tokens !== undefined) {
           this.set({ tokens: event.tokens })
         }
@@ -1109,4 +1193,14 @@ function fromWire(task: PlanTaskWire, recovery = false): PlanTask {
     dependsOn: task.dependsOn ?? [],
     ...(recovery ? { recovery: true } : {}),
   }
+}
+
+/**
+ * 「继续」那行提示。给 failed 之后的转录和输入框占位共用。
+ *
+ * <p>点名「继续」两个字：用户不知道这句话在这儿有用，就会把整个要求重说一遍——
+ * 模型照样能干，但前面读过的、改过的它得自己从头对一遍账。
+ */
+export function continueHint(cut: Interrupted): string {
+  return `现场还在（断在第 ${cut.steps} 步）· 说「继续」接着做，或者直接交代新的要求`
 }

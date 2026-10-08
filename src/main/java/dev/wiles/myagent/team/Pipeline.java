@@ -80,15 +80,40 @@ public final class Pipeline {
      * <p>沿用圆桌一席的数字：真机教训是角色自带上限按「计划里的一小步」调，
      * 而这两道工序面对的是整个目标，给小了撞上限直接作废。
      */
-    public static final int STAGE_STEPS = 16;
+    public static final int STAGE_STEPS = 24;
+
+    /**
+     * 验收席单独的步数。它要跑测试、对每条需求写探针、再读改动清单里的每个文件——
+     * 活的大小随施工规模长，16 步在四个 coder 的任务上不够用：真机跑出过验收席
+     * 已经写下「重新执行」却因撞上限被判失败、整场落成 PARTIAL 的情况。
+     */
+    public static final int REVIEW_STEPS = 28;
+
+    /**
+     * worker 的步数。以前和规划席共用 {@link #STAGE_STEPS}——16 步在真实仓库上不够：
+     * 读几张几十 KB 的表、写、跑测试、再改，AsynCodeBench wcwidth 的 coder 40 秒就撞上限，
+     * 明明已经写了 160 行却被判失败、下游全跳、验收打回、下一轮同样预算同样结果。
+     */
+    public static final int WORKER_STEPS = 32;
 
     /** 单道工序的时限，毫秒。worker 也按它算（交给 {@link PlanExecutor#taskTimeout}）。 */
     public static final long DEFAULT_STAGE_TIMEOUT_MILLIS = 900_000;
 
     private final TaskRunner runner;
 
+    /** 验收席用的执行体：步数按 {@link #REVIEW_STEPS}。测试注入执行体时和 {@link #runner} 是同一个。 */
+    private final TaskRunner reviewRunner;
+
+    /** worker 用的执行体：步数按 {@link #WORKER_STEPS}。测试注入执行体时和 {@link #runner} 是同一个。 */
+    private final TaskRunner workerRunner;
+
+    private final AgentTaskRunner workerCancellable;
+
     /** 内建执行体时留一份引用，取消要掐它。外部注入执行体（测试）时是 null。 */
     private final AgentTaskRunner cancellable;
+
+    /** 验收席的执行体，取消时一起掐。测试注入时是 null。 */
+    private final AgentTaskRunner reviewCancellable;
 
     /** 只为取消留着：拆任务那次结构化调用在它手里。测试注入执行体时是 null。 */
     private final Planner planner;
@@ -105,6 +130,12 @@ public final class Pipeline {
     private long stageTimeoutMillis = DEFAULT_STAGE_TIMEOUT_MILLIS;
 
     /**
+     * 拍改动快照的工作区。null 就不拍，验收材料里没有改动清单（测试注入执行体时的默认）。
+     * 见 {@link ChangeSet}：验收看的「改了什么」由程序算，不由工人自述。
+     */
+    private Path changeRoot;
+
+    /**
      * @param clients 每道工序现造一个模型客户端：几个 worker 并行时共用一个
      *                {@code DeepSeekClient} 会互相踩 {@code currentCall}，取消掐不准
      * @param planner PLANNING 工序拆子任务用的规划器（也负责被取消）。
@@ -117,16 +148,35 @@ public final class Pipeline {
         // 子循环的动静原样转出去，界面才画得出「t2 正在改哪个文件」。
         // 读的是字段不是构造时的值——listener() 是构造之后才调的
         built.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
+        AgentTaskRunner reviewing = new AgentTaskRunner(clients, tools, workspaceRoot, REVIEW_STEPS);
+        reviewing.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
+        AgentTaskRunner working = new AgentTaskRunner(clients, tools, workspaceRoot, WORKER_STEPS);
+        working.onEvent((stage, event) -> listener.onAgentEvent(stage, event));
         this.runner = built;
+        this.reviewRunner = reviewing;
+        this.workerRunner = working;
         this.cancellable = built;
+        this.reviewCancellable = reviewing;
+        this.workerCancellable = working;
         this.planner = planner;
+        this.changeRoot = workspaceRoot;
     }
 
     /** 给测试用：换掉执行体，整套编排（轮次、判定、返工、取消）就能测干净，一次调用都不发。 */
     Pipeline(TaskRunner runner) {
         this.runner = runner;
+        this.reviewRunner = runner;
+        this.workerRunner = runner;
         this.cancellable = null;
+        this.reviewCancellable = null;
+        this.workerCancellable = null;
         this.planner = null;
+    }
+
+    /** 指定拍改动快照的目录。给测试用：假执行体也能测「验收材料里有改动清单」。 */
+    Pipeline trackChanges(Path root) {
+        this.changeRoot = root;
+        return this;
     }
 
     public Pipeline listener(TeamListener listener) {
@@ -149,6 +199,12 @@ public final class Pipeline {
         cancelled = true;
         if (cancellable != null) {
             cancellable.cancel();
+        }
+        if (reviewCancellable != null) {
+            reviewCancellable.cancel();
+        }
+        if (workerCancellable != null) {
+            workerCancellable.cancel();
         }
         if (planner != null) {
             planner.cancel();
@@ -186,16 +242,18 @@ public final class Pipeline {
                 List<Task> workers = materialize(blueprint, round, plan, review);
                 stages.addAll(workers);
                 listener.onStagesAdded(workers);
+                Map<String, String> before = ChangeSet.snapshot(changeRoot);
                 runWorkers(goal, workers, plan, review);
                 if (cancelled) {
                     status = TeamStatus.CANCELLED;
                     break;
                 }
+                String changes = ChangeSet.report(before, ChangeSet.snapshot(changeRoot));
 
-                review = reviewSeat(round, goal, plan, workers);
+                review = reviewSeat(round, goal, plan, workers, changes);
                 stages.add(review);
                 listener.onStagesAdded(List.of(review));
-                boolean reviewed = advance(review, List.of());
+                boolean reviewed = advance(review, List.of(), reviewRunner);
                 if (cancelled) {
                     status = TeamStatus.CANCELLED;
                 } else if (!reviewed) {
@@ -254,10 +312,16 @@ public final class Pipeline {
                 List.of(), TeamPrompt.plannerAcceptance(STAGE_STEPS));
     }
 
-    private static Task reviewSeat(int round, String goal, Task plan, List<Task> workers) {
+    /**
+     * 验收席。角色是 {@link AgentRoles#ACCEPTOR}（只读 + bash）而不是 reviewer：
+     * 验收要能跑测试和探针。以前用只读的 reviewer，它只能读 {@code .pytest_cache}
+     * 猜测试有没有过、对着施工报告「手工推演」——四次隐藏测试挂掉它四次都判了通过。
+     */
+    private static Task reviewSeat(int round, String goal, Task plan, List<Task> workers,
+                                   String changes) {
         return new Task(round == 1 ? "review" : "review" + round,
-                TeamPrompt.reviewBrief(round, goal, plan, workers), AgentRoles.REVIEWER,
-                List.of(), TeamPrompt.reviewerAcceptance(STAGE_STEPS));
+                TeamPrompt.reviewBrief(round, goal, plan, workers, changes), AgentRoles.ACCEPTOR,
+                List.of(), TeamPrompt.reviewerAcceptance(REVIEW_STEPS));
     }
 
     /**
@@ -272,7 +336,7 @@ public final class Pipeline {
         }
         plan.start();
         listener.onStageStarted(plan);
-        TaskOutcome outcome = settle(plan, upstream);
+        TaskOutcome outcome = settle(plan, upstream, runner);
         if (outcome.ok() && outcome.subTasks().isEmpty()) {
             outcome = TaskOutcome.failed("方案没拆出可执行的任务");
         }
@@ -311,7 +375,8 @@ public final class Pipeline {
             if (review != null) {
                 deps.add(review.id());
             }
-            out.add(plan.subTask(renames.get(raw.id()), description, raw.role(), deps, acceptance));
+            out.add(plan.subTask(renames.get(raw.id()), description, raw.role(), deps, acceptance,
+                    raw.files()));
         }
         return out;
     }
@@ -345,7 +410,7 @@ public final class Pipeline {
         if (review != null) {
             nodes.add(review);
         }
-        PlanExecutor executor = new PlanExecutor(runner)
+        PlanExecutor executor = new PlanExecutor(workerRunner)
                 .onTaskStarted(listener::onStageStarted)
                 .onTaskFinished(listener::onStageFinished)
                 .taskTimeout(Duration.ofMillis(stageTimeoutMillis));
@@ -372,13 +437,13 @@ public final class Pipeline {
      *
      * @return 这道工序成了、且没被叫停
      */
-    private boolean advance(Task stage, List<Task> upstream) {
+    private boolean advance(Task stage, List<Task> upstream, TaskRunner with) {
         if (cancelled) {
             return false;
         }
         stage.start();
         listener.onStageStarted(stage);
-        apply(stage, settle(stage, upstream));
+        apply(stage, settle(stage, upstream, with));
         listener.onStageFinished(stage);
         return stage.status() == TaskStatus.SUCCEEDED && !cancelled;
     }
@@ -396,7 +461,7 @@ public final class Pipeline {
     }
 
     /** 在工作线程上跑一道工序，带时限地等。<b>不抛异常</b>：一道倒了要的是如实落账，不是整条线炸掉。 */
-    private TaskOutcome settle(Task stage, List<Task> upstream) {
+    private TaskOutcome settle(Task stage, List<Task> upstream, TaskRunner with) {
         // 工序在工作线程上跑，Task 的状态迁移留在编排线程——和 PlanExecutor 同一条纪律。
         // 要线程只是为了能对它计时、能从别的线程掐断它
         ExecutorService pool = Executors.newSingleThreadExecutor(r -> {
@@ -404,7 +469,7 @@ public final class Pipeline {
             t.setDaemon(true);
             return t;
         });
-        Future<TaskOutcome> future = pool.submit(() -> runner.run(stage, upstream));
+        Future<TaskOutcome> future = pool.submit(() -> with.run(stage, upstream));
         try {
             return stageTimeoutMillis > 0
                     ? future.get(stageTimeoutMillis, TimeUnit.MILLISECONDS)
@@ -414,6 +479,9 @@ public final class Pipeline {
             // cancel(true) 只是设中断标志，子循环最多再走完手上这一步
             if (cancellable != null) {
                 cancellable.cancel();
+            }
+            if (reviewCancellable != null) {
+                reviewCancellable.cancel();
             }
             future.cancel(true);
             log.warn("工序 {} 超过 {} 毫秒还没完，按失败处理", stage.id(), stageTimeoutMillis);

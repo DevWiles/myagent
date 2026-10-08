@@ -137,14 +137,24 @@ public final class PlanParser {
             throw new IllegalArgumentException("缺少 tasks 字段，或者它不是数组。");
         }
 
+        // 先收齐这张图里的 id：{{x}} 只有在 x 是图里某个任务时才算引用。
+        // 模型描述的活本身可能含花括号（模板引擎的 {{name}}、Jinja、Handlebars……），
+        // 那是任务的正文，不是占位符——按引用去拦，这类目标一个方案都拟不出来
+        java.util.Set<String> knownIds = new java.util.HashSet<>();
+        for (JsonNode n : array) {
+            if (n != null && n.hasNonNull("id")) {
+                knownIds.add(n.get("id").asText().strip());
+            }
+        }
         List<Task> tasks = new ArrayList<>(array.size());
         for (int i = 0; i < array.size(); i++) {
-            tasks.add(parseTask(array.get(i), i, parent));
+            tasks.add(parseTask(array.get(i), i, parent, knownIds));
         }
         return tasks;
     }
 
-    private static Task parseTask(JsonNode node, int index, Task parent) {
+    private static Task parseTask(JsonNode node, int index, Task parent,
+                                  java.util.Set<String> knownIds) {
         String where = "第 " + (index + 1) + " 个任务";
         if (!node.isObject()) {
             throw new IllegalArgumentException(where + "不是一个 JSON 对象。");
@@ -176,10 +186,11 @@ public final class PlanParser {
         }
 
         List<String> dependsOn = parseDependsOn(node, where, id);
-        requireRefsDeclared(where, id, description, acceptance, dependsOn);
+        requireRefsDeclared(where, id, description, acceptance, dependsOn, knownIds);
+        List<String> files = parseFiles(node, where, id);
         return parent == null
-                ? new Task(id, description, role, dependsOn, acceptance)
-                : parent.subTask(id, description, role, dependsOn, acceptance);
+                ? new Task(id, description, role, dependsOn, acceptance, files)
+                : parent.subTask(id, description, role, dependsOn, acceptance, files);
     }
 
     /**
@@ -190,8 +201,12 @@ public final class PlanParser {
      * 那时占位符能换进来的只有一片空白，而且不会报任何错，是最难查的一种静默错误。
      */
     private static void requireRefsDeclared(String where, String id, String description,
-                                            String acceptance, List<String> dependsOn) {
+                                            String acceptance, List<String> dependsOn,
+                                            java.util.Set<String> knownIds) {
         for (String ref : TaskRefs.referencedIn(description + "\n" + acceptance)) {
+            if (!knownIds.contains(ref)) {
+                continue;       // 不是图里的任务，是正文里的花括号，见 parseTasks
+            }
             if (ref.equals(id)) {
                 throw new IllegalArgumentException(where + "（" + id + "）引用了 {{" + id
                         + "}}，也就是它自己。占位符只能用来引用上游任务的产出。");
@@ -254,6 +269,29 @@ public final class PlanParser {
         List<String> result = new ArrayList<>(deps.size());
         for (JsonNode dep : deps) {
             String value = dep.asText().strip();
+            if (!value.isEmpty() && !result.contains(value)) {
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 这一步会动的文件。可选：没写就是空，按「不知道要碰什么」处理（独占进场）。
+     * 写了但不是数组要报错——模型偶尔会把它写成一个字符串，静默吞掉等于永远没并行。
+     */
+    private static List<String> parseFiles(JsonNode node, String where, String id) {
+        JsonNode files = node.get("files");
+        if (files == null || files.isNull()) {
+            return List.of();
+        }
+        if (!files.isArray()) {
+            throw new IllegalArgumentException(where + "（" + id
+                    + "）的 files 必须是数组，里面放这一步会新建或修改的文件路径。");
+        }
+        List<String> result = new ArrayList<>(files.size());
+        for (JsonNode f : files) {
+            String value = f.asText().strip();
             if (!value.isEmpty() && !result.contains(value)) {
                 result.add(value);
             }

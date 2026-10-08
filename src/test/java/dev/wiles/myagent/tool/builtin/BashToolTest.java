@@ -84,6 +84,76 @@ class BashToolTest {
     }
 
     @Test
+    @DisplayName("跑着时被叫停：进程当场杀掉，交代跑了多久、可能已部分生效，并带上已有的输出")
+    @Timeout(20)
+    void interruptKillsAndReportsHonestly() throws Exception {
+        ToolResult[] result = new ToolResult[1];
+        Thread worker = new Thread(() -> {
+            try {
+                result[0] = call("{\"command\":\"echo 已经编译了一半; sleep 3; touch late.txt; sleep 30\"}");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        worker.start();
+        Thread.sleep(800);                       // 等 echo 落地
+        long t0 = System.nanoTime();
+        worker.interrupt();                      // Agent.cancel() 就是这么叫停工具的
+        worker.join(5000);
+
+        assertFalse(worker.isAlive(), "叫停了还在跑——用户按 Esc 得干等");
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 3000, "得当场停，不是等命令自己跑完");
+        String out = result[0].content();
+        assertFalse(result[0].ok());
+        assertTrue(out.contains("已经编译了一半"), "叫停前的输出是现场的一部分，扔了模型就不知道跑到哪了: " + out);
+        assertTrue(out.contains("叫停") && out.contains("部分生效"), out);
+        assertFalse(out.contains("超时"), "这不是超时，说成超时模型会去调大时限重跑: " + out);
+        Thread.sleep(3500);
+        assertFalse(Files.exists(tmp.resolve("late.txt")), "子进程没杀掉，叫停之后还在后台改文件");
+    }
+
+    @Test
+    @DisplayName("杀要杀整棵进程树：sh 起的子进程（mvn 起的 JVM）不能变成孤儿在后台接着跑")
+    @Timeout(20)
+    void interruptKillsWholeTree() throws Exception {
+        Thread worker = new Thread(() -> {
+            try {
+                call("{\"command\":\"sleep 31 & echo $! > child.pid; wait\"}");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        worker.start();
+        Path pidFile = tmp.resolve("child.pid");
+        for (int i = 0; i < 50 && !(Files.exists(pidFile) && Files.size(pidFile) > 0); i++) {
+            Thread.sleep(100);
+        }
+        long child = Long.parseLong(Files.readString(pidFile).strip());
+        assertTrue(ProcessHandle.of(child).map(ProcessHandle::isAlive).orElse(false), "子进程该在跑");
+
+        worker.interrupt();
+        worker.join(5000);
+        Thread.sleep(500);
+
+        boolean alive = ProcessHandle.of(child).map(ProcessHandle::isAlive).orElse(false);
+        ProcessHandle.of(child).ifPresent(ProcessHandle::destroyForcibly);   // 红的时候别留垃圾
+        assertFalse(alive, "只杀了 sh，它起的子进程还活着");
+    }
+
+    @Test
+    @DisplayName("超时也要杀整棵树")
+    @Timeout(20)
+    void timeoutKillsWholeTree() throws Exception {
+        call("{\"command\":\"sleep 32 & echo $! > child.pid; wait\",\"timeout_seconds\":1}");
+        Thread.sleep(500);
+
+        long child = Long.parseLong(Files.readString(tmp.resolve("child.pid")).strip());
+        boolean alive = ProcessHandle.of(child).map(ProcessHandle::isAlive).orElse(false);
+        ProcessHandle.of(child).ifPresent(ProcessHandle::destroyForcibly);
+        assertFalse(alive, "超时只杀了 sh，子进程还在后台跑");
+    }
+
+    @Test
     @DisplayName("大量输出要截断，否则一条命令就能烧光上下文")
     @Timeout(60)
     void truncatesHugeOutput() throws Exception {

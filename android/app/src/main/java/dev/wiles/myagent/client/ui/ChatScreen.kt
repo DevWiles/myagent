@@ -409,10 +409,14 @@ private fun Composer(
                     Box {
                         if (draft.isEmpty()) {
                             Text(
-                                when (state.mode) {
+                                when {
+                                    // 手机屏窄，长提示已经在转录里了，这里只留动作本身
+                                    state.interrupted != null && !state.busy -> "说「继续」接着做…"
+                                    else -> when (state.mode) {
                                     Mode.NORMAL -> "说点什么…"
                                     Mode.PLAN -> "要规划的目标…"
                                     Mode.TEAM -> "交给流水线的目标…"
+                                    }
                                 },
                                 style = textStyle,
                                 color = AgentColors.skipped,

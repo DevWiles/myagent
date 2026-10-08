@@ -101,14 +101,16 @@ final class StreamAccumulator {
         int index = call.hasNonNull("index") ? call.get("index").asInt() : 0;
         Draft draft = drafts.computeIfAbsent(index, k -> new Draft());
 
-        if (call.hasNonNull("id")) {
+        // 阿里云百炼（Qwen / DeepSeek 兼容模式）后续分片里 id 和 name 是 ""，不是缺省：
+        // 空串不能覆盖第一片给的真名，否则工具名被抹成空、每一步都在调一个不存在的工具
+        if (call.hasNonNull("id") && !call.get("id").asText().isEmpty()) {
             draft.id = call.get("id").asText();
         }
         JsonNode function = call.get("function");
         if (function == null) {
             return;
         }
-        if (function.hasNonNull("name")) {
+        if (function.hasNonNull("name") && !function.get("name").asText().isEmpty()) {
             draft.name = function.get("name").asText();
         }
         if (function.hasNonNull("arguments")) {

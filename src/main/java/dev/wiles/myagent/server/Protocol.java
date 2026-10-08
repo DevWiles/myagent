@@ -14,6 +14,7 @@ import dev.wiles.myagent.team.TeamResult;
 import java.util.ArrayList;
 import java.util.List;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.context.Interruption;
 
 /**
  * 前后端之间的线上协议：一行一个 JSON 对象，用字段 {@code t} 区分类型。
@@ -69,7 +70,7 @@ public final class Protocol {
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
                     "session", "sessions", "compact", "memory", "roles", "team",
-                    "events_resume", "user_echo");
+                    "events_resume", "user_echo", "undo", "rewind");
 
     /**
      * 角色名册，进首帧。
@@ -138,6 +139,8 @@ public final class Protocol {
         ObjectNode node = encode(event);
         if (taskId != null && !taskId.isBlank()) {
             node.put("task", taskId);
+            // 子任务说「继续」没有对象：计划有自己的续跑（3.7），这里的断点只属于主对话
+            node.remove("interrupted");
         }
         return node;
     }
@@ -209,10 +212,24 @@ public final class Protocol {
         if (event instanceof AgentEvent.Failed e) {
             ObjectNode n = event("failed");
             n.put("reason", e.reason());
+            if (e.interrupted() != null) {
+                encodeInterruption(n.putObject("interrupted"), e.interrupted());
+            }
             return n;
         }
         // sealed interface 保证走不到这里，但 Java 17 的 instanceof 链没法让编译器确信
         throw new IllegalStateException("未知事件类型: " + event.getClass());
+    }
+
+    /**
+     * 断点：界面拿它拼「说一句继续就能接上」那行提示。
+     * {@code failed} 和 {@code ready} 用同一个形状，界面只写一份解析。
+     */
+    public static void encodeInterruption(ObjectNode n, Interruption cut) {
+        n.put("reason", cut.reason());
+        n.put("prompt", cut.userInput());
+        n.put("steps", cut.steps());
+        n.put("at", cut.at());
     }
 
     /**

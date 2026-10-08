@@ -76,6 +76,50 @@ class FileWriteApprovalTest {
     }
 
     @Test
+    @DisplayName("等确认时被叫停：不写、也不说成用户拒绝")
+    void cancelledWhileAskingIsNotRefusal() throws Exception {
+        Files.writeString(tmp.resolve("Main.java"), "原有代码");
+        ApprovalPolicy cancelled = request -> ApprovalVerdict.interrupted();
+
+        ToolResult r = write(writeTool(cancelled), "Main.java", "新代码");
+
+        assertFalse(r.ok());
+        assertEquals("原有代码", Files.readString(tmp.resolve("Main.java")), "没批就写进去了");
+        assertFalse(r.content().contains("拒绝"), "用户没拒绝，只是叫停: " + r.content());
+        assertTrue(r.content().contains("已取消"), r.content());
+    }
+
+    @Test
+    @DisplayName("批量覆盖时被叫停：后面的文件不再弹框，并如实交代哪些没处理")
+    void createProjectStopsAskingAfterCancel() throws Exception {
+        Files.writeString(tmp.resolve("a.txt"), "原 a");
+        Files.writeString(tmp.resolve("b.txt"), "原 b");
+        Files.writeString(tmp.resolve("c.txt"), "原 c");
+        ApprovalPolicy cancelled = request -> {
+            asked.add(request.subject());
+            return ApprovalVerdict.interrupted();
+        };
+        CreateProjectTool tool = new CreateProjectTool(new Workspace(tmp), new FileWriteGuard(), cancelled);
+
+        ToolResult r = tool.execute(M.readTree("""
+                {"overwrite": true, "files": [
+                  {"path": "a.txt", "content": "新 a"},
+                  {"path": "b.txt", "content": "新 b"},
+                  {"path": "c.txt", "content": "新 c"}
+                ]}
+                """));
+
+        assertEquals(List.of("a.txt"), asked,
+                "用户已经按了停，后面每个文件再弹一次框，他就得一个个点掉（或者干等超时）");
+        assertEquals("原 b", Files.readString(tmp.resolve("b.txt")), "叫停之后还在写");
+        assertEquals("原 c", Files.readString(tmp.resolve("c.txt")), "叫停之后还在写");
+        assertFalse(r.ok());
+        assertFalse(r.content().contains("拒绝"), r.content());
+        assertTrue(r.content().contains("b.txt") && r.content().contains("c.txt"),
+                "没处理的文件不交代，模型接着做时会以为它们写好了: " + r.content());
+    }
+
+    @Test
     @DisplayName("确认信息要说清楚会损失什么：原多少行、变成多少行")
     void approvalMessageShowsScale() throws Exception {
         Files.writeString(tmp.resolve("Big.java"), "a\nb\nc\nd\ne\n");

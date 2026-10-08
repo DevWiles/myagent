@@ -58,6 +58,28 @@ class ConfigTest {
     }
 
     @Test
+    @DisplayName("thinking 只认 true/false，别的值当没配")
+    void thinkingParsesStrictly() {
+        assertEquals(Boolean.FALSE, Config.thinking("false"));
+        assertEquals(Boolean.TRUE, Config.thinking(" True "));
+        assertNull(Config.thinking(null));
+        assertNull(Config.thinking(""));
+        assertNull(Config.thinking("off"));
+        assertNull(new Config("k", Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL, 8_000).thinking(),
+                "老的四参构造不碰开关");
+    }
+
+    @Test
+    @DisplayName("snapshotDays 只认正整数，默认 30 天")
+    void snapshotDaysParsesStrictly() {
+        assertEquals(30, Config.snapshotDays(null));
+        assertEquals(7, Config.snapshotDays("7"));
+        assertEquals(30, Config.snapshotDays("0"));
+        assertEquals(30, Config.snapshotDays("abc"));
+        assertEquals(30, new Config("k", Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL, 8_000).snapshotDays());
+    }
+
+    @Test
     @DisplayName("toString 不能把 key 打出去，加了字段也一样")
     void toStringStaysMasked() {
         String s = new Config("sk-abcdef1234567890", Config.DEFAULT_BASE_URL,

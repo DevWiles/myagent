@@ -176,14 +176,54 @@ class RemoteApprovalTest {
     }
 
     @Test
-    @DisplayName("用户按了中断，等在审批上的那轮要被放行成拒绝")
+    @DisplayName("用户按了中断，等在审批上的那轮要被放行成取消（不是拒绝）")
     void cancelUnblocks() throws Exception {
         RemoteApproval approval = withClients();
         CompletableFuture<ApprovalVerdict> asked = askAsync(approval);
         awaitRequest();
 
         approval.cancelPending();
-        assertFalse(asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).approved());
+        ApprovalVerdict verdict = asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertFalse(verdict.approved());
+        assertTrue(verdict.cancelled(), "被叫停不是被拒绝——用户没表态，回头说「继续」还得照原样再问");
+    }
+
+    @Test
+    @DisplayName("还没弹框就已经按了停：不弹，直接按取消放行——弹出来的框闪一下就没，还挂着等人")
+    void alreadyStoppedNeverAsks() throws Exception {
+        RemoteApproval approval = withClients();
+        CompletableFuture<ApprovalVerdict> asked = CompletableFuture.supplyAsync(() -> {
+            Thread.currentThread().interrupt();       // Agent.cancel() 先一步打断了跑工具的线程
+            try {
+                return approval.decide(ApprovalRequest.bash("rm -rf build", "会删除文件"));
+            } finally {
+                Thread.interrupted();                 // 别把标志留给公共线程池
+            }
+        });
+
+        ApprovalVerdict verdict = asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertTrue(verdict.cancelled(), "没人表态，下次说「继续」模型会原样重发，那时候再问");
+        assertTrue(published.isEmpty(), "已经按了停还把框发出去: " + published);
+    }
+
+    @Test
+    @DisplayName("框弹着时跑工具的线程被打断：同样按取消放行，不等满 120 秒")
+    void interruptWhileWaitingCancels() throws Exception {
+        RemoteApproval approval = withClients();
+        Thread[] asker = new Thread[1];
+        CompletableFuture<ApprovalVerdict> asked = CompletableFuture.supplyAsync(() -> {
+            asker[0] = Thread.currentThread();
+            try {
+                return approval.decide(ApprovalRequest.bash("rm -rf build", "会删除文件"));
+            } finally {
+                Thread.interrupted();
+            }
+        });
+        awaitRequest();
+
+        asker[0].interrupt();
+
+        assertTrue(asked.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).cancelled());
     }
 
     @Test

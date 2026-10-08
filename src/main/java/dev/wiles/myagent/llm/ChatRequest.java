@@ -24,6 +24,8 @@ public record ChatRequest(
          */
         @JsonProperty("stream_options") StreamOptions streamOptions,
         /** 非 null 时要求服务端保证输出是合法 JSON，见 {@link ResponseFormat}。 */
-        @JsonProperty("response_format") ResponseFormat responseFormat
+        @JsonProperty("response_format") ResponseFormat responseFormat,
+        /** 百炼兼容模式的思考开关；null 就不发，DeepSeek 官方接口不认这个字段。 */
+        @JsonProperty("enable_thinking") Boolean enableThinking
 ) {
 }

@@ -72,6 +72,9 @@ data class ApprovalSuggestion(val label: String, val patterns: List<String>)
 
 data class Resumable(val goal: String, val remaining: Int, val total: Int, val savedAt: Long)
 
+/** 断点：被打断的那一轮。在 = 说一句「继续」就能接上。failed 和 ready 共用（协议 3.2）。 */
+data class Interrupted(val reason: String, val prompt: String, val steps: Int, val at: Long)
+
 data class Continuable(
     val id: String,
     val branch: String?,
@@ -105,6 +108,7 @@ sealed interface ServerEvent {
         val lastSeq: Long,
         val resumable: Resumable?,
         val continuable: Continuable?,
+        val interrupted: Interrupted?,
         val tools: List<ToolInfo>,
     ) : ServerEvent
 
@@ -135,7 +139,7 @@ sealed interface ServerEvent {
     ) : ServerEvent
 
     data class Done(override val seq: Long?, val text: String, val steps: Int) : ServerEvent
-    data class Failed(override val seq: Long?, val reason: String) : ServerEvent
+    data class Failed(override val seq: Long?, val reason: String, val interrupted: Interrupted?) : ServerEvent
 
     /** 某个审批被某块屏答掉了。id 对得上就收框（协议 3.3）。 */
     data class ApprovalResolved(override val seq: Long?, val id: Int) : ServerEvent
@@ -175,6 +179,8 @@ sealed interface ServerEvent {
     data class SessionRestored(
         override val seq: Long?, val messages: Int, val turns: Int, val firstMessage: String,
         val tokens: Long?, val sentTokens: Long?, val contextLimit: Long?,
+        /** 接回来的那段断在了半路（协议 3.9）。 */
+        val interrupted: Interrupted?,
     ) : ServerEvent
 
     data class ErrorEvent(override val seq: Long?, val message: String) : ServerEvent
@@ -253,6 +259,10 @@ private fun JsonObject.strings(key: String): List<String> =
     (this[key] as? kotlinx.serialization.json.JsonArray)
         ?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
 
+private fun interruptedOf(o: JsonObject): Interrupted? = (o["interrupted"] as? JsonObject)?.let {
+    Interrupted(it.str("reason"), it.str("prompt"), it.int("steps"), it.long("at"))
+}
+
 private fun planTask(o: JsonObject) = PlanTaskWire(
     id = o.str("id"),
     type = o.str("type"),
@@ -313,6 +323,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
                     it.str("firstMessage"), it.long("savedAt"), it.int("count"),
                 )
             },
+            interrupted = interruptedOf(o),
             tools = o.objects("tools").map { ToolInfo(it.str("name"), it.str("description")) },
         )
 
@@ -346,7 +357,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
         )
 
         "done" -> ServerEvent.Done(seq, o.str("text"), o.int("steps"))
-        "failed" -> ServerEvent.Failed(seq, o.str("reason"))
+        "failed" -> ServerEvent.Failed(seq, o.str("reason"), interruptedOf(o))
 
         "approval_request" -> ServerEvent.ApprovalRequest(
             seq = seq,
@@ -384,6 +395,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
         "session_restored" -> ServerEvent.SessionRestored(
             seq, o.int("messages"), o.int("turns"), o.str("firstMessage"),
             o.longOrNull("tokens"), o.longOrNull("sentTokens"), o.longOrNull("contextLimit"),
+            interruptedOf(o),
         )
 
         "error" -> ServerEvent.ErrorEvent(seq, o.str("message"))

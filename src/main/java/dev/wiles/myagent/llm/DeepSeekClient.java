@@ -45,6 +45,18 @@ public final class DeepSeekClient implements LlmClient {
     /** 正在进行的请求，供 cancel() 掐断。 */
     private volatile Call currentCall;
 
+    /**
+     * 按过几次停。每次 chat 开始时记下当时的号（ticket），之后每一段退避、每次发请求前都对一下：
+     * 号变了就是这次 chat 期间有人按了停。
+     *
+     * <p>光靠 {@link #currentCall} 不够：重试之间要睡 1–2 秒，那时它是 null，
+     * cancel 掐了个空，醒来照样发下一次、白等一整次回答。也不用「置标志、下次清掉」：
+     * 客户端跨轮复用，标志在哪儿清都有窗口——清早了吞掉按停，清晚了连累下一轮。
+     * 号只增不减，每次 chat 跟自己开始时那个号比，两头都不会错。
+     */
+    private final java.util.concurrent.atomic.AtomicInteger cancels =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     public DeepSeekClient(Config config) {
         this(config, defaultHttpClient());
     }
@@ -63,7 +75,9 @@ public final class DeepSeekClient implements LlmClient {
                 .connectTimeout(Duration.ofSeconds(15))
                 .writeTimeout(Duration.ofSeconds(30))
                 // 模型出长回答可能要一两分钟，读超时必须给足
-                .readTimeout(Duration.ofMinutes(5))
+                // 两个 SSE 分片之间最多等多久。百炼上十几万 token 的上下文首 token 能等好几分钟，
+                // 5 分钟在 AsynCodeBench 的验收席上真掐断过一次（整场落成 PARTIAL）
+                .readTimeout(Duration.ofMinutes(10))
                 .build();
     }
 
@@ -116,7 +130,8 @@ public final class DeepSeekClient implements LlmClient {
                 maxTokens,
                 false,                              // 流式输出留到后面再做
                 null,                               // 非流式的响应本来就带 usage
-                responseFormat());
+                responseFormat(),
+                config.thinking());
 
         String body = writeJson(payload);
         log.debug("-> {} ({} 条消息, {} 个工具)", config.chatCompletionsUrl(), messages.size(),
@@ -148,7 +163,8 @@ public final class DeepSeekClient implements LlmClient {
                 temperature, maxTokens,
                 true,                               // 唯一的区别就是这个 true
                 StreamOptions.INCLUDE_USAGE,        // 不给这个字段，流式就一个 token 数都不回
-                responseFormat());
+                responseFormat(),
+                config.thinking());
 
         String body = writeJson(payload);
         log.debug("-> {} (流式, {} 条消息, {} 个工具)", config.chatCompletionsUrl(),
@@ -162,34 +178,64 @@ public final class DeepSeekClient implements LlmClient {
                 .post(RequestBody.create(body, JSON))
                 .build();
 
-        // 流式不做重试：内容可能已经打到用户屏幕上了，重来一次会把前半段重复输出一遍。
-        // 失败就抛出去，由 Agent 统一把这一轮封口（现场留在历史里，用户说「继续」就能接上）。
-        Call call = http.newCall(request);
-        currentCall = call;
-        try (Response response = call.execute()) {
-            if (!response.isSuccessful()) {
+        // 流式只重试**收到响应头之前**的失败：TLS 握手被掐、连接被重置、限流 / 5xx——
+        // 这时一个字都还没打到用户屏幕上，重来不会重复输出。
+        // 读流途中断了不重试：前半段已经出去了，由 Agent 统一把这一轮封口。
+        int ticket = cancels.get();
+        for (int attempt = 0; ; attempt++) {
+            if (attempt > 0) {
+                sleepBackoff(attempt, ticket);
+                log.warn("流式请求重试第 {} 次", attempt);
+            }
+            Call call = http.newCall(request);
+            currentCall = call;
+            if (cancels.get() != ticket) {
+                call.cancel();       // 按停赶在 currentCall 赋值之前到了，cancel() 掐了个空，这里补上
+            }
+            Response response;
+            try {
+                response = call.execute();
+            } catch (IOException e) {
+                currentCall = null;
+                if (call.isCanceled()) {
+                    throw new LlmException("请求已取消", e);
+                }
+                if (attempt < MAX_RETRIES) {
+                    log.warn("流式请求还没拿到响应就失败，准备重试: {}", e.getMessage());
+                    continue;
+                }
+                throw new LlmException("流式请求失败: " + e.getMessage(), e);
+            }
+            try (response) {
+                if (!response.isSuccessful()) {
+                    ResponseBody rb = response.body();
+                    String text = rb == null ? "" : rb.string();
+                    if (isRetryable(response.code()) && attempt < MAX_RETRIES) {
+                        log.warn("HTTP {}，准备重试: {}", response.code(), brief(text));
+                        continue;
+                    }
+                    throw new LlmException(explain(response.code()) + " (HTTP " + response.code()
+                            + "): " + brief(text), response.code(), null);
+                }
                 ResponseBody rb = response.body();
-                String text = rb == null ? "" : rb.string();
-                throw new LlmException(explain(response.code()) + " (HTTP " + response.code()
-                        + "): " + brief(text), response.code(), null);
+                if (rb == null) {
+                    throw new LlmException("流式响应没有 body");
+                }
+                return readEventStream(rb.charStream(), listener);
+            } catch (IOException e) {
+                if (call.isCanceled()) {
+                    throw new LlmException("请求已取消", e);
+                }
+                throw new LlmException("流式请求失败: " + e.getMessage(), e);
+            } finally {
+                currentCall = null;
             }
-            ResponseBody rb = response.body();
-            if (rb == null) {
-                throw new LlmException("流式响应没有 body");
-            }
-            return readEventStream(rb.charStream(), listener);
-        } catch (IOException e) {
-            if (call.isCanceled()) {
-                throw new LlmException("请求已取消", e);
-            }
-            throw new LlmException("流式请求失败: " + e.getMessage(), e);
-        } finally {
-            currentCall = null;
         }
     }
 
     @Override
     public void cancel() {
+        cancels.incrementAndGet();
         Call call = currentCall;
         if (call != null) {
             call.cancel();      // 正阻塞在读响应的线程会立刻抛 IOException 出来
@@ -232,10 +278,11 @@ public final class DeepSeekClient implements LlmClient {
     /** 发请求并返回响应体字符串，内含有限次重试。 */
     private String execute(String jsonBody) {
         IOException lastIoError = null;
+        int ticket = cancels.get();
 
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             if (attempt > 0) {
-                sleepBackoff(attempt);
+                sleepBackoff(attempt, ticket);
                 log.warn("重试第 {} 次", attempt);
             }
 
@@ -248,6 +295,9 @@ public final class DeepSeekClient implements LlmClient {
 
             Call call = http.newCall(request);
             currentCall = call;
+            if (cancels.get() != ticket) {
+                call.cancel();
+            }
             try (Response response = call.execute()) {
                 ResponseBody rb = response.body();
                 String text = rb == null ? "" : rb.string();
@@ -263,6 +313,10 @@ public final class DeepSeekClient implements LlmClient {
                         + brief(text), response.code(), null);
 
             } catch (IOException e) {
+                if (call.isCanceled()) {
+                    // 原来这里不分辨：被掐断的请求也当网络错误，睡一觉再发一次
+                    throw new LlmException("请求已取消", e);
+                }
                 lastIoError = e;
                 if (attempt < MAX_RETRIES) {
                     log.warn("网络异常，准备重试: {}", e.getMessage());
@@ -287,9 +341,20 @@ public final class DeepSeekClient implements LlmClient {
         };
     }
 
-    private static void sleepBackoff(int attempt) {
+    /** 退避 1s、2s，切成小段睡，每段醒来看一眼有没有人按停。 */
+    private void sleepBackoff(int attempt, int ticket) {
+        long end = System.nanoTime() + (1000L << (attempt - 1)) * 1_000_000L;
         try {
-            Thread.sleep(1000L * (1L << (attempt - 1)));   // 1s, 2s
+            while (true) {
+                if (cancels.get() != ticket) {
+                    throw new LlmException("请求已取消");
+                }
+                long left = (end - System.nanoTime()) / 1_000_000L;
+                if (left <= 0) {
+                    return;
+                }
+                Thread.sleep(Math.min(50, left));
+            }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new LlmException("请求被中断", ie);

@@ -15,6 +15,7 @@ import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
+import { continueHint } from "../store.ts"
 import { tildify } from "../path.ts"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
@@ -376,6 +377,28 @@ export function App(props: AppProps) {
       case "compact":
         session.compact()
         return
+      case "undo":
+        session.undo()
+        return
+      case "rewind": {
+        const parts = args.trim().split(/\s+/).filter(Boolean)
+        if (parts.length === 0) {
+          session.checkpoints()
+          return
+        }
+        const id = Number(parts[0])
+        const scope = (parts[1] ?? "code").toLowerCase()
+        if (!Number.isInteger(id) || id < 1) {
+          session.notice("warn", `/rewind 要跟检查点编号，比如 /rewind 2；不带参数可以看清单`)
+          return
+        }
+        if (scope !== "code" && scope !== "conversation" && scope !== "both") {
+          session.notice("warn", `/rewind 的范围只认 code / conversation / both，收到「${scope}」`)
+          return
+        }
+        session.rewind(id, scope)
+        return
+      }
       case "memory": {
         // 子命令在这儿解析而不是各注册一条命令，理由见 commands.ts 里那段注释。
         // 认不出的参数当场说清楚，不发给后端——后端也会拒，但那要多一个往返，
@@ -857,7 +880,9 @@ export function App(props: AppProps) {
                 ? "输入即搜索（标题或分支）· ↑↓ 选 · Enter 接着聊 · Esc 取消"
                 : state().busy
                   ? "正在跑…（Esc 或 Ctrl-C 中断）"
-                  : "交代一件事，比如「把 README 里的启动命令补全」"
+                  : state().interrupted
+                    ? continueHint(state().interrupted!)
+                    : "交代一件事，比如「把 README 里的启动命令补全」"
           }
           busy={state().busy}
           suspended={pending()}

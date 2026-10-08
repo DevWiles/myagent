@@ -9,3 +9,7 @@ dependency-reduced-pom.xml
 
 # 调试时抓的终端 ANSI 输出，不是源码
 raw_normal.bin
+bench/results/
+bench/compact-work/
+bench/jars/
+bench/tasks/

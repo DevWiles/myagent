@@ -119,9 +119,17 @@ public final class CreateProjectTool implements Tool {
             }
         }
 
+        // 等确认时被叫停了。后面的文件一个都不再碰——更不能再弹框，
+        // 用户已经按了停，再问就是逼他一个个点掉，或者干等超时
+        List<String> untouched = new ArrayList<>();
+        boolean stopped = false;
         if (!noFiles) {
             for (JsonNode file : files) {
                 String pathArg = Args.requireString(file, "path");
+                if (stopped) {
+                    untouched.add(pathArg);
+                    continue;
+                }
                 String content = Args.optString(file, "content", "");
                 Path target = workspace.resolve(pathArg);
 
@@ -143,6 +151,11 @@ public final class CreateProjectTool implements Tool {
                 if (risk.needsApproval()) {
                     ApprovalVerdict verdict = approval.decide(ApprovalRequest.write(
                             "覆盖文件", pathArg, risk.reason(), diffAgainst(target, content)));
+                    if (verdict.cancelled()) {
+                        stopped = true;
+                        untouched.add(pathArg);
+                        continue;
+                    }
                     if (!verdict.approved()) {
                         failed.add(pathArg + " (" + verdict.deniedMessage("用户拒绝覆盖") + ")");
                         continue;
@@ -177,6 +190,13 @@ public final class CreateProjectTool implements Tool {
         }
         if (!failed.isEmpty()) {
             sb.append("创建失败: ").append(String.join(", ", failed)).append('\n');
+        }
+        if (!untouched.isEmpty()) {
+            // 不列出来的话，模型接着做时会以为它们已经写好了
+            sb.append(ApprovalVerdict.interrupted().deniedMessage(""))
+                    .append(" 没有处理: ").append(String.join(", ", untouched)).append('\n');
+        }
+        if (!failed.isEmpty() || !untouched.isEmpty()) {
             return ToolResult.error(sb.toString().trim());
         }
         return ToolResult.ok(sb.toString().trim());

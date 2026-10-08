@@ -5,16 +5,28 @@ import dev.wiles.myagent.llm.ChatMessage;
 import dev.wiles.myagent.llm.ChatResponse;
 import dev.wiles.myagent.llm.LlmClient;
 import dev.wiles.myagent.llm.LlmException;
+import dev.wiles.myagent.llm.StreamListener;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.HistoryRepair;
+import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
+import dev.wiles.myagent.tool.Workspace;
+import dev.wiles.myagent.tool.builtin.ReadFileTool;
+import dev.wiles.myagent.tool.builtin.WriteFileTool;
+import dev.wiles.myagent.tool.safety.ApprovalPolicy;
+import dev.wiles.myagent.tool.safety.ApprovalVerdict;
+import dev.wiles.myagent.tool.safety.FileWriteGuard;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -676,6 +688,382 @@ class AgentTest {
 
         assertEquals("已取消。", agent.run("第一次"));
         assertEquals("这次好了", agent.run("第二次"), "取消不该把会话搞坏");
+    }
+
+    @Test
+    @DisplayName("等审批时按停，再说「继续」：模型看到的是「没执行」，不是「用户拒绝」")
+    void continueAfterCancelDuringApproval(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("Main.java"), "原有代码");
+        FakeLlm llm = new FakeLlm()
+                .calls("改一下再读回来",
+                        ToolCall.of("c1", "write_file", "{\"path\":\"Main.java\",\"content\":\"新代码\"}"),
+                        ToolCall.of("c2", "read_file", "{\"path\":\"Main.java\"}"))
+                .says("接着改完了");
+        Agent[] holder = new Agent[1];
+        // 照 RemoteApproval 的真实顺序：用户按停 → cancel() 先到 → 卡着的审批被放行成「取消」
+        ApprovalPolicy stoppedWhileAsking = request -> {
+            holder[0].cancel();
+            return ApprovalVerdict.interrupted();
+        };
+        Workspace workspace = new Workspace(dir);
+        ToolRegistry tools = new ToolRegistry()
+                .register(new WriteFileTool(workspace, new FileWriteGuard(), stoppedWhileAsking))
+                .register(new ReadFileTool(workspace));
+        Agent agent = agent(llm, tools);
+        holder[0] = agent;
+
+        assertEquals("已取消。", agent.run("把 Main 改了"));
+        agent.run("继续");
+
+        List<ChatMessage> sent = llm.received.get(1);
+        String c1 = resultOf(sent, "c1");
+        String c2 = resultOf(sent, "c2");
+        assertFalse(c1.contains("拒绝"),
+                "用户只是按了停。写成拒绝，模型听到「继续」会绕开这次修改: " + c1);
+        assertTrue(c1.contains("已取消") && c1.contains("没有执行"), c1);
+        assertTrue(c2.contains("已取消") && c2.contains("没有执行"), "排在后面的调用是封口补的: " + c2);
+        assertTrue(sent.get(sent.size() - 1).content().endsWith("\n\n继续"),
+                "「继续」不认关键词，原话原样留着，只是前面拼了中断说明");
+        assertEquals("原有代码", Files.readString(dir.resolve("Main.java")));
+    }
+
+    // ---------- 流式输出到一半断掉 ----------
+
+    /** 能控制流式分片的假模型：每一步拿到 listener，自己决定吐几个字、然后成功还是断掉。 */
+    static final class StreamingLlm implements LlmClient {
+        final List<java.util.function.Function<StreamListener, ChatResponse>> script = new ArrayList<>();
+        final List<List<ChatMessage>> received = new ArrayList<>();
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+            throw new AssertionError("Agent 应当走流式那条路");
+        }
+
+        @Override
+        public ChatResponse chat(List<ChatMessage> messages, List<ToolSpec> tools, StreamListener listener) {
+            received.add(List.copyOf(messages));
+            return script.remove(0).apply(listener);
+        }
+
+        @Override
+        public String modelName() {
+            return "fake";
+        }
+
+        StreamingLlm then(java.util.function.Function<StreamListener, ChatResponse> step) {
+            script.add(step);
+            return this;
+        }
+
+        static ChatResponse reply(ChatMessage message) {
+            return new ChatResponse("id", "fake", List.of(new ChatResponse.Choice(0, message,
+                    message.hasToolCalls() ? "tool_calls" : "stop")), null);
+        }
+    }
+
+    @Test
+    @DisplayName("说到一半按停：屏幕上出过的半段话留在历史里，接着做时模型知道自己说到哪了")
+    void partialTextSurvivesCancel() {
+        Agent[] holder = new Agent[1];
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("问题出在 Parser 第 42 行，");
+                    listener.onTextDelta("空指针是因为");
+                    holder[0].cancel();                       // 用户按停，请求被掐断
+                    throw new LlmException("请求已取消");
+                })
+                .then(listener -> StreamingLlm.reply(ChatMessage.assistant("接着说：token 为 null 时没判空")));
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys");
+        holder[0] = agent;
+
+        assertEquals("已取消。", agent.run("为什么崩了"));
+        agent.run("继续");
+
+        List<ChatMessage> sent = llm.received.get(1);
+        assertTrue(HistoryRepair.isIntact(sent.subList(1, sent.size() - 1)), "去掉 system 和刚说的「继续」，前面得自洽");
+        ChatMessage partial = sent.get(sent.size() - 2);
+        assertEquals(ChatMessage.ROLE_ASSISTANT, partial.role());
+        assertTrue(partial.content().startsWith("问题出在 Parser 第 42 行，空指针是因为"),
+                "用户看着它说了半句，模型自己却不知道——「继续」时它只能从头再分析一遍: " + partial.content());
+        assertTrue(partial.content().contains("已取消") && partial.content().contains("没说完"),
+                "得标明是被打断的，否则模型会把半句话当成说完了的结论: " + partial.content());
+        assertEquals(1, sent.stream().filter(m -> ChatMessage.ROLE_ASSISTANT.equals(m.role())).count(),
+                "半段话自己就是封口，不该再多补一条「上一轮没有做完」");
+    }
+
+    @Test
+    @DisplayName("说到一半断网：半段话同样留下，标的是断网的原因")
+    void partialTextSurvivesNetworkFailure() {
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("我的方案是先改接口，");
+                    throw new LlmException("流式请求失败: connection reset");
+                });
+        Agent agent = new Agent(llm, new ToolRegistry(), "sys");
+
+        agent.run("怎么改");
+
+        ChatMessage last = agent.history().get(agent.history().size() - 1);
+        assertTrue(last.content().startsWith("我的方案是先改接口，"), last.content());
+        assertTrue(last.content().contains("网络或模型调用失败"), last.content());
+        assertTrue(agent.unfinished().isPresent(), "断网要能接着做");
+    }
+
+    @Test
+    @DisplayName("上一个请求说完整了的话不能被当成半段话再补一遍")
+    void completedTextIsNotDuplicated() {
+        Agent[] holder = new Agent[1];
+        StreamingLlm llm = new StreamingLlm()
+                .then(listener -> {
+                    listener.onTextDelta("我先看看配置");
+                    return StreamingLlm.reply(ChatMessage.assistant("我先看看配置",
+                            List.of(ToolCall.of("c1", "t", "{}"))));
+                });
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            holder[0].cancel();                               // 工具跑着时按停，此刻没有请求在途
+            return ToolResult.ok("ok");
+        }));
+        Agent agent = new Agent(llm, tools, "sys");
+        holder[0] = agent;
+
+        agent.run("看看");
+
+        long mentions = agent.history().stream()
+                .filter(m -> m.content() != null && m.content().contains("我先看看配置")).count();
+        assertEquals(1, mentions, "那句话已经随 assistant 消息进了历史，再补一遍模型会以为自己说了两次");
+        assertEquals("(上一轮已取消，没有做完)",
+                agent.history().get(agent.history().size() - 1).content());
+    }
+
+    @Test
+    @DisplayName("被打断时发出的 failed 带着断点，正常说完后断点清掉")
+    void failedEventCarriesInterruption() {
+        Agent[] holder = new Agent[1];
+        FakeLlm llm = new FakeLlm()
+                .calls(null, ToolCall.of("c1", "t", "{}"))
+                .says("接上了");
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            holder[0].cancel();
+            return ToolResult.ok("ok");
+        }));
+        List<AgentEvent> events = new ArrayList<>();
+        Agent agent = agent(llm, tools).onEvent(events::add);
+        holder[0] = agent;
+
+        agent.run("把 Main 改了");
+
+        AgentEvent.Failed failed = events.stream()
+                .filter(AgentEvent.Failed.class::isInstance).map(AgentEvent.Failed.class::cast)
+                .findFirst().orElseThrow();
+        assertNotNull(failed.interrupted(), "界面全靠它决定要不要提示「继续」");
+        assertEquals("把 Main 改了", failed.interrupted().userInput());
+
+        agent.run("继续");
+        assertTrue(agent.unfinished().isEmpty(), "接上并说完了，再提示「继续」就是误导");
+    }
+
+    // ---------- 断点之后的第一句话：前面拼上中断说明 ----------
+
+    /** 跑一轮、在第一个工具上按停；返回 agent，下一句话由调用方说。 */
+    private Agent interruptedAgent(FakeLlm llm, long[] now) {
+        Agent[] holder = new Agent[1];
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> {
+            holder[0].cancel();
+            return ToolResult.ok("ok");
+        }));
+        Agent agent = agent(llm, tools).clock(() -> now[0]);
+        holder[0] = agent;
+        agent.run("把 Parser 的空指针修了");
+        return agent;
+    }
+
+    private static String lastUser(List<ChatMessage> sent) {
+        return sent.get(sent.size() - 1).content();
+    }
+
+    @Test
+    @DisplayName("断点之后说「继续」：前面拼上中断说明，以用户的口吻交代现场怎么读")
+    void resumeNotePrefixesNextMessage() {
+        long[] now = {1_000_000L};
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("接上了");
+        Agent agent = interruptedAgent(llm, now);
+
+        agent.run("继续");
+
+        String sent = lastUser(llm.received.get(1));
+        assertTrue(sent.endsWith("\n\n继续"), "用户的原话得原样留在最后: " + sent);
+        assertTrue(sent.startsWith("<turn_interrupted>"), "要和用户的话分得开: " + sent);
+        assertTrue(sent.contains("第 2 步断了") && sent.contains("叫停"),
+                "第 1 步的工具跑完了，是在第 2 步开头叫停的: " + sent);
+        assertTrue(sent.contains("没有执行"), "得告诉模型怎么读封口补的那几条: " + sent);
+        assertTrue(sent.contains("先检查"), "执行到一半的可能已部分生效（照 Codex）: " + sent);
+        assertTrue(sent.contains("不要重做"), sent);
+        assertFalse(sent.contains("把 Parser 的空指针修了"),
+                "不重发原任务——Cline 踩过：原话再念一遍，模型会把做完的部分从头再做（#12975）");
+    }
+
+    @Test
+    @DisplayName("说明只拼一次：接上并说完之后，再下一句就是原话")
+    void resumeNoteOnlyOnce() {
+        long[] now = {1_000_000L};
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("接上了").says("好");
+        Agent agent = interruptedAgent(llm, now);
+
+        agent.run("继续");
+        agent.run("再看看测试");
+
+        assertEquals("再看看测试", lastUser(llm.received.get(2)));
+    }
+
+    @Test
+    @DisplayName("没断过就不拼——平常的每一句话都原样发")
+    void noNoteWithoutInterruption() {
+        FakeLlm llm = new FakeLlm().says("好");
+        agent(llm, new ToolRegistry()).run("在吗");
+
+        assertEquals("在吗", lastUser(llm.received.get(0)));
+    }
+
+    @Test
+    @DisplayName("隔了很久才接：提醒文件可能被改过（照 Cline）；刚断就接不啰嗦")
+    void longGapWarnsAboutStaleWorkspace() {
+        long[] now = {1_000_000L};
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("接上了");
+        Agent agent = interruptedAgent(llm, now);
+        now[0] += 45 * 60_000L;
+
+        agent.run("继续");
+
+        String sent = lastUser(llm.received.get(1));
+        assertTrue(sent.contains("45 分钟") && sent.contains("核对"), sent);
+
+        long[] soon = {1_000_000L};
+        FakeLlm quick = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("接上了");
+        Agent fast = interruptedAgent(quick, soon);
+        soon[0] += 30_000L;
+        fast.run("继续");
+        assertFalse(lastUser(quick.received.get(1)).contains("核对"), "刚断就接，提醒就是噪音");
+    }
+
+    @Test
+    @DisplayName("从存档接回来的断点照样生效：下一句前面拼说明，按真实的间隔提醒核对")
+    void restoredInterruptionStillPrefixes() {
+        long[] now = {1_000_000L + 2 * 3_600_000L};
+        FakeLlm llm = new FakeLlm().says("接上了");
+        Agent agent = agent(llm, new ToolRegistry()).clock(() -> now[0]);
+        Interruption cut = new Interruption("已取消", "把 Parser 修了", 3, 1_000_000L, 2);
+
+        agent.restore(List.of(
+                        ChatMessage.user("把 Parser 修了"),
+                        ChatMessage.assistant("(上一轮已取消，没有做完)")),
+                null, cut);
+        assertEquals(cut, agent.unfinished().orElseThrow(), "界面靠它提示「继续」");
+
+        agent.run("继续");
+        String sent = lastUser(llm.received.get(0));
+        assertTrue(sent.startsWith("<turn_interrupted>") && sent.contains("约 2 小时"), sent);
+    }
+
+    @Test
+    @DisplayName("存档里的断点要对得上历史：条数不一样（被回退过、手改过）就不认")
+    void restoredInterruptionMustMatchHistory() {
+        Agent agent = agent(new FakeLlm(), new ToolRegistry());
+
+        // 断点记的是 4 条，存档里只有 2 条——中间被回退过，那个断点指的是另一段现场
+        agent.restore(List.of(ChatMessage.user("在吗"), ChatMessage.assistant("在的，有什么事")),
+                null, new Interruption("已取消", "在吗", 1, 1L, 4));
+
+        assertTrue(agent.unfinished().isEmpty(),
+                "那一轮明明说完了，还提示「继续」就是在误导");
+    }
+
+    // ---------- 工具跑着时按停 ----------
+
+    /** 从另一个线程（监听 Esc 的那个）在 delay 毫秒后按停。 */
+    private static void cancelLater(Agent agent, long delay) {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException ignored) {
+            }
+            agent.cancel();
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @Test
+    @DisplayName("工具跑着时按停：当场打断它，不是干等它跑完；工具自己交代的结果原样回填")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelInterruptsRunningTool() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "slow", "{}"));
+        ToolRegistry tools = new ToolRegistry().register(tool("slow", a -> {
+            try {
+                Thread.sleep(30_000);            // 好比一次 mvn test
+                return ToolResult.ok("跑完了");
+            } catch (InterruptedException e) {
+                return ToolResult.error("跑了一半被叫停，已产生的输出: BUILD 进行中");
+            }
+        }));
+        Agent agent = agent(llm, tools);
+        cancelLater(agent, 300);
+
+        long t0 = System.nanoTime();
+        assertEquals("已取消。", agent.run("跑测试"));
+
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 3000, "按了停还在干等那 30 秒");
+        assertTrue(resultOf(agent.conversation(), "c1").contains("跑了一半被叫停，已产生的输出: BUILD 进行中"),
+                "工具知道自己跑到哪了，它的话比任何占位都准");
+        assertFalse(Thread.currentThread().isInterrupted(),
+                "中断标志不能漏到跑循环的线程上——那是个复用的工作线程，下一轮一开跑就会误以为被叫停");
+    }
+
+    @Test
+    @DisplayName("工具不理会打断：等一小会儿就不等了，如实说结果未知、可能还在后台")
+    @org.junit.jupiter.api.Timeout(10)
+    void stubbornToolIsAbandoned() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "stubborn", "{}"));
+        ToolRegistry tools = new ToolRegistry().register(tool("stubborn", a -> {
+            long end = System.currentTimeMillis() + 20_000;
+            while (System.currentTimeMillis() < end) {   // 好比卡在网络读上，中断叫不醒
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException ignored) {
+                    // 故意吞掉
+                }
+            }
+            return ToolResult.ok("终于完了");
+        }));
+        Agent agent = agent(llm, tools).toolStopGrace(500);
+        cancelLater(agent, 200);
+
+        long t0 = System.nanoTime();
+        agent.run("查点东西");
+
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 3000, "工具不配合也不能把用户扣住");
+        String result = resultOf(agent.conversation(), "c1");
+        assertTrue(result.contains("已取消") && result.contains("结果未知") && result.contains("后台"),
+                "不能写「没有执行」——它确实跑了，而且可能还在跑: " + result);
+        assertTrue(HistoryRepair.isIntact(agent.conversation()));
+    }
+
+    @Test
+    @DisplayName("没按停时工具照常跑完，换了线程不改变任何结果")
+    void toolsStillRunNormally() {
+        FakeLlm llm = new FakeLlm().calls(null, ToolCall.of("c1", "t", "{}")).says("好了");
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> ToolResult.ok("结果")));
+
+        Agent agent = agent(llm, tools);
+        assertEquals("好了", agent.run("做"));
+        assertEquals("结果", resultOf(agent.conversation(), "c1"));
+    }
+
+    private static String resultOf(List<ChatMessage> messages, String toolCallId) {
+        return messages.stream()
+                .filter(m -> toolCallId.equals(m.toolCallId()))
+                .map(ChatMessage::content)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(toolCallId + " 没有结果，下一次请求会 400"));
     }
 
     @Test

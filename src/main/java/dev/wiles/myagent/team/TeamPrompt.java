@@ -62,9 +62,21 @@ public final class TeamPrompt {
      * 那正是重新执行和重新规划的分水岭。漏掉失败的验收会对着半份现场说通过。
      */
     public static String reviewBrief(int round, String goal, Task plan, List<Task> workers) {
-        StringBuilder sb = new StringBuilder("验收第 ").append(round).append(" 轮施工: ")
-                .append(goal)
-                .append("\n\n【施工方案】\n").append(plan.result())
+        return reviewBrief(round, goal, plan, workers, "");
+    }
+
+    /**
+     * @param changes 程序算出来的改动清单（{@link ChangeSet#report}），空串表示没拍快照或没改动。
+     *                放在方案<b>前面</b>：验收先看事实，再看别人的转述。
+     */
+    public static String reviewBrief(int round, String goal, Task plan, List<Task> workers,
+                                     String changes) {
+        StringBuilder sb = new StringBuilder("验收第 ").append(round).append(" 轮施工。\n\n")
+                .append("【目标原话——验收的唯一标准】\n").append(goal)
+                .append("\n\n【改动清单——程序比对开工前后的工作区算出来的，不是施工报告】\n")
+                .append(changes == null || changes.isBlank()
+                        ? "（没有检测到任何文件改动）" : changes)
+                .append("\n\n【施工方案——规划工序对目标的转述，可能漏、可能错】\n").append(plan.result())
                 .append("\n\n【各道工序的结果】\n");
         long failed = 0;
         for (Task worker : workers) {

@@ -96,6 +96,55 @@ class StreamingTest {
     }
 
     @Test
+    @DisplayName("百炼兼容模式后续分片里 id/name 是空串，不能把第一片的真名抹掉")
+    void emptyStringFieldsDoNotOverwriteName() throws Exception {
+        // 阿里云百炼（deepseek-v4-flash / qwen）的真实分片形状：第一片带名字，后面每片 id 和 name 都是 ""
+        enqueue(
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}",
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\": \\\"README\"}}]}}]}",
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\".md\\\"}\"}}]}}]}",
+                "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"tool_calls\"}]}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("读 README")), null, listener);
+
+        List<ToolCall> calls = response.message().toolCallsOrEmpty();
+        assertEquals(1, calls.size());
+        assertEquals("call_9", calls.get(0).id(), "空串 id 不该覆盖真 id");
+        assertEquals("read_file", calls.get(0).name(), "空串 name 不该覆盖真名");
+        assertEquals("README.md", M.readTree(calls.get(0).argumentsJson()).get("path").asText());
+        assertEquals(List.of("read_file"), toolStarts, "名字只通知一次，且不是空串");
+    }
+
+    @Test
+    @DisplayName("没配 thinking 就不发 enable_thinking；配了 false 才发——官方接口不认这个字段")
+    void thinkingFlagOnlyWhenConfigured() throws Exception {
+        enqueue("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}");
+        client.chat(List.of(ChatMessage.user("问题")), null, listener);
+        assertFalse(M.readTree(server.takeRequest().getBody().readUtf8()).has("enable_thinking"));
+
+        DeepSeekClient noThink = new DeepSeekClient(
+                new Config("sk-test", server.url("/").toString(), "deepseek-v4-flash",
+                        ContextManager.DEFAULT_MAX_TOKENS, false),
+                new OkHttpClient.Builder().callTimeout(Duration.ofSeconds(5)).build());
+        enqueue("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}");
+        noThink.chat(List.of(ChatMessage.user("问题")), null, listener);
+        var sent = M.readTree(server.takeRequest().getBody().readUtf8());
+        assertTrue(sent.has("enable_thinking") && !sent.get("enable_thinking").asBoolean());
+    }
+
+    @Test
+    @DisplayName("响应头之前就断（握手被掐）要重试；一个字都没出去，重来不会重复")
+    void retriesWhenConnectionDiesBeforeResponse() {
+        server.enqueue(new MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_START));
+        enqueue("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":\"stop\"}]}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("在吗")), null, listener);
+
+        assertEquals("好", response.text());
+        assertEquals(2, server.getRequestCount());
+    }
+
+    @Test
     @DisplayName("工具参数是切碎传的，要拼起来才是完整 JSON")
     void assemblesToolArguments() throws Exception {
         enqueue(
@@ -177,6 +226,23 @@ class StreamingTest {
                 "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"继续\"},\"finish_reason\":\"stop\"}]}");
 
         assertEquals("好的继续", client.chat(List.of(ChatMessage.user("x")), null, listener).text());
+    }
+
+    @Test
+    @DisplayName("流式握手失败后的退避里按停：当场收手，不再发下一次")
+    @org.junit.jupiter.api.Timeout(10)
+    void cancelDuringBackoffStops() {
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("upstream busy"));
+        server.enqueue(new MockResponse().setBody("data: [DONE]\n\n"));
+        DeepSeekClientTest.cancelAfter(client, 300);
+
+        long t0 = System.nanoTime();
+        LlmException e = assertThrows(LlmException.class,
+                () -> client.chat(List.of(ChatMessage.user("x")), null, listener));
+
+        assertTrue(e.getMessage().contains("取消"), e.getMessage());
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 800, "按停了还睡满了退避");
+        assertEquals(1, server.getRequestCount(), "按停之后不该再发请求");
     }
 
     @Test

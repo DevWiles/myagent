@@ -1363,3 +1363,110 @@ describe('审批被别的屏答掉（协议 3.3）', () => {
     expect(store.getSnapshot().planConfirm).toBeNull()
   })
 })
+
+test("rewound 回对话：按用户消息数截转录，第 userTurn 句及之后的都不留", () => {
+  const store = new SessionStore()
+  store.submitPrompt("第一句")
+  store.apply({ t: "text", text: "答一" } as any)
+  store.submitPrompt("第二句")
+  store.apply({ t: "text", text: "答二" } as any)
+  store.submitPrompt("/rewind 1 both")
+  store.apply({ t: "rewound", id: 1, label: "第一句", scope: "both", restored: ["a.py"], userTurn: 0, remaining: 0 } as any)
+  const entries = store.getSnapshot().entries
+  const users = entries.filter((e) => e.kind === "user")
+  expect(users).toHaveLength(0)
+  const last = entries[entries.length - 1] as any
+  expect(last.kind).toBe("notice")
+  expect(last.text).toContain("文件和对话已回到检查点 #1")
+  expect(last.text).toContain("a.py")
+})
+
+test("rewound 只回文件：转录不动", () => {
+  const store = new SessionStore()
+  store.submitPrompt("第一句")
+  store.submitPrompt("第二句")
+  store.apply({ t: "rewound", id: 1, label: "第一句", scope: "code", restored: [], userTurn: -1, remaining: 2 } as any)
+  const entries = store.getSnapshot().entries
+  expect(entries.filter((e) => e.kind === "user")).toHaveLength(2)
+  expect((entries[entries.length - 1] as any).text).toContain("文件没有差别")
+})
+
+test("checkpoint_list 列成编号清单；不可用时说清楚", () => {
+  const store = new SessionStore()
+  store.apply({ t: "checkpoint_list", available: true, retentionDays: 30, items: [
+    { id: 1, label: "加环境变量", time: 0, turn: 0 }, { id: 2, label: "补单测", time: 0, turn: 1 }] } as any)
+  let last = store.getSnapshot().entries.at(-1) as any
+  expect(last.text).toContain("#1")
+  expect(last.text).toContain("#2")
+  expect(last.text).toContain("补单测")
+  store.apply({ t: "checkpoint_list", available: false, retentionDays: 30, items: [] } as any)
+  last = store.getSnapshot().entries.at(-1) as any
+  expect(last.level).toBe("warn")
+})
+
+describe('断在半路之后提示「继续」', () => {
+  const cut = { reason: '已取消', prompt: '把 Main 改了', steps: 3, at: 1758100000000 }
+
+  test('failed 带断点：原因之后紧跟一行「继续」提示，并记下断点', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut })
+
+    const notices = store.getSnapshot().entries.filter(e => e.kind === 'notice')
+    expect(notices.map(n => (n as { text: string }).text)).toEqual([
+      '已取消',
+      '现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求',
+    ])
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('续不了的失败不提示——说「继续」只会原地再撞一次', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '上下文超限' })
+
+    expect(store.getSnapshot().entries.filter(e => e.kind === 'notice')).toHaveLength(1)
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
+  test('下一句话一跑起来断点就作废，不管说的是不是「继续」', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, { t: 'busy', busy: true })
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
+  test('晚连上来的界面从 ready 拿断点——手机扫码进来时终端早按过停了', () => {
+    const store = new SessionStore()
+    feed(store, { ...ready(), interrupted: cut } as ServerEvent)
+
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('接回来的会话断在半路：「接上了」后面紧跟「继续」提示', () => {
+    const store = new SessionStore()
+    feed(store, ready(), {
+      t: 'session_restored', id: '20260918-143210-3f9a', messages: 4, turns: 1,
+      firstMessage: '把 Main 改了', savedAt: 1, interrupted: cut,
+    } as ServerEvent)
+
+    const texts = store.getSnapshot().entries.filter(e => e.kind === 'notice').map(e => (e as { text: string }).text)
+    expect(texts[texts.length - 1]).toBe('现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求')
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('接回来的会话没断过：清掉上一段的断点', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, {
+      t: 'session_restored', id: '20260918-143210-3f9a', messages: 4, turns: 1,
+      firstMessage: 'x', savedAt: 1,
+    } as ServerEvent)
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
+  test('清空对话后断点不作数', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, { t: 'reset_done' })
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+})

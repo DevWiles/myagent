@@ -14,6 +14,7 @@
     {"id": "r2", "role": "coder",
      "description": "按 {{r1}} 查到的实际路径，改 Y",
      "acceptance": "Y 里引用的路径和实际一致",
+     "files": ["src/Y.java"],
      "dependsOn": ["r1"]}
   ]
 }

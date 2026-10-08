@@ -173,6 +173,9 @@ public final class AuditLog implements AutoCloseable {
         node.put("detail", clip(request.subject()));
         node.put("risk", request.reason());
         node.put("approved", verdict.approved());
+        if (verdict.cancelled()) {
+            node.put("cancelled", true);       // 没人表态，和「用户说不」分开记
+        }
         if (verdict.hasNote()) {
             node.put("note", clip(verdict.note()));
         }

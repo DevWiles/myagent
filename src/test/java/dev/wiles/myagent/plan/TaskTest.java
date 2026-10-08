@@ -42,6 +42,35 @@ class TaskTest {
     }
 
     @Test
+    @DisplayName("files 规范化：去 ./ 和尾部斜杠、去重；越出工作区的路径当场拒")
+    void filesAreNormalized() {
+        Task t = new Task("t1", "改", AgentRoles.CODER, List.of(), null,
+                List.of("./src/a.py", "src/a.py", "src/pkg/", " src/b.py "));
+        assertEquals(List.of("src/a.py", "src/pkg", "src/b.py"), t.files());
+        assertEquals(List.of(), new Task("t2", "读", TaskType.FILE_READ, List.of()).files());
+        assertThrows(IllegalArgumentException.class, () -> new Task("t3", "改", AgentRoles.CODER,
+                List.of(), null, List.of("../etc/passwd")));
+        assertThrows(IllegalArgumentException.class, () -> new Task("t4", "改", AgentRoles.CODER,
+                List.of(), null, List.of("/tmp/x")));
+    }
+
+    @Test
+    @DisplayName("文件冲突：同名撞、目录包含撞、任一方没声明也当撞；各管各的不撞")
+    void fileConflictRules() {
+        Task a = new Task("a", "改", AgentRoles.CODER, List.of(), null, List.of("src/a.py"));
+        Task b = new Task("b", "改", AgentRoles.CODER, List.of(), null, List.of("src/b.py"));
+        Task dir = new Task("d", "改", AgentRoles.CODER, List.of(), null, List.of("src"));
+        Task none = new Task("n", "改", AgentRoles.CODER, List.of(), null, List.of());
+        assertFalse(a.filesConflictWith(b));
+        assertTrue(a.filesConflictWith(a));
+        assertTrue(a.filesConflictWith(dir), "声明了整个目录的和目录里任何文件都撞");
+        assertTrue(dir.filesConflictWith(b));
+        assertTrue(a.filesConflictWith(none), "没声明就是什么都可能碰");
+        assertFalse(new Task("x", "改", AgentRoles.CODER, List.of(), null, List.of("srcx/a.py"))
+                .filesConflictWith(dir), "srcx 不是 src 的子目录，只按路径段比不按前缀字符串比");
+    }
+
+    @Test
     @DisplayName("任务不能依赖自己")
     void rejectsSelfDependency() {
         assertThrows(IllegalArgumentException.class,

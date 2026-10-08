@@ -1,5 +1,7 @@
 package dev.wiles.myagent.agent;
 
+import dev.wiles.myagent.context.Interruption;
+
 /**
  * agent 运行过程中发出的事件，供界面实时展示。
  *
@@ -94,7 +96,16 @@ public sealed interface AgentEvent {
     record Done(String text, int steps) implements AgentEvent {
     }
 
-    /** 跑不下去了（模型调用失败、超出步数上限）。 */
-    record Failed(String reason) implements AgentEvent {
+    /**
+     * 跑不下去了（模型调用失败、被取消、超出步数上限）。
+     *
+     * @param interrupted 现场封口留着、说一句「继续」就能接上时才有；
+     *                    续了也白续的失败（比如最近几轮本身撑破了窗口）为 null
+     */
+    record Failed(String reason, Interruption interrupted) implements AgentEvent {
+
+        public Failed(String reason) {
+            this(reason, null);
+        }
     }
 }

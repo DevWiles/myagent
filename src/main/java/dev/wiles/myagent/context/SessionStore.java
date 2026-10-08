@@ -112,6 +112,18 @@ public final class SessionStore {
     public void save(String id, List<ChatMessage> history, Path workspace,
                      String model, long startedAt, ContextManager.Compaction compaction,
                      TokenLedger ledger) {
+        save(id, history, workspace, model, startedAt, compaction, ledger, null);
+    }
+
+    /**
+     * 连断点一起存。断在半路的那一轮关了终端也不丢：下次 {@code /continue} 接回来，
+     * 照样提示「继续」、照样给模型拼中断说明。
+     *
+     * @param interrupted 眼前这段的断点，没有就是 null（存档里不写这个字段）
+     */
+    public void save(String id, List<ChatMessage> history, Path workspace,
+                     String model, long startedAt, ContextManager.Compaction compaction,
+                     TokenLedger ledger, Interruption interrupted) {
         if (workspace == null) {
             return;
         }
@@ -128,7 +140,7 @@ public final class SessionStore {
         // 而且 GitBranch 只读一个小文件，比在两个界面里各记一遍靠得住
         SessionSnapshot snapshot = SessionSnapshot.of(id, history, workspace, model,
                 GitBranch.of(workspace), startedAt, System.currentTimeMillis(),
-                compaction, ledger);
+                compaction, ledger, interrupted);
         if (write(snapshot, pathFor(workspace, id))) {
             log.debug("会话已存档: {}（{} 条）", id, snapshot.messages().size());
         }
@@ -277,7 +289,7 @@ public final class SessionStore {
             // 拿今天的分支去填等于编一个「那段是在 dev 上聊的」出来
             SessionSnapshot adopted = new SessionSnapshot(SessionSnapshot.FORMAT, id,
                     node.path("workspace").asText(null), node.path("model").asText(null),
-                    null, savedAt, savedAt, messages, List.of(), null, 0, TokenLedger.EMPTY);
+                    null, savedAt, savedAt, messages, List.of(), null, 0, TokenLedger.EMPTY, null);
             if (!adopted.belongsTo(workspace)) {
                 log.warn("老存档 {} 记的工作区是 {}，不收", legacy, adopted.workspace());
                 return;

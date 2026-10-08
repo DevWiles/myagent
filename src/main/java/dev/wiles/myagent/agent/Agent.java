@@ -10,6 +10,7 @@ import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.ContextWindow;
 import dev.wiles.myagent.context.HistoryRepair;
+import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.context.PinnedFacts;
 import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.SummarySegment;
@@ -169,12 +170,37 @@ public final class Agent {
      * <p>断点本身留在历史里（见 {@link Interruption}），这个字段只是让界面
      * 知道该不该提醒一句。下一轮正常跑完就清掉——那时候「上一轮没做完」已经不成立了。
      */
-    private Interruption unfinished;
+    private volatile Interruption unfinished;   // 跑循环的线程写，首帧那边（WebSocket 线程）读
 
-    /** 把模型的流式增量转成 agent 事件发出去。 */
+    /**
+     * 在途这个请求已经吐到屏幕上的字。
+     *
+     * <p>请求断在半路（按停、断网）时，响应拼不完整，原来整条丢掉——
+     * 可用户已经看着它说了半句「问题出在 Parser 第 42 行，空指针是因为」。
+     * 他说「继续」，模型却不知道自己说过什么，只能从头再分析一遍，
+     * 说出来的还可能和屏幕上那半句对不上。封口时把它补进历史，
+     * 守住一条不变量：<b>屏幕上出现过的，历史里就有</b>。
+     *
+     * <p>就记在发 TextDelta 的这一处，而不是让客户端在异常里带出来：
+     * 这里正是「用户看到了什么」的定义，换哪家模型客户端都一样成立。
+     * 只有跑循环的线程读写它（流式回调是在发请求的线程上同步读出来的）。
+     */
+    private final StringBuilder streamed = new StringBuilder();
+
+    /** 正在跑的那个串行工具所在的线程。{@link #cancel()} 靠它叫停工具。 */
+    private volatile Thread toolThread;
+
+    /** 叫停之后再等工具多久。它不配合（卡在网络读上，中断叫不醒）就不等了。 */
+    private long toolStopGraceMillis = 3_000;
+
+    /** 断点记时刻、续做时算隔了多久都用它。测试里换成拨得动的钟。 */
+    private java.util.function.LongSupplier clock = System::currentTimeMillis;
+
+    /** 把模型的流式增量转成 agent 事件发出去，顺手记下说过的字。 */
     private final StreamListener stream = new StreamListener() {
         @Override
         public void onTextDelta(String delta) {
+            streamed.append(delta);
             emit(new AgentEvent.TextDelta(delta));
         }
     };
@@ -247,6 +273,22 @@ public final class Agent {
     public void cancel() {
         cancelled = true;
         client.cancel();
+        Thread running = toolThread;
+        if (running != null) {
+            running.interrupt();   // 正在跑的工具：bash 会当场杀掉子进程，见 runInterruptibly
+        }
+    }
+
+    /** 叫停后等工具收尾的时限。仅供测试：真实的 3 秒太慢。 */
+    Agent toolStopGrace(long millis) {
+        this.toolStopGraceMillis = millis;
+        return this;
+    }
+
+    /** 换一个钟。仅供测试：「隔了 45 分钟才接」不能真等 45 分钟。 */
+    Agent clock(java.util.function.LongSupplier clock) {
+        this.clock = clock;
+        return this;
     }
 
     public Agent onEvent(Consumer<AgentEvent> listener) {
@@ -343,6 +385,24 @@ public final class Agent {
         return safe.size();
     }
 
+    /**
+     * 连断点一起接回来。关了终端再 {@code /continue}，界面照样提示「继续」，
+     * 下一句照样拼上中断说明——而且隔了多久是按真实时间算的。
+     *
+     * <p>断点要和接回来的历史对得上账（条数相同）才认。对不上说明存档里那段被回退过、
+     * 改过，或者恢复时被修剪过——断点描述的已经不是眼前的现场，提示「继续」就是误导。
+     *
+     * @param cut 存档里的断点，没有就是 null
+     */
+    public int restore(List<ChatMessage> conversation, ContextManager.Compaction known,
+                       Interruption cut) {
+        int restored = restore(conversation, known);
+        if (cut != null && cut.matches(conversation())) {
+            unfinished = cut;
+        }
+        return restored;
+    }
+
     /** 不带压缩状态的恢复。 */
     public int restore(List<ChatMessage> conversation) {
         return restore(conversation, null);
@@ -365,7 +425,12 @@ public final class Agent {
      */
     public String run(String userInput) {
         cancelled = false;
-        history.add(ChatMessage.user(userInput));
+        // 断点之后的第一句话：前面拼上中断说明，告诉模型现场怎么读（见 Interruption.resumeNote）。
+        // 「继续」也好、换了个说法也好，都走这一条——不认关键词。
+        // 只拼一次：这一轮说完，unfinished 就清了
+        Interruption cut = unfinished;
+        history.add(ChatMessage.user(cut == null ? userInput
+                : cut.resumeNote(clock.getAsLong()) + "\n\n" + userInput));
         // 断的时候要知道跑到第几步了，所以 step 活在 try 外面
         int step = 0;
 
@@ -384,7 +449,9 @@ public final class Agent {
                     return tooBigToSend(prepared, specs, userInput, step);
                 }
 
+                streamed.setLength(0);
                 ChatResponse response = client.chat(prepared.window(), specs, stream);
+                streamed.setLength(0);       // 说完整了，这些字会随 assistant 消息进历史，不再是半段话
                 calibrate(response, prepared.tokensAfter());
                 ChatMessage assistant = response.message();
 
@@ -445,7 +512,7 @@ public final class Agent {
             // 回滚的代价是用户以为这一轮白干了，实际上白干的只是最后那个请求。
             seal("网络或模型调用失败（" + brief(e.getMessage()) + "）", userInput, step);
             log.error("模型调用失败，已把现场封口留在历史里", e);
-            emit(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "调用模型失败: " + e.getMessage();
         }
     }
@@ -454,10 +521,73 @@ public final class Agent {
     private void executeOne(ToolCall call) {
         int id = nextToolId();
         emit(new AgentEvent.ToolStarted(id, call.name(), call.argumentsJson()));
-        ToolResult result = tools.execute(call);   // 它保证不抛异常
+        ToolResult result = runInterruptibly(call);
         emit(new AgentEvent.ToolFinished(
                 id, call.name(), result.ok(), result.content(), result.diff()));
         history.add(ChatMessage.toolResult(call.id(), result.content()));
+    }
+
+    /**
+     * 在单独的线程上跑一个工具，按停时能当场叫停它。
+     *
+     * <h3>为什么要换线程</h3>
+     * 原来工具就在跑循环的线程上同步执行，{@link #cancel()} 只设标志、掐 HTTP 请求，
+     * 碰不到它——一次 {@code mvn test} 按了 Esc 也得等它跑完（或者等满超时）。
+     * 换到单独的线程上，cancel 就能打断<b>那个</b>线程：bash 收到中断当场杀子进程，
+     * 带着叫停前的输出回来（{@code ProcessRunner}）。
+     * 不直接打断跑循环的线程，是因为它是复用的工作线程，中断标志漏到下一轮就是一次误取消。
+     *
+     * <h3>工具不配合就不等了</h3>
+     * 中断能不能叫醒工具取决于它卡在哪：sleep / waitFor 能醒，阻塞的网络读不一定。
+     * 叫停后再给它 {@link #toolStopGraceMillis}，还不回来就<b>不等了</b>，回填「结果未知」——
+     * 不能写「没有执行」，它确实跑了，而且可能还在后台跑（Codex 的提示里也特意写了这一句）。
+     *
+     * <p>上层超时（计划、流水线 {@code Future.cancel(true)}）打断的是跑循环的线程，
+     * 这里接住、照样叫停工具，最后把中断标志还回去，让 {@link #shouldStop()} 看得见。
+     */
+    private ToolResult runInterruptibly(ToolCall call) {
+        java.util.concurrent.CompletableFuture<ToolResult> result = new java.util.concurrent.CompletableFuture<>();
+        Thread worker = new Thread(() -> {
+            try {
+                result.complete(tools.execute(call));   // 它保证不抛异常，兜的是 Error
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        }, "tool-" + call.name());
+        worker.setDaemon(true);
+        toolThread = worker;
+        worker.start();
+        boolean selfInterrupted = false;
+        long giveUpAt = -1;
+        try {
+            while (true) {
+                if (giveUpAt < 0 && (cancelled || selfInterrupted)) {
+                    worker.interrupt();          // cancel() 已经打过一次；这里兜「它赶在 toolThread 赋值前就来了」
+                    giveUpAt = System.nanoTime() + toolStopGraceMillis * 1_000_000L;
+                }
+                if (giveUpAt >= 0 && System.nanoTime() > giveUpAt) {
+                    log.warn("工具 {} 叫停后 {} 毫秒仍未结束，不再等它", call.name(), toolStopGraceMillis);
+                    return ToolResult.error("(已取消：叫停时这个工具还在跑，等了 "
+                            + Math.max(1, toolStopGraceMillis / 1000) + " 秒没停下来，结果未知。"
+                            + "它可能已经部分生效，甚至还在后台继续——先检查现状再决定是否重试)");
+                }
+                try {
+                    return result.get(50, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    // 接着等，顺便看一眼有没有人按停
+                } catch (InterruptedException e) {
+                    selfInterrupted = true;      // 标志被这个异常吃掉了，记下来最后还回去
+                } catch (ExecutionException e) {
+                    log.error("工具 {} 执行时炸了", call.name(), e.getCause());
+                    return ToolResult.error("工具执行失败: " + e.getCause());
+                }
+            }
+        } finally {
+            toolThread = null;
+            if (selfInterrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**
@@ -891,7 +1021,7 @@ public final class Agent {
      */
     private String abort(String userInput, int step) {
         seal("已取消", userInput, step);
-        emit(new AgentEvent.Failed("已取消"));
+        emit(new AgentEvent.Failed("已取消", unfinished));
         return "已取消。";
     }
 
@@ -918,7 +1048,8 @@ public final class Agent {
 
     private void seal(String reason, String userInput, int step) {
         sealWithoutInterruption(reason);
-        unfinished = new Interruption(reason, userInput, step, System.currentTimeMillis());
+        unfinished = new Interruption(reason, userInput, step, clock.getAsLong(),
+                conversation().size());
     }
 
     /**
@@ -928,9 +1059,27 @@ public final class Agent {
      * 而有些失败重试一万次也还是同一个结果，那时候提示续做就是在骗人。
      */
     private void sealWithoutInterruption(String reason) {
+        keepPartialReply(reason);
         List<ChatMessage> sealed = HistoryRepair.seal(conversation(), reason);
         history.subList(1, history.size()).clear();   // 留下 system
         history.addAll(sealed);
+    }
+
+    /**
+     * 请求断在半路时，把已经吐到屏幕上的半段话收进历史。
+     *
+     * <p>末尾要标明是被打断的：不标的话，模型会把半句话当成自己说完了的结论。
+     * 有了这条以 assistant 收尾的消息，{@link HistoryRepair#seal} 就不会再补
+     * 「上一轮没有做完」——半段话自己就是封口，同一件事不说两遍。
+     *
+     * <p>半截的 tool_calls 不留：参数可能只到一半，留下就是一次必然失败的调用。
+     */
+    private void keepPartialReply(String reason) {
+        if (streamed.isEmpty()) {
+            return;
+        }
+        history.add(ChatMessage.assistant(streamed + "\n\n(上一轮" + reason + "，这段话没说完)"));
+        streamed.setLength(0);
     }
 
     /**
@@ -948,7 +1097,9 @@ public final class Agent {
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {
             // tools 传 null = 没得调。发的是窗口，脚手架刚追加进记录，组装时自然带上
+            streamed.setLength(0);
             ChatResponse response = client.chat(buildWindow(null).window(), null, stream);
+            streamed.setLength(0);
             history.remove(history.size() - 1);      // 摘掉脚手架，理由见上
             ChatMessage conclusion = response.message();
             if (conclusion.hasToolCalls()) {
@@ -960,13 +1111,13 @@ public final class Agent {
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
             unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
-                    System.currentTimeMillis());
-            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾"));
+                    clock.getAsLong(), conversation().size());
+            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {
             history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
             seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
-            emit(new AgentEvent.Failed(e.getMessage()));
+            emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
         }
     }

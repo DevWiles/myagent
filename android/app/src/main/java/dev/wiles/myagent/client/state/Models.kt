@@ -2,6 +2,7 @@ package dev.wiles.myagent.client.state
 
 import dev.wiles.myagent.client.protocol.ApprovalSuggestion
 import dev.wiles.myagent.client.protocol.Continuable
+import dev.wiles.myagent.client.protocol.Interrupted
 import dev.wiles.myagent.client.protocol.MemoryRow
 import dev.wiles.myagent.client.protocol.Resumable
 import dev.wiles.myagent.client.protocol.RoleInfo
@@ -154,4 +155,9 @@ data class SessionState(
     val lastDurationMs: Long? = null,
     /** 会话选择器数据。null = 没开。不缓存，每次都重新问（同 TUI） */
     val sessionPicker: Pair<String, List<SessionRow>>? = null,
+    /**
+     * 主对话断在了半路，说一句「继续」就能接上。null = 没有可续的（同 TUI）。
+     * 下一句话一跑起来（busy 变真）就作废。
+     */
+    val interrupted: Interrupted? = null,
 )

@@ -122,6 +122,8 @@ export type ServerEvent =
        * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
        */
       resumable?: { goal: string; remaining: number; total: number; savedAt: number }
+      /** 眼前这段对话断在了半路。晚连上来的界面靠它补上「继续」的提示（协议 3.1）。 */
+      interrupted?: Interrupted
       /**
        * 这个工作区上次没聊完的对话。没有就没这个字段。
        *
@@ -169,6 +171,8 @@ export type ServerEvent =
       /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
       sentTokens?: number
       contextLimit?: number
+      /** 接回来的那段断在了半路（协议 3.9）。 */
+      interrupted?: Interrupted
     }
   /**
    * 压缩正在进行，画进度条。
@@ -183,6 +187,27 @@ export type ServerEvent =
   | { t: 'compacting'; phase: 'map' | 'reduce' | 'done'; done: number; total: number; percent: number }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
+  /** 当前会话的检查点清单。`turn` 是那个点之前用户说过几句。 */
+  | {
+      t: 'checkpoint_list'
+      available: boolean
+      retentionDays: number
+      items: { id: number; label: string; time: number; turn: number }[]
+    }
+  /**
+   * 回到了某个检查点。`userTurn` ≥ 0 表示对话也回了：第 userTurn 句用户消息及之后的都不该再画；
+   * -1 表示只回了文件。`remaining` 是回退之后还剩几个检查点。
+   */
+  | {
+      t: 'rewound'
+      id: number
+      label: string
+      scope: 'code' | 'conversation' | 'both'
+      restored: string[]
+      userTurn: number
+      remaining: number
+      tokens?: number
+    }
   | { t: 'memory_list'; entries: MemoryRow[] }
   | {
       t: 'memory_changed'
@@ -194,7 +219,8 @@ export type ServerEvent =
       removed?: number
     }
   | { t: 'done'; text: string; steps: number }
-  | { t: 'failed'; reason: string }
+  /** `interrupted` 在 = 现场封口留着，说一句「继续」就能接上（协议 3.2）。 */
+  | { t: 'failed'; reason: string; interrupted?: Interrupted }
   /**
    * 某个审批已经被**某块屏**答掉了（可能不是这块）。所有界面收到后立刻收框，
    * id 对不上就忽略——自己答的那块屏，框早就本地收掉了（协议 3.3）。
@@ -404,6 +430,18 @@ export type ClientCommand =
    * 压的只是发给模型的那份窗口。
    */
   | { t: 'compact' }
+  /**
+   * 撤销上一轮对工作区的改动（feature: `undo`）：回到那一轮第一次动手之前的快照。
+   * 只回文件不回对话。没有可撤的、或正忙时回 error；成功回一条 `undone`。
+   */
+  | { t: 'undo' }
+  /** 列当前会话的检查点（feature: `rewind`），后端回 checkpoint_list。 */
+  | { t: 'checkpoints' }
+  /**
+   * 回到某个检查点（feature: `rewind`）。id 省略或 0 = 最近一个；
+   * scope：code 只回文件、conversation 只回对话、both 都回。成功回一条 `rewound`。
+   */
+  | { t: 'rewind'; id?: number; scope: 'code' | 'conversation' | 'both' }
   | { t: 'memory'; action: 'list' | 'undo' | 'clear_auto' }
   /** 要会话历史列表，后端回 session_list。 */
   | { t: 'sessions' }
@@ -441,4 +479,14 @@ export function parseEvent(raw: string): ServerEvent | null {
   } catch {
     return null
   }
+}
+
+/** 断点：被打断的那一轮。`failed` 和 `ready` 共用这个形状（协议 3.2）。 */
+export type Interrupted = {
+  reason: string
+  /** 被打断的那一轮，用户原本说的话。 */
+  prompt: string
+  /** 断掉之前跑到第几步。 */
+  steps: number
+  at: number
 }

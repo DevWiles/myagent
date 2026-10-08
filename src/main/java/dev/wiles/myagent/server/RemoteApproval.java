@@ -88,6 +88,12 @@ public final class RemoteApproval implements ApprovalPolicy {
     // 后到的排队等前一问答完，而不是把前一问的现场覆盖掉。
     @Override
     public synchronized ApprovalVerdict decide(ApprovalRequest incoming) {
+        // 还没弹框就已经按了停（Agent.cancel 先一步打断了跑工具的线程）：不弹。
+        // 弹出去的框会在 busy:false 时闪一下就没，用户看着像是自己点掉了什么。
+        // 按取消放行——模型拿到「用户还没表态」，下次说「继续」会原样重发，那时候再问
+        if (Thread.currentThread().isInterrupted()) {
+            return ApprovalVerdict.interrupted();
+        }
         if (!hasClients.getAsBoolean()) {
             return ApprovalVerdict.no("当前没有界面连着，没人能确认这个动作。");
         }
@@ -106,6 +112,9 @@ public final class RemoteApproval implements ApprovalPolicy {
             if (answer == null) {
                 return ApprovalVerdict.no("等待确认超时（" + TIMEOUT_SECONDS + " 秒），按拒绝处理。");
             }
+            if (answer.cancelled()) {
+                return ApprovalVerdict.interrupted();
+            }
             if (!answer.approved()) {
                 // 用户那句话原样带走。它是模型下一步唯一的依据，
                 // 在这儿概括一下就会变成一句正确的废话
@@ -116,7 +125,7 @@ public final class RemoteApproval implements ApprovalPolicy {
             return ApprovalVerdict.yes(accepted(answer.rules()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return ApprovalVerdict.no("这一轮被中断了。");
+            return ApprovalVerdict.interrupted();   // 上层超时掐的线程，同样是没人表态
         } finally {
             pendingId = 0;
             offered = Set.of();
@@ -183,13 +192,17 @@ public final class RemoteApproval implements ApprovalPolicy {
         if (note.length() > MAX_FEEDBACK) {
             note = note.substring(0, MAX_FEEDBACK);
         }
-        return answers.offer(new Answer(approved, remember, note));
+        return answers.offer(new Answer(approved, remember, note, false));
     }
 
-    /** 用户中断了本轮。把等在那儿的 decide() 按拒绝放行，否则 agent 线程醒不过来。 */
+    /**
+     * 用户中断了本轮。把等在那儿的 decide() 放行，否则 agent 线程醒不过来。
+     *
+     * <p>放行成<b>取消</b>而不是拒绝：用户按的是停，不是 n。见 {@link ApprovalVerdict}。
+     */
     public void cancelPending() {
         if (pendingId != 0) {
-            answers.offer(new Answer(false, List.of(), ""));
+            answers.offer(new Answer(false, List.of(), "", true));
         }
     }
 
@@ -198,6 +211,6 @@ public final class RemoteApproval implements ApprovalPolicy {
         return pendingId != 0;
     }
 
-    private record Answer(boolean approved, List<String> rules, String feedback) {
+    private record Answer(boolean approved, List<String> rules, String feedback, boolean cancelled) {
     }
 }
