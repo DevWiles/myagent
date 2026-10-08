@@ -348,4 +348,36 @@ class StreamingTest {
         assertNull(response.usage(), "拿不到就是拿不到，不能编一个 0 出来");
         assertEquals("答", response.text());
     }
+
+    @Test
+    @DisplayName("429 单独计数、等得更久：连撞三次限流照样等到成功，不再两次就放弃")
+    void rateLimitIsRetriedPastTheOldLimit() {
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setResponseCode(429).setHeader("Retry-After", "1")
+                    .setBody("{\"error\":{\"code\":\"insufficient_quota\"}}"));
+        }
+        enqueue("{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":\"stop\"}]}");
+
+        ChatResponse response = client.chat(List.of(ChatMessage.user("问")), null, listener);
+
+        assertEquals("好", response.text());
+        assertEquals(4, server.getRequestCount(), "三次 429 + 一次成功");
+    }
+
+    @Test
+    @DisplayName("429 的等待：听 Retry-After（封顶 60s），没有就 5s 起翻倍，同样封顶")
+    void rateLimitWaitSchedule() {
+        assertEquals(7_000, DeepSeekClient.rateLimitWait(1, "7"));
+        assertEquals(60_000, DeepSeekClient.rateLimitWait(1, "600"), "服务端说等十分钟也只等一分钟，再撞再等");
+        assertEquals(5_000, DeepSeekClient.rateLimitWait(1, null));
+        assertEquals(10_000, DeepSeekClient.rateLimitWait(2, null));
+        assertEquals(40_000, DeepSeekClient.rateLimitWait(4, null));
+        assertEquals(60_000, DeepSeekClient.rateLimitWait(6, null));
+        assertEquals(5_000, DeepSeekClient.rateLimitWait(1, "Wed, 21 Oct 2026 07:28:00 GMT"), "日期格式不认，按退避走");
+        long total = 0;
+        for (int i = 1; i <= DeepSeekClient.MAX_RATE_LIMIT_RETRIES; i++) {
+            total += DeepSeekClient.rateLimitWait(i, null);
+        }
+        assertTrue(total >= 120_000, "合计要盖过分钟级的限流窗口: " + total);
+    }
 }
