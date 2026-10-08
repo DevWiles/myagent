@@ -1399,6 +1399,12 @@ test("checkpoint_list 列成编号清单；不可用时说清楚", () => {
   expect(last.text).toContain("#1")
   expect(last.text).toContain("#2")
   expect(last.text).toContain("补单测")
+  store.apply({ t: "checkpoint_list", available: true, retentionDays: 30, items: [
+    { id: 1, label: "加环境变量", time: 0, turn: 0, kind: "turn" },
+    { id: 2, label: "write_file src/a.py", time: 0, turn: 1, kind: "tool" }] } as any)
+  last = store.getSnapshot().entries.at(-1) as any
+  expect(last.text).toContain("└ write_file src/a.py 之前")
+  expect(last.text).not.toContain("第 2 句前  write_file")
   store.apply({ t: "checkpoint_list", available: false, retentionDays: 30, items: [] } as any)
   last = store.getSnapshot().entries.at(-1) as any
   expect(last.level).toBe("warn")

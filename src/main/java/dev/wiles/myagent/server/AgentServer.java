@@ -1073,6 +1073,7 @@ public final class AgentServer extends WebSocketServer {
             row.put("label", cp.label());
             row.put("time", cp.time());
             row.put("turn", userTurnsBefore(cp.historySize()));
+            row.put("kind", cp.kind());
         }
         peer.send(frame);
     }
@@ -1095,7 +1096,7 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         dev.wiles.myagent.snapshot.Checkpoints.Checkpoint cp =
-                id == 0 ? checkpoints.latest() : checkpoints.get(id);
+                id == 0 ? checkpoints.latestTurn() : checkpoints.get(id);
         if (cp == null) {
             peer.send(error(id == 0 ? "没有可回的检查点——这段会话里还没有跑过任何一轮"
                     : "没有 #" + id + " 这个检查点，用 /rewind 看清单"));
@@ -1121,7 +1122,13 @@ public final class AgentServer extends WebSocketServer {
                 if (!scope.equals("code")) {
                     List<dev.wiles.myagent.llm.ChatMessage> hist = agent.history();
                     int n = Math.max(1, Math.min(cp.historySize(), hist.size()));
-                    agent.restore(n <= 1 ? List.of() : hist.subList(1, n));
+                    List<dev.wiles.myagent.llm.ChatMessage> kept = n <= 1 ? List.of() : hist.subList(1, n);
+                    // 工具级的点落在一轮中间：模型点了工具、结果还没回来。按「回退」封口，
+                    // 而不是交给 restore 按「上次会话中断」去补——那句话在这儿是假的
+                    if (!dev.wiles.myagent.context.HistoryRepair.isIntact(kept)) {
+                        kept = dev.wiles.myagent.context.HistoryRepair.seal(kept, "已回退");
+                    }
+                    agent.restore(kept);
                     sessions.save(sessionId, agent.history(), workspace.root(),
                             config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
                             agent.unfinished().orElse(null));
@@ -1288,6 +1295,7 @@ public final class AgentServer extends WebSocketServer {
     // ---------------------------------------------------------------- 发事件
 
     private void onAgentEvent(AgentEvent event) {
+        checkpointBeforeTool(event);
         recordToAudit(event);
         publish(Protocol.encode(event));
     }
@@ -1299,8 +1307,52 @@ public final class AgentServer extends WebSocketServer {
      * 当成同一条线上的先后两步。主对话走上面那个不带号的入口。
      */
     private void onAgentEvent(Task task, AgentEvent event) {
+        checkpointBeforeTool(event);
         recordToAudit(event);
         publish(Protocol.encode(event, task.id()));
+    }
+
+    /**
+     * 会动手的工具开跑前拍一张工具级检查点（见 {@code Checkpoints#markTool}）。
+     *
+     * <h3>为什么挂在 ToolStarted 上</h3>
+     * {@code Agent.executeOne} 是<b>先同步发 ToolStarted、再执行</b>的，而 emit 是同步回调，
+     * 所以这里拍完，工具才动手——主对话和计划/流水线的子循环都走这两个入口，一处挂上全覆盖。
+     * 并行凑批的那条路只放 parallelSafe 的工具（不改工作区），这里也按同一个判据跳过，
+     * 两边的「会不会动世界」用的是同一句话。
+     *
+     * <p>对话长度取主 agent 此刻的记录：主对话里这一刻正是「模型点了这个工具、还没拿到结果」，
+     * 回对话到这儿时由 {@link #handleRewind} 封口；子任务的历史不在主记录里，
+     * 取到的是这一轮开跑时的长度，回对话就等于回到这一轮之前。
+     */
+    private void checkpointBeforeTool(AgentEvent event) {
+        if (!(event instanceof AgentEvent.ToolStarted t) || tools.parallelSafe(t.tool())
+                || agent == null) {
+            return;
+        }
+        checkpoints.markTool(toolLabel(t.tool(), t.arguments()), agent.history().size());
+    }
+
+    /** 「write_file src/a.py」「bash mvn -q test」——清单里一眼认得出是哪一步。 */
+    static String toolLabel(String tool, String argumentsJson) {
+        String detail = "";
+        try {
+            var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(argumentsJson);
+            for (String key : List.of("path", "command", "url", "name")) {
+                if (node != null && node.hasNonNull(key) && node.get(key).isTextual()) {
+                    detail = node.get(key).asText();
+                    break;
+                }
+            }
+            if (detail.isEmpty() && node != null && node.path("files").isArray()) {
+                List<String> paths = new java.util.ArrayList<>();
+                node.get("files").forEach(f -> paths.add(f.path("path").asText()));
+                detail = String.join(", ", paths);
+            }
+        } catch (Exception e) {
+            detail = argumentsJson == null ? "" : argumentsJson;
+        }
+        return brief(tool + (detail.isBlank() ? "" : " " + detail));
     }
 
     /**

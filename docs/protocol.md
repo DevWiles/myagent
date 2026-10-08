@@ -937,17 +937,25 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 ```
 界面 → {"t":"checkpoints"}
 后端 → {"t":"checkpoint_list","available":true,"retentionDays":30,
-        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0},
-                 {"id":2,"label":"再加个单测","time":1790733601002,"turn":1}]}
+        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0,"kind":"turn"},
+                 {"id":2,"label":"write_file src/config.py","time":1790733570311,"turn":1,"kind":"tool"},
+                 {"id":3,"label":"再加个单测","time":1790733601002,"turn":1,"kind":"turn"}]}
 
-界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个
+界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个轮级点
 后端 → {"t":"busy","busy":true}
 后端 → {"t":"rewound","id":1,"label":"给配置模块加环境变量覆盖","scope":"both",
         "restored":["src/config.py","tests/new_test.py"],"userTurn":0,"remaining":1,"tokens":812}
 后端 → {"t":"busy","busy":false}
 
-界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个、scope=code（老界面用）
+界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个轮级点、scope=code（老界面用）
 ```
+
+- `kind`：`turn` 是一轮开跑前拍的；`tool` 是一次**会动手**的工具调用（写文件、bash、MCP 等，
+  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和计划、流水线的子任务都拍。
+  工具级的点如果和清单里上一个点的文件内容完全相同（比如中间只跑了测试），不进清单。
+  老界面不认这个字段也无妨：清单照样能用，只是长了。`undo` 和 `id` 为 0 的 `rewind` 撤销的是**上一轮整轮**，不是上一步。
+- 回对话到工具级的点：记录截在「模型点了这个工具、结果还没回来」处，后端把没有结果的调用补成
+  「(已回退，这一步没有执行)」再存档，之后照常对话。
 
 - `turn` / `userTurn`：那个点之前用户说过几句。界面按它截转录——回对话之后，第 `userTurn` 句及之后的都不该再画。
 - `restored`：被还原或删除的相对路径（`scope=conversation` 时为空）。快照后新建的文件会被**删掉**，

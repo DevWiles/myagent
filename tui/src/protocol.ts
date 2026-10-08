@@ -187,12 +187,15 @@ export type ServerEvent =
   | { t: 'compacting'; phase: 'map' | 'reduce' | 'done'; done: number; total: number; percent: number }
   /** 上下文被压缩了。用户有权知道——摘要意味着早期细节已经丢了。 */
   | { t: 'compacted'; tokensBefore: number; tokensAfter: number; summarized: boolean }
-  /** 当前会话的检查点清单。`turn` 是那个点之前用户说过几句。 */
+  /**
+   * 当前会话的检查点清单。`turn` 是那个点之前用户说过几句。
+   * `kind`：`turn` 一轮开跑前拍的；`tool` 某次会动手的工具调用前拍的。老后端不带，按 `turn` 算。
+   */
   | {
       t: 'checkpoint_list'
       available: boolean
       retentionDays: number
-      items: { id: number; label: string; time: number; turn: number }[]
+      items: { id: number; label: string; time: number; turn: number; kind?: 'turn' | 'tool' }[]
     }
   /**
    * 回到了某个检查点。`userTurn` ≥ 0 表示对话也回了：第 userTurn 句用户消息及之后的都不该再画；
