@@ -35,4 +35,37 @@ public record Interruption(String reason, String userInput, int steps, long at) 
     public String describe() {
         return "断在第 " + steps + " 步";
     }
+
+    /** 隔了这么久才接，就提醒工作区可能被动过。刚断就接的话，这句提醒只是噪音。 */
+    static final long STALE_AFTER_MILLIS = 10 * 60_000L;
+
+    /**
+     * 拼在断点之后第一句话前面的那段说明。
+     *
+     * <h3>为什么以用户的口吻、拼在下一句前面</h3>
+     * 封口补的那条「上一轮没有做完」是 assistant 说的，模型会把它当成自己确认过的结论；
+     * 而「你被我打断了」本来就是用户这边的事（Codex 的 {@code <turn_aborted>}、
+     * Claude Code 的 {@code [Request interrupted by user]} 都记在用户侧）。
+     * 不单独插一条 user 消息，是因为有的接口不收连着两条 user——拼进下一句正好避开。
+     *
+     * <h3>为什么不引用上一轮的原话</h3>
+     * 原任务就在上面的历史里。再念一遍，模型会把它当成新任务，从头把做完的部分再做一遍
+     * ——Cline 踩过这个坑（#12975），恢复时特意不重发原任务。
+     *
+     * @param now 此刻，epoch 毫秒。从外面传进来，测试才拨得动钟
+     */
+    public String resumeNote(long now) {
+        StringBuilder note = new StringBuilder("<turn_interrupted>\n")
+                .append("上一轮在第 ").append(steps).append(" 步断了：")
+                .append("已取消".equals(reason) ? "被我叫停" : reason).append("。现场都在上面：\n")
+                .append("- 已经拿到结果的工具确实执行过，结果可信，做完的步骤不要重做；\n")
+                .append("- 标着「没有执行」的调用没跑过，需要的话照原样重新发起；\n")
+                .append("- 执行到一半被打断的命令或写入可能已经部分生效，先检查现状再决定是否重试。\n");
+        long gap = now - at;
+        if (gap >= STALE_AFTER_MILLIS) {
+            note.append("距离中断已经过去约 ").append(gap / 60_000L)
+                    .append(" 分钟，这期间文件可能被改过，动手前先核对相关文件的当前内容。\n");
+        }
+        return note.append("</turn_interrupted>").toString();
+    }
 }

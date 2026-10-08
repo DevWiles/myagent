@@ -186,6 +186,9 @@ public final class Agent {
      */
     private final StringBuilder streamed = new StringBuilder();
 
+    /** 断点记时刻、续做时算隔了多久都用它。测试里换成拨得动的钟。 */
+    private java.util.function.LongSupplier clock = System::currentTimeMillis;
+
     /** 把模型的流式增量转成 agent 事件发出去，顺手记下说过的字。 */
     private final StreamListener stream = new StreamListener() {
         @Override
@@ -263,6 +266,12 @@ public final class Agent {
     public void cancel() {
         cancelled = true;
         client.cancel();
+    }
+
+    /** 换一个钟。仅供测试：「隔了 45 分钟才接」不能真等 45 分钟。 */
+    Agent clock(java.util.function.LongSupplier clock) {
+        this.clock = clock;
+        return this;
     }
 
     public Agent onEvent(Consumer<AgentEvent> listener) {
@@ -381,7 +390,12 @@ public final class Agent {
      */
     public String run(String userInput) {
         cancelled = false;
-        history.add(ChatMessage.user(userInput));
+        // 断点之后的第一句话：前面拼上中断说明，告诉模型现场怎么读（见 Interruption.resumeNote）。
+        // 「继续」也好、换了个说法也好，都走这一条——不认关键词。
+        // 只拼一次：这一轮说完，unfinished 就清了
+        Interruption cut = unfinished;
+        history.add(ChatMessage.user(cut == null ? userInput
+                : cut.resumeNote(clock.getAsLong()) + "\n\n" + userInput));
         // 断的时候要知道跑到第几步了，所以 step 活在 try 外面
         int step = 0;
 
@@ -936,7 +950,7 @@ public final class Agent {
 
     private void seal(String reason, String userInput, int step) {
         sealWithoutInterruption(reason);
-        unfinished = new Interruption(reason, userInput, step, System.currentTimeMillis());
+        unfinished = new Interruption(reason, userInput, step, clock.getAsLong());
     }
 
     /**
@@ -998,7 +1012,7 @@ public final class Agent {
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
             unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
-                    System.currentTimeMillis());
+                    clock.getAsLong());
             emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {
