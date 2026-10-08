@@ -11,6 +11,7 @@ import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.HistoryRepair;
+import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
 import dev.wiles.myagent.tool.ToolResult;
@@ -942,6 +943,38 @@ class AgentTest {
         soon[0] += 30_000L;
         fast.run("继续");
         assertFalse(lastUser(quick.received.get(1)).contains("核对"), "刚断就接，提醒就是噪音");
+    }
+
+    @Test
+    @DisplayName("从存档接回来的断点照样生效：下一句前面拼说明，按真实的间隔提醒核对")
+    void restoredInterruptionStillPrefixes() {
+        long[] now = {1_000_000L + 2 * 3_600_000L};
+        FakeLlm llm = new FakeLlm().says("接上了");
+        Agent agent = agent(llm, new ToolRegistry()).clock(() -> now[0]);
+        Interruption cut = new Interruption("已取消", "把 Parser 修了", 3, 1_000_000L, 2);
+
+        agent.restore(List.of(
+                        ChatMessage.user("把 Parser 修了"),
+                        ChatMessage.assistant("(上一轮已取消，没有做完)")),
+                null, cut);
+        assertEquals(cut, agent.unfinished().orElseThrow(), "界面靠它提示「继续」");
+
+        agent.run("继续");
+        String sent = lastUser(llm.received.get(0));
+        assertTrue(sent.startsWith("<turn_interrupted>") && sent.contains("约 2 小时"), sent);
+    }
+
+    @Test
+    @DisplayName("存档里的断点要对得上历史：条数不一样（被回退过、手改过）就不认")
+    void restoredInterruptionMustMatchHistory() {
+        Agent agent = agent(new FakeLlm(), new ToolRegistry());
+
+        // 断点记的是 4 条，存档里只有 2 条——中间被回退过，那个断点指的是另一段现场
+        agent.restore(List.of(ChatMessage.user("在吗"), ChatMessage.assistant("在的，有什么事")),
+                null, new Interruption("已取消", "在吗", 1, 1L, 4));
+
+        assertTrue(agent.unfinished().isEmpty(),
+                "那一轮明明说完了，还提示「继续」就是在误导");
     }
 
     private static String resultOf(List<ChatMessage> messages, String toolCallId) {

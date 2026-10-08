@@ -636,4 +636,29 @@ class SessionStoreTest {
         assertTrue(loaded.isPresent(), "少一个可选字段不该让整份存档读不出来");
         assertEquals(TokenLedger.EMPTY, loaded.get().ledger(), "当空账本处理");
     }
+
+    // ---------- 断点跟着存档走 ----------
+
+    @Test
+    @DisplayName("断点跟着存档走——关了终端再 /continue，照样知道上一轮断在半路")
+    void roundTripsInterruption() {
+        SessionStore store = store();
+        Interruption cut = new Interruption("已取消", "把 Parser 修了", 3, 1758100000000L, 4);
+
+        store.save(ID, history(), ws(), "deepseek-flash", STARTED,
+                (ContextManager.Compaction) null, TokenLedger.EMPTY, cut);
+
+        assertEquals(cut, store.latest(ws()).orElseThrow().interrupted());
+    }
+
+    @Test
+    @DisplayName("没断过就不写这个字段；老存档没有它也照样读得出来")
+    void noInterruptionMeansNoField() throws IOException {
+        SessionStore store = store();
+        store.save(ID, history(), ws(), "deepseek-flash", STARTED);
+
+        String raw = Files.readString(store.pathFor(ws(), ID));
+        assertFalse(new ObjectMapper().readTree(raw).hasNonNull("interrupted"), raw);
+        assertNull(store.latest(ws()).orElseThrow().interrupted());
+    }
 }

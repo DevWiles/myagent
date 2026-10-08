@@ -14,7 +14,7 @@ import dev.wiles.myagent.team.TeamResult;
 import java.util.ArrayList;
 import java.util.List;
 import dev.wiles.myagent.agent.AgentEvent;
-import dev.wiles.myagent.agent.Interruption;
+import dev.wiles.myagent.context.Interruption;
 
 /**
  * 前后端之间的线上协议：一行一个 JSON 对象，用字段 {@code t} 区分类型。

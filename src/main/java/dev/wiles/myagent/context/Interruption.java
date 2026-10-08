@@ -1,4 +1,4 @@
-package dev.wiles.myagent.agent;
+package dev.wiles.myagent.context;
 
 /**
  * 上一轮断在了半路。这是「无感续做」唯一需要的状态。
@@ -18,8 +18,16 @@ package dev.wiles.myagent.agent;
  * @param userInput 被打断的那一轮，用户原本说的是什么
  * @param steps     断掉之前跑到第几步
  * @param at        断掉的时刻，epoch 毫秒
+ * @param messages  封口之后对话有多少条（不含 system）。断点会跟着会话存档落盘，
+ *                  接回来时拿它对账：条数对不上，说明那段历史被回退过或改过，
+ *                  断点指的已经是另一段现场，不认
  */
-public record Interruption(String reason, String userInput, int steps, long at) {
+public record Interruption(String reason, String userInput, int steps, long at, int messages) {
+
+    /** 这份断点说的是不是眼前这段对话。 */
+    public boolean matches(java.util.List<?> conversation) {
+        return conversation != null && conversation.size() == messages;
+    }
 
     /**
      * 一句话交代断在哪儿，给界面拼进提示语。
@@ -63,9 +71,19 @@ public record Interruption(String reason, String userInput, int steps, long at) 
                 .append("- 执行到一半被打断的命令或写入可能已经部分生效，先检查现状再决定是否重试。\n");
         long gap = now - at;
         if (gap >= STALE_AFTER_MILLIS) {
-            note.append("距离中断已经过去约 ").append(gap / 60_000L)
-                    .append(" 分钟，这期间文件可能被改过，动手前先核对相关文件的当前内容。\n");
+            note.append("距离中断已经过去约 ").append(humanGap(gap))
+                    .append("，这期间文件可能被改过，动手前先核对相关文件的当前内容。\n");
         }
         return note.append("</turn_interrupted>").toString();
+    }
+
+    /** 断点会跟着存档过夜，「约 4320 分钟」没人读得懂。 */
+    private static String humanGap(long millis) {
+        long minutes = millis / 60_000L;
+        if (minutes < 60) {
+            return minutes + " 分钟";
+        }
+        long hours = minutes / 60;
+        return hours < 48 ? hours + " 小时" : hours / 24 + " 天";
     }
 }

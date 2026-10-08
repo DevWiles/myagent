@@ -764,7 +764,8 @@ public final class AgentServer extends WebSocketServer {
             } finally {
                 // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
                 sessions.save(sessionId, agent.history(), workspace.root(),
-                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
+                        agent.unfinished().orElse(null));
                 busy.set(false);
                 ObjectNode idle = Protocol.event("busy");
                 idle.put("busy", false);
@@ -972,7 +973,9 @@ public final class AgentServer extends WebSocketServer {
      */
     private void adopt(SessionSnapshot snapshot) {
         // 段一起带回来，续聊时不用重新 map 一遍
-        int restored = agent.restore(snapshot.restorable(), snapshot.usableCompaction());
+        // 断点也接回来（对得上账才认，见 Agent.restore）：关了终端再 /continue，照样能「继续」
+        int restored = agent.restore(snapshot.restorable(), snapshot.usableCompaction(),
+                snapshot.interrupted());
         // 账本也接回来：对话是接着的，账就不该归零
         meter.reset();
         meter.seed(snapshot.ledger());
@@ -989,6 +992,8 @@ public final class AgentServer extends WebSocketServer {
         done.put("sentTokens", meter.snapshot().promptTokens());
         done.put("completionTokens", meter.snapshot().completionTokens());
         done.put("contextLimit", agent.contextLimit());
+        agent.unfinished().ifPresent(
+                cut -> Protocol.encodeInterruption(done.putObject("interrupted"), cut));
         publish(done);
     }
 
@@ -1118,7 +1123,8 @@ public final class AgentServer extends WebSocketServer {
                     int n = Math.max(1, Math.min(cp.historySize(), hist.size()));
                     agent.restore(n <= 1 ? List.of() : hist.subList(1, n));
                     sessions.save(sessionId, agent.history(), workspace.root(),
-                            config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+                            config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
+                            agent.unfinished().orElse(null));
                     checkpoints.truncateAfter(cp);
                     userTurn = userTurnsBefore(n);
                 }
@@ -1191,7 +1197,8 @@ public final class AgentServer extends WebSocketServer {
                 // 不在这儿 publish compacted —— 压缩落地时 Agent 已经发过一次，
                 // 经 onAgentEvent 播出去了。这儿再发一条，界面上就是同一次压缩画两遍
                 sessions.save(sessionId, agent.history(), workspace.root(),
-                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot());
+                        config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
+                        agent.unfinished().orElse(null));
             } catch (RuntimeException e) {
                 log.error("压缩跑挂了", e);
                 publish(error("压缩失败：" + e.getMessage()));

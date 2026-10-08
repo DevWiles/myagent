@@ -3,7 +3,7 @@ package dev.wiles.myagent.server;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
-import dev.wiles.myagent.agent.Interruption;
+import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.team.TeamStatus;
@@ -103,7 +103,7 @@ class ProtocolTest {
     @Test
     @DisplayName("断在半路的 failed 带上断点：界面据此提示「说一句继续就能接上」")
     void failedCarriesInterruption() {
-        Interruption cut = new Interruption("已取消", "把 Main 改了", 3, 1758100000000L);
+        Interruption cut = new Interruption("已取消", "把 Main 改了", 3, 1758100000000L, 6);
 
         ObjectNode n = Protocol.encode(new AgentEvent.Failed("已取消", cut));
 
@@ -124,7 +124,7 @@ class ProtocolTest {
     @Test
     @DisplayName("子任务的断点不往外发：计划有自己的续跑，「继续」接的是主对话")
     void subTaskFailureHasNoInterruption() {
-        Interruption cut = new Interruption("已取消", "x", 1, 1L);
+        Interruption cut = new Interruption("已取消", "x", 1, 1L, 2);
 
         assertFalse(Protocol.encode(new AgentEvent.Failed("已取消", cut), "t3").has("interrupted"));
     }

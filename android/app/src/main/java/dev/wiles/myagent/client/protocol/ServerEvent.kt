@@ -179,6 +179,8 @@ sealed interface ServerEvent {
     data class SessionRestored(
         override val seq: Long?, val messages: Int, val turns: Int, val firstMessage: String,
         val tokens: Long?, val sentTokens: Long?, val contextLimit: Long?,
+        /** 接回来的那段断在了半路（协议 3.9）。 */
+        val interrupted: Interrupted?,
     ) : ServerEvent
 
     data class ErrorEvent(override val seq: Long?, val message: String) : ServerEvent
@@ -393,6 +395,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
         "session_restored" -> ServerEvent.SessionRestored(
             seq, o.int("messages"), o.int("turns"), o.str("firstMessage"),
             o.longOrNull("tokens"), o.longOrNull("sentTokens"), o.longOrNull("contextLimit"),
+            interruptedOf(o),
         )
 
         "error" -> ServerEvent.ErrorEvent(seq, o.str("message"))

@@ -1,5 +1,7 @@
 package dev.wiles.myagent.agent;
 
+import dev.wiles.myagent.context.Interruption;
+
 /**
  * agent 运行过程中发出的事件，供界面实时展示。
  *

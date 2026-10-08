@@ -267,7 +267,8 @@ class SessionStore {
                     it.copy(
                         ready = it.ready?.copy(continuable = null),
                         sessionPicker = null,
-                        interrupted = null,
+                        // 接回来的那段断在半路的话断点跟着回来；没有就清掉上一段的（同 TUI）
+                        interrupted = event.interrupted,
                         tokens = event.tokens ?: it.tokens,
                         sentTokens = event.sentTokens ?: it.sentTokens,
                         contextLimit = event.contextLimit ?: it.contextLimit,
@@ -278,6 +279,7 @@ class SessionStore {
                     "接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。" +
                         "上次首句：${event.firstMessage}",
                 )
+                event.interrupted?.let { notice(Entry.Notice.Level.INFO, continueHint(it)) }
             }
 
             is ServerEvent.PlanCreated -> {

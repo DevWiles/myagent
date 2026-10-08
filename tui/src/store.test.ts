@@ -1441,6 +1441,28 @@ describe('断在半路之后提示「继续」', () => {
     expect(store.getSnapshot().interrupted).toEqual(cut)
   })
 
+  test('接回来的会话断在半路：「接上了」后面紧跟「继续」提示', () => {
+    const store = new SessionStore()
+    feed(store, ready(), {
+      t: 'session_restored', id: '20260918-143210-3f9a', messages: 4, turns: 1,
+      firstMessage: '把 Main 改了', savedAt: 1, interrupted: cut,
+    } as ServerEvent)
+
+    const texts = store.getSnapshot().entries.filter(e => e.kind === 'notice').map(e => (e as { text: string }).text)
+    expect(texts[texts.length - 1]).toBe('现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求')
+    expect(store.getSnapshot().interrupted).toEqual(cut)
+  })
+
+  test('接回来的会话没断过：清掉上一段的断点', () => {
+    const store = new SessionStore()
+    feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, {
+      t: 'session_restored', id: '20260918-143210-3f9a', messages: 4, turns: 1,
+      firstMessage: 'x', savedAt: 1,
+    } as ServerEvent)
+
+    expect(store.getSnapshot().interrupted).toBeNull()
+  })
+
   test('清空对话后断点不作数', () => {
     const store = new SessionStore()
     feed(store, ready(), { t: 'failed', reason: '已取消', interrupted: cut }, { t: 'reset_done' })

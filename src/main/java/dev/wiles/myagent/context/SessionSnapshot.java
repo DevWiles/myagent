@@ -2,6 +2,7 @@ package dev.wiles.myagent.context;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.wiles.myagent.llm.ChatMessage;
 
 import java.nio.file.Path;
@@ -62,6 +63,8 @@ import java.util.List;
  *                 当空值处理即可。升版号只该用在「按旧结构解析会得到<b>错误</b>数据」那种场合——
  *                 比如格式 2 存的是压缩后的历史，收进来会让用户看见一段假对话。
  *                 为一个新增字段把用户已有的会话全作废，代价和收益不成比例
+ * @param interrupted 存盘时这段对话断在半路的话，那份断点；没断就是 null，文件里不写这个字段。
+ *                 老存档没有它，读出来也是 null
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SessionSnapshot(
@@ -76,7 +79,8 @@ public record SessionSnapshot(
         List<SummarySegment> segments,
         String summary,
         int coversUpTo,
-        TokenLedger ledger) {
+        TokenLedger ledger,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Interruption interrupted) {
 
     /**
      * 当前格式版本。改了消息结构就把它 +1，老存档会被自动忽略。
@@ -114,7 +118,8 @@ public record SessionSnapshot(
      */
     public static SessionSnapshot of(String id, List<ChatMessage> history, Path workspace,
                                      String model, String branch, long startedAt, long now,
-                                     ContextManager.Compaction compaction, TokenLedger ledger) {
+                                     ContextManager.Compaction compaction, TokenLedger ledger,
+                                     Interruption interrupted) {
         List<ChatMessage> conversation = history == null || history.size() <= 1
                 ? List.of()
                 : history.subList(1, history.size());
@@ -124,7 +129,7 @@ public record SessionSnapshot(
                 compaction == null ? List.of() : compaction.segments(),
                 compaction == null ? null : compaction.summary(),
                 compaction == null ? 0 : compaction.coversUpTo(),
-                ledger);
+                ledger, interrupted);
     }
 
     /**

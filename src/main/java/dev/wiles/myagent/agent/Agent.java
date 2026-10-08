@@ -10,6 +10,7 @@ import dev.wiles.myagent.llm.ToolSpec;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.ContextWindow;
 import dev.wiles.myagent.context.HistoryRepair;
+import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.context.PinnedFacts;
 import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.SummarySegment;
@@ -366,6 +367,24 @@ public final class Agent {
                     known.coversUpTo(), size);
         }
         return safe.size();
+    }
+
+    /**
+     * 连断点一起接回来。关了终端再 {@code /continue}，界面照样提示「继续」，
+     * 下一句照样拼上中断说明——而且隔了多久是按真实时间算的。
+     *
+     * <p>断点要和接回来的历史对得上账（条数相同）才认。对不上说明存档里那段被回退过、
+     * 改过，或者恢复时被修剪过——断点描述的已经不是眼前的现场，提示「继续」就是误导。
+     *
+     * @param cut 存档里的断点，没有就是 null
+     */
+    public int restore(List<ChatMessage> conversation, ContextManager.Compaction known,
+                       Interruption cut) {
+        int restored = restore(conversation, known);
+        if (cut != null && cut.matches(conversation())) {
+            unfinished = cut;
+        }
+        return restored;
     }
 
     /** 不带压缩状态的恢复。 */
@@ -950,7 +969,8 @@ public final class Agent {
 
     private void seal(String reason, String userInput, int step) {
         sealWithoutInterruption(reason);
-        unfinished = new Interruption(reason, userInput, step, clock.getAsLong());
+        unfinished = new Interruption(reason, userInput, step, clock.getAsLong(),
+                conversation().size());
     }
 
     /**
@@ -1012,7 +1032,7 @@ public final class Agent {
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
             unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
-                    clock.getAsLong());
+                    clock.getAsLong(), conversation().size());
             emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
             return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
         } catch (LlmException e) {

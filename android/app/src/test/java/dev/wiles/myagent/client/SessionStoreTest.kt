@@ -223,6 +223,28 @@ class ContinueHintTest {
     }
 
     @Test
+    fun `接回来的会话断在半路，「接上了」后面紧跟「继续」提示`() {
+        val s = store()
+        s.feed(
+            """{"t":"session_restored","id":"20260918-143210-3f9a","messages":4,"turns":1,""" +
+                """"firstMessage":"把 Main 改了","savedAt":1,"interrupted":$cut}""",
+        )
+        val last = s.state.value.entries.filterIsInstance<Entry.Notice>().last().text
+        assertEquals("现场还在（断在第 3 步）· 说「继续」接着做，或者直接交代新的要求", last)
+        assertEquals(3, s.state.value.interrupted?.steps)
+    }
+
+    @Test
+    fun `接回来的会话没断过，清掉上一段的断点`() {
+        val s = store()
+        s.feed(
+            """{"t":"failed","reason":"已取消","interrupted":$cut}""",
+            """{"t":"session_restored","id":"x","messages":4,"turns":1,"firstMessage":"x","savedAt":1}""",
+        )
+        assertNull(s.state.value.interrupted)
+    }
+
+    @Test
     fun `清空对话后断点不作数`() {
         val s = store()
         s.feed(

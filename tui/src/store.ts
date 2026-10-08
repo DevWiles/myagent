@@ -1003,12 +1003,14 @@ export class SessionStore {
       case 'session_restored': {
         // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史。
         // 面板也收：挑完了还摆在屏幕上，下一次 ↑↓ 会落在一个已经接过的列表上
-        this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: null })
+        // 接回来的那段要是断在半路，断点跟着回来（协议 3.9）；没有就清掉上一段的
+        this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: event.interrupted ?? null })
         this.notice(
           'info',
           `接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。` +
             `上次首句：${event.firstMessage}`,
         )
+        if (event.interrupted) this.notice('info', continueHint(event.interrupted))
         if (event.tokens !== undefined) {
           this.set({ tokens: event.tokens })
         }

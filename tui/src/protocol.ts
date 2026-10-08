@@ -171,6 +171,8 @@ export type ServerEvent =
       /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
       sentTokens?: number
       contextLimit?: number
+      /** 接回来的那段断在了半路（协议 3.9）。 */
+      interrupted?: Interrupted
     }
   /**
    * 压缩正在进行，画进度条。
