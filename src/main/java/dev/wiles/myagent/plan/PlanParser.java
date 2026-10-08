@@ -28,8 +28,8 @@ public final class PlanParser {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** 根计划的解析结果：模型复述的目标 + 一批根任务。 */
-    public record ParsedPlan(String goal, List<Task> tasks) {
+    /** 根计划的解析结果：模型复述的目标 + 从原话抽出的需求清单 + 一批根任务。 */
+    public record ParsedPlan(String goal, List<String> requirements, List<Task> tasks) {
     }
 
     private PlanParser() {
@@ -55,7 +55,7 @@ public final class PlanParser {
                     ? "拆得太粗了，把大步骤再分开。"
                     : "拆得太碎了，把关系紧密的步骤合并。"));
         }
-        return new ParsedPlan(goal.asText().strip(), tasks);
+        return new ParsedPlan(goal.asText().strip(), parseRequirements(root), tasks);
     }
 
     /**
@@ -293,6 +293,33 @@ public final class PlanParser {
         for (JsonNode f : files) {
             String value = f.asText().strip();
             if (!value.isEmpty() && !result.contains(value)) {
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 需求清单。可选：没写就是空——老模型、老测试里的计划照样能跑，只是子任务拿不到清单。
+     * 写了但不是字符串数组要报错，理由同 {@link #parseFiles}：静默吞掉等于这份清单从没存在过。
+     */
+    private static List<String> parseRequirements(JsonNode root) {
+        JsonNode node = root.get("requirements");
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        if (!node.isArray()) {
+            throw new IllegalArgumentException(
+                    "requirements 必须是字符串数组，每条一项需求，形如 \"R1 非法输入统一抛 ValueError\"。");
+        }
+        List<String> result = new ArrayList<>(node.size());
+        for (JsonNode r : node) {
+            if (!r.isTextual()) {
+                throw new IllegalArgumentException(
+                        "requirements 里每一项都必须是一句话（字符串），不要写成对象。");
+            }
+            String value = r.asText().strip();
+            if (!value.isEmpty()) {
                 result.add(value);
             }
         }

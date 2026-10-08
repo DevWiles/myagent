@@ -219,7 +219,8 @@ public final class PlanPrompt {
      * 缺了「还有哪些活没干」它只会修那一步，忘掉被连累跳过的那一串。
      */
     public static String replanUser(Plan plan, Task failed, String error) {
-        StringBuilder sb = new StringBuilder("原目标: ").append(plan.goal()).append('\n');
+        StringBuilder sb = new StringBuilder(TaskBrief.of(plan).render())
+                .append("原目标: ").append(plan.goal()).append('\n');
 
         List<Task> succeeded = plan.graph().tasks().stream()
                 .filter(t -> t.status() == TaskStatus.SUCCEEDED)
@@ -257,7 +258,12 @@ public final class PlanPrompt {
     }
 
     public static String subPlanUser(Task parent, String findings) {
-        return """
+        return subPlanUser(parent, findings, TaskBrief.NONE);
+    }
+
+    /** 子规划同样先看原话：父任务那句描述是转述，拆的时候要对着原话补全边界条件。 */
+    public static String subPlanUser(Task parent, String findings, TaskBrief brief) {
+        return (brief == null ? "" : brief.render()) + """
                 你负责的这一步是: %s
 
                 你刚才摸到的情况:

@@ -197,4 +197,31 @@ class TaskPromptTest {
 
         assertDoesNotThrow(() -> TaskPrompt.user(task, null));
     }
+
+    // ── 交底：用户原话 + 需求清单 ──────────────────────────────
+
+    @Test
+    @DisplayName("带交底时，原话和需求清单排在任务描述前面，且交代了「别做别人的活」")
+    void briefComesBeforeTheTask() {
+        Task task = new Task("t4", "按规格重写 parse_date", AgentRoles.CODER, List.of(), "测试全过");
+        TaskBrief brief = new TaskBrief("修 parse_date：月日顺序、两位年、无效日期都有问题",
+                List.of("R1 DD/MM/YYYY 按日月解析", "R2 两位年要报错"));
+
+        String prompt = TaskPrompt.user(task, List.of(), brief);
+
+        int request = prompt.indexOf("两位年、无效日期");
+        int requirement = prompt.indexOf("R2 两位年要报错");
+        int own = prompt.indexOf("按规格重写 parse_date");
+        assertTrue(request >= 0 && requirement > request && own > requirement, prompt);
+        assertTrue(prompt.contains("别的步骤的活不要做"), "交底不能变成「每一步都把整件事做一遍」");
+    }
+
+    @Test
+    @DisplayName("没有交底时一个字都不多：老调用方、流水线行为不变")
+    void emptyBriefAddsNothing() {
+        Task task = new Task("n1", "读一下 pom.xml", TaskType.FILE_READ, List.of());
+
+        assertEquals(TaskPrompt.user(task, List.of()), TaskPrompt.user(task, List.of(), TaskBrief.NONE));
+        assertFalse(TaskPrompt.user(task, List.of()).contains("用户原话"));
+    }
 }

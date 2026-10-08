@@ -121,12 +121,24 @@ public final class TaskPrompt {
      * 再抄一遍就是把同一段文字塞进上下文两次，纯烧 token。
      */
     public static String user(Task task, List<Task> upstream) {
+        return user(task, upstream, TaskBrief.NONE);
+    }
+
+    /**
+     * 带交底的版本：用户原话和需求清单排在最前面，见 {@link TaskBrief}。
+     *
+     * <p>排在前面而不是后面：任务描述是对原话的转述，先读原话再读转述，
+     * 转述漏掉的东西才有机会被注意到；反过来，读完一段具体指令再看到一大段背景，
+     * 模型多半已经按指令定好了做法。
+     */
+    public static String user(Task task, List<Task> upstream, TaskBrief brief) {
         List<Task> sources = upstream == null ? List.of() : upstream;
         String acceptance = Objects.toString(task.acceptance(), "");
         Set<String> inlined = new LinkedHashSet<>(
                 TaskRefs.referencedIn(task.description() + "\n" + acceptance));
 
-        StringBuilder sb = new StringBuilder("任务: ")
+        StringBuilder sb = new StringBuilder(brief == null ? "" : brief.render())
+                .append("你这一步的任务: ")
                 .append(TaskRefs.resolve(task.description(), sources));
 
         if (!acceptance.isEmpty()) {

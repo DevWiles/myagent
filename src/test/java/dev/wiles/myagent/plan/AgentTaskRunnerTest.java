@@ -503,4 +503,19 @@ class AgentTaskRunnerTest {
         assertTrue(outcome.subTasks().isEmpty());
         assertEquals(List.of("read_file", "list_dir"), llm.lastToolNames());
     }
+
+    @Test
+    @DisplayName("配了交底，子循环收到的第一句话里就有用户原话和需求清单")
+    void briefReachesTheSubLoop() {
+        FakeLlm llm = new FakeLlm();
+        TaskBrief brief = new TaskBrief("parse_date 的两位年要报错", List.of("R1 两位年报错"));
+
+        new AgentTaskRunner(llm, fullSet(), ROOT).withBrief(brief)
+                .run(task("n1", TaskType.FILE_READ), List.of());
+
+        String firstUser = llm.receivedMessages.get(0).stream()
+                .filter(m -> "user".equals(m.role())).findFirst().orElseThrow().content();
+        assertTrue(firstUser.contains("parse_date 的两位年要报错") && firstUser.contains("R1 两位年报错"),
+                firstUser);
+    }
 }

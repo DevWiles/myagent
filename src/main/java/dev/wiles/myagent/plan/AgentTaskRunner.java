@@ -88,6 +88,13 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     private final Set<Agent> running = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 整件事的交底，每个子任务的提示词里都带上。见 {@link TaskBrief}。
+     *
+     * <p>volatile：由编排层在开跑前设一次，读它的是池子里的工作线程。
+     */
+    private volatile TaskBrief brief = TaskBrief.NONE;
+
     /** 单客户端的便捷入口：串行场景和测试用。并行调用它的话取消会漏，见 {@link #clients}。 */
     public AgentTaskRunner(LlmClient client, ToolRegistry allTools, Path workspaceRoot) {
         this(() -> client, allTools, workspaceRoot, DEFAULT_MAX_STEPS);
@@ -128,6 +135,12 @@ public final class AgentTaskRunner implements TaskRunner {
         return this;
     }
 
+    /** 带上用户原话和需求清单。不设就和以前一样，子任务只看得到转述。 */
+    public AgentTaskRunner withBrief(TaskBrief brief) {
+        this.brief = brief == null ? TaskBrief.NONE : brief;
+        return this;
+    }
+
     /** 关掉结论行契约。理由见 {@link #verdictContract}。 */
     public AgentTaskRunner verdictContract(boolean on) {
         this.verdictContract = on;
@@ -163,7 +176,7 @@ public final class AgentTaskRunner implements TaskRunner {
         running.add(agent);
         String text;
         try {
-            text = agent.run(TaskPrompt.user(task, upstream));
+            text = agent.run(TaskPrompt.user(task, upstream, brief));
         } finally {
             running.remove(agent);
         }
@@ -234,7 +247,7 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     private TaskOutcome expand(Task task, String findings) {
         try {
-            List<Task> subTasks = planner.planSubTasks(task, findings);
+            List<Task> subTasks = planner.planSubTasks(task, findings, brief);
             log.info("任务 {} 拆出 {} 个子任务", task.id(), subTasks.size());
             return TaskOutcome.planned(findings, subTasks);
         } catch (RuntimeException e) {
