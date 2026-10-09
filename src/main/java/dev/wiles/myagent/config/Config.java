@@ -8,7 +8,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * 运行配置。读取优先级：环境变量 > ~/.myagent/config.json > 内置默认值。
+ * 运行配置。读取优先级：MYAGENT_* 环境变量 > ~/.myagent/config.json > DEEPSEEK_* 环境变量 > 内置默认值。
+ *
+ * <p>{@code DEEPSEEK_API_KEY} 这类名字是好几个工具共用的，终端里常常留着别的工具设的值
+ * （比如一把 DeepSeek 官方平台的 key）。原来它压在配置文件之上，配置文件里写着百炼的 key 和地址，
+ * 实际发出去的却是那把官方 key，百炼回 401。所以通用名字降到配置文件之后，
+ * 只在配置文件没写时兜底；要临时覆盖配置文件，用 myagent 自己的 {@code MYAGENT_API_KEY} 等。
  *
  * config.json 形如：
  * { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com", "model": "deepseek-flash" }
@@ -54,9 +59,12 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
     public static Config load() {
         JsonNode file = readConfigFile();
         return new Config(
-                pick(System.getenv("DEEPSEEK_API_KEY"), text(file, "apiKey"), null),
-                pick(System.getenv("DEEPSEEK_BASE_URL"), text(file, "baseUrl"), DEFAULT_BASE_URL),
-                pick(System.getenv("DEEPSEEK_MODEL"), text(file, "model"), DEFAULT_MODEL),
+                pick(System.getenv("MYAGENT_API_KEY"), text(file, "apiKey"),
+                        pick(System.getenv("DEEPSEEK_API_KEY"), null, null)),
+                pick(System.getenv("MYAGENT_BASE_URL"), text(file, "baseUrl"),
+                        pick(System.getenv("DEEPSEEK_BASE_URL"), null, DEFAULT_BASE_URL)),
+                pick(System.getenv("MYAGENT_MODEL"), text(file, "model"),
+                        pick(System.getenv("DEEPSEEK_MODEL"), null, DEFAULT_MODEL)),
                 contextTokens(pick(System.getenv("MYAGENT_CONTEXT_TOKENS"),
                         text(file, "contextTokens"), null)),
                 thinking(pick(System.getenv("MYAGENT_THINKING"), text(file, "thinking"), null)),

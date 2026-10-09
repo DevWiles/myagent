@@ -161,7 +161,7 @@ public final class Cli {
 
                 配置:
                   ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-flash"}
-                  环境变量 DEEPSEEK_API_KEY 优先级高于配置文件
+                  MYAGENT_API_KEY 高于配置文件，DEEPSEEK_API_KEY 只在配置文件没写 key 时才用
 
                 协议见 docs/protocol.md——照着它可以自己写一个界面。
                 """.formatted(VERSION);

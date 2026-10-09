@@ -79,7 +79,8 @@ cd 你要让它干活的目录
 java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终结
 ```
 
-配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
+配置的读取优先级是 **`MYAGENT_*` 环境变量 > `~/.myagent/config.json` > `DEEPSEEK_*` 环境变量 > 内置默认值**。
+`DEEPSEEK_API_KEY` 这类名字常被别的工具占着，所以只在配置文件没写时兜底，盖不掉配置文件：
 
 ```json
 { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com",
@@ -88,9 +89,9 @@ java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
-| `apiKey` | `DEEPSEEK_API_KEY` | 无 | 没有它只能裸跑界面 |
-| `baseUrl` | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
-| `model` | `DEEPSEEK_MODEL` | `deepseek-flash` | `deepseek-v4-pro` 是更强的那个 |
+| `apiKey` | `MYAGENT_API_KEY`（`DEEPSEEK_API_KEY` 只在文件没写时兜底） | 无 | 没有它只能裸跑界面 |
+| `baseUrl` | `MYAGENT_BASE_URL`（`DEEPSEEK_BASE_URL` 兜底） | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
+| `model` | `MYAGENT_MODEL`（`DEEPSEEK_MODEL` 兜底） | `deepseek-flash` | `deepseek-v4-pro` 是更强的那个 |
 | `contextTokens` | `MYAGENT_CONTEXT_TOKENS` | `1000000` | 上下文窗口。换模型时要改——API 不返回这个数 |
 
 `contextTokens` 除了换模型时要改，还有个用处是**把压缩逼出来**：默认 1M 的窗口下
