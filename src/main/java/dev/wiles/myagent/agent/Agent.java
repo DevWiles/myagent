@@ -1170,6 +1170,9 @@ public final class Agent {
      * 所以拿到回答就把它摘掉，只留模型那条结论。
      */
     private String forceConclusion(String userInput) {
+        if (mailbox != null) {
+            mailbox.interruptAll();      // 主 agent 要收口了，派出去的别再接着改文件
+        }
         history.add(ChatMessage.user(
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {

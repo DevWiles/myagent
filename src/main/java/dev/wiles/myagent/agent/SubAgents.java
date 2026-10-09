@@ -15,6 +15,7 @@ import dev.wiles.myagent.tool.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,9 +33,11 @@ import java.util.function.Supplier;
  *   <li><b>异步</b>：{@code spawn_agent} 立刻返回 id，子 agent 在后台线程上跑，主 agent 接着干自己的。
  *       做完时结果作为 {@code <subagent_notification>} 注入主 agent 的对话（见 {@link Mailbox}），
  *       不用主 agent 去问；真要卡在它的结果上才用 {@code wait_agent}。</li>
- *   <li><b>会写</b>：{@code worker} 直接改工作区——和主 agent、和别的 worker 共用一个目录，
- *       冲突靠派活时划清<b>写入集合</b>（提示词里的规矩），不靠隔离。{@code explorer}
- *       没有写文件的工具。</li>
+ *   <li><b>会写</b>：{@code worker} 直接改工作区——和主 agent、和别的 worker 共用一个目录。
+ *       Codex 只靠提示词让各方守住<b>写入集合</b>；这里多做一步，由框架锁住（见 {@link OwnedWrite}）：
+ *       派 worker 必须写明 {@code owns}，它跑着的时候别人写不了这些路径，它也只能写这些路径。
+ *       cookiecutter 上主 agent 把 prompt.py 派给 agent-5 之后自己也接着改，两边反复互相覆盖——
+ *       光靠提示词约束不住。{@code explorer} 没有写文件的工具。</li>
  *   <li><b>能复用</b>：{@code send_input} 给已有的子 agent 追加话（排队或打断），它的上下文还在；
  *       {@code close_agent} 关掉释放名额，{@code resume_agent} 再打开。</li>
  *   <li><b>上限</b>：同时开着的最多 {@link #MAX_THREADS} 个（做完没关的也算），深度 1——
@@ -66,6 +69,9 @@ public final class SubAgents implements Mailbox {
     /** 这五个工具。子 agent 的菜单上一个都没有——深度 1。 */
     public static final Set<String> TOOL_NAMES =
             Set.of("spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent");
+
+    /** 写入方是主 agent 时的名字。 */
+    static final String MAIN = "主 agent";
 
     /** 通知的开头。界面按 user 消息数截转录时要跳过它——那不是人说的话。 */
     public static final String NOTICE_TAG = "<subagent_notification>";
@@ -104,7 +110,7 @@ public final class SubAgents implements Mailbox {
             "subagents/roles/explorer.md", Set.of("write_file", "create_project", "remember"));
     static final Role WORKER = new Role("worker", """
             用来干活：实现功能的一部分、修测试或 bug、把大重构拆成独立的几块。
-              - 明确交代它**负责哪些文件/模块**（所有权），比如「worker 1 负责鉴权模块，worker 2 负责数据库层」，避免互相冲突。
+              - 用 owns 明确交代它**负责哪些文件/模块**（所有权，必填），比如「worker 1 负责鉴权模块，worker 2 负责数据库层」。它跑着的时候这些路径只有它能写，你也写不了。
               - 告诉它**不是一个人在改这个代码库**：别人改的不要回退，要调整自己的实现去适配。""",
             "subagents/roles/worker.md", Set.of());
     static final Map<String, Role> ROLES = Map.of(
@@ -143,11 +149,14 @@ public final class SubAgents implements Mailbox {
         String interruptWith;
         /** send_input 排队的话，它下一步请求前收到（{@link Agent} 的收件箱）。 */
         final List<String> queued = new ArrayList<>();
+        /** 它负责的文件/目录（绝对、规范化）。它跑着的时候只有它能写；空表示不独占。 */
+        final List<Path> owns;
 
-        Child(String id, Role role, Agent agent) {
+        Child(String id, Role role, Agent agent, List<Path> owns) {
             this.id = id;
             this.role = role;
             this.agent = agent;
+            this.owns = owns;
         }
     }
 
@@ -162,6 +171,7 @@ public final class SubAgents implements Mailbox {
 
     private final Supplier<LlmClient> clients;
     private final ToolRegistry allTools;
+    private final Path root;
     private final Supplier<ContextManager> contexts;
     private final int childMaxSteps;
     private final Mode mode;
@@ -171,28 +181,65 @@ public final class SubAgents implements Mailbox {
     /**
      * @param clients       <b>每个子 agent 现造一个</b>客户端：{@code DeepSeekClient} 带可变状态，共用会互相踩取消
      * @param allTools      主 agent 的全量注册表，子 agent 的菜单在派出那一刻从这里筛
+     * @param workspaceRoot 工作区根目录，{@code owns} 和写文件的路径都按它解析
      * @param contexts      每个子 agent 一份上下文管理器（和主 agent 同样的窗口）
      * @param childMaxSteps 子 agent 每一轮的步数上限，{@code <= 0} 不限（和主 agent 一样）
      * @param events        子 agent 的动静往哪发，第一个参数是它的 id（{@code agent-N}）；传 null 不发
      */
-    public SubAgents(Supplier<LlmClient> clients, ToolRegistry allTools, Supplier<ContextManager> contexts,
-                     int childMaxSteps, Mode mode, BiConsumer<String, AgentEvent> events) {
+    public SubAgents(Supplier<LlmClient> clients, ToolRegistry allTools, Path workspaceRoot,
+                     Supplier<ContextManager> contexts, int childMaxSteps, Mode mode,
+                     BiConsumer<String, AgentEvent> events) {
         if (mode == Mode.OFF) {
             throw new IllegalArgumentException("OFF 就别造它");
         }
         this.clients = clients;
         this.allTools = allTools;
+        this.root = workspaceRoot.toAbsolutePath().normalize();
         this.contexts = contexts;
         this.childMaxSteps = childMaxSteps;
         this.mode = mode;
         this.events = events == null ? (id, e) -> { } : events;
     }
 
-    /** 接到主 agent 上：它的系统提示词子 agent 沿用，它的收件箱就是这里。 */
+    /**
+     * 接到主 agent 上：它的系统提示词子 agent 沿用，它的收件箱就是这里。
+     * 同时把注册表里的写文件工具换成带归属检查的那一版（写入方记作主 agent）。
+     */
     public SubAgents attach(Agent parent) {
         this.parent = parent;
         parent.withMailbox(this);
+        for (Tool tool : List.copyOf(allTools.all())) {
+            if (BuiltinTools.WRITING_TOOLS.contains(tool.name()) && !(tool instanceof OwnedWrite)) {
+                allTools.replace(new OwnedWrite(tool, MAIN));
+            }
+        }
         return this;
+    }
+
+    /**
+     * 叫停所有在跑的子 agent，最多等 {@code graceMillis} 让它们停稳。
+     * 无头运行退出前调：不然进程一退，子 agent 写到一半的文件就留在那儿。
+     *
+     * @return 都停下了
+     */
+    public boolean stopAll(long graceMillis) {
+        interruptAll();
+        long until = System.nanoTime() + graceMillis * 1_000_000L;
+        synchronized (lock) {
+            while (children.values().stream().anyMatch(c -> c.running)) {
+                long left = (until - System.nanoTime()) / 1_000_000L;
+                if (left <= 0) {
+                    return false;
+                }
+                try {
+                    lock.wait(left);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     /** 五个工具。注册到主 agent 的注册表里。 */
@@ -390,15 +437,69 @@ public final class SubAgents implements Mailbox {
 
     // ---------------------------------------------------------------- 子 agent 的构造
 
-    /** 按角色从全量注册表里筛：拿掉这五个工具（深度 1），再拿掉角色不许用的。 */
-    private ToolRegistry toolsFor(Role role) {
+    /**
+     * 按角色从全量注册表里筛：拿掉这五个工具（深度 1），再拿掉角色不许用的。
+     * 写文件的工具换成以这个子 agent 为写入方的那一版。
+     */
+    private ToolRegistry toolsFor(Role role, String id) {
         ToolRegistry narrowed = new ToolRegistry();
         for (Tool tool : allTools.all()) {
-            if (!TOOL_NAMES.contains(tool.name()) && !role.excluded().contains(tool.name())) {
-                narrowed.register(tool);
+            if (TOOL_NAMES.contains(tool.name()) || role.excluded().contains(tool.name())) {
+                continue;
             }
+            narrowed.register(tool instanceof OwnedWrite w ? new OwnedWrite(w.inner, id) : tool);
         }
         return narrowed;
+    }
+
+    /** 相对工作区的路径解析成绝对、规范化的。 */
+    private Path resolve(String path) {
+        Path p = Path.of(path.strip());
+        return (p.isAbsolute() ? p : root.resolve(p)).normalize();
+    }
+
+    /** 给人看的路径：工作区里的写成相对的。 */
+    private String show(Path p) {
+        return p.startsWith(root) ? String.valueOf(root.relativize(p)) : p.toString();
+    }
+
+    /**
+     * 这次写入能不能做。null 表示可以，否则是拒绝的理由。
+     *
+     * <ul>
+     *   <li>路径归一个<b>正在跑</b>的子 agent，写入方又不是它——拒绝</li>
+     *   <li>写入方自己有 owns，路径不在里面——拒绝（worker 只写自己负责的）</li>
+     * </ul>
+     * 子 agent 交了结果（不在跑了），它那片就放开，主 agent 可以接着整合。
+     */
+    String checkWrite(String writer, List<String> paths) {
+        synchronized (lock) {
+            Child self = children.get(writer);
+            for (String raw : paths) {
+                Path p = resolve(raw);
+                for (Child c : children.values()) {
+                    if (c.id.equals(writer) || !c.running || c.closed) {
+                        continue;
+                    }
+                    for (Path o : c.owns) {
+                        if (p.startsWith(o)) {
+                            return show(p) + " 现在归 " + c.id + "（正在跑，负责 " + owned(c) + "）。"
+                                    + "等它交回结果再改，或者用 send_input 让它改，或者 close_agent 收回。"
+                                    + "派出去的活不要自己再做一遍。";
+                        }
+                    }
+                }
+                if (self != null && !self.owns.isEmpty() && self.owns.stream().noneMatch(p::startsWith)) {
+                    return "你只负责 " + owned(self) + "，" + show(p) + " 不归你。"
+                            + "需要改别的文件，就在最后的答复里写清楚要改什么，交给主 agent。";
+                }
+            }
+            return null;
+        }
+    }
+
+    private String owned(Child c) {
+        return String.join("、", c.owns.stream().map(this::show).toList());
     }
 
     /**
@@ -459,7 +560,8 @@ public final class SubAgents implements Mailbox {
                       "properties": {
                         "message": {"type": "string", "description": "交给新 agent 的任务。它默认看不到你的对话，要把它需要知道的都写进来"},
                         "agent_type": {"type": "string", "enum": ["default", "explorer", "worker"], "description": "不传就是 default"},
-                        "fork_context": {"type": "boolean", "description": "true 把你到目前为止的对话复制给它；不传或 false 时它只看到 message"}
+                        "fork_context": {"type": "boolean", "description": "true 把你到目前为止的对话复制给它；不传或 false 时它只看到 message"},
+                        "owns": {"type": "array", "items": {"type": "string"}, "description": "它负责（独占写）的文件或目录，相对工作区。worker 必填。它跑着的时候你和别的 agent 写不了这些路径，它也只能写这些路径；它交回结果后放开"}
                       },
                       "required": ["message"]
                     }
@@ -478,20 +580,46 @@ public final class SubAgents implements Mailbox {
             if (parentAgent == null) {
                 return ToolResult.error("子 agent 没接到主 agent 上（SubAgents.attach 没调）");
             }
+            List<Path> owns = Args.optStringList(args, "owns").stream()
+                    .filter(o -> !o.isBlank()).map(SubAgents.this::resolve).distinct().toList();
+            if (role == WORKER && owns.isEmpty()) {
+                return ToolResult.error("派 worker 要用 owns 写明它负责哪些文件或目录——"
+                        + "它跑着的时候只有它能写这些路径，别人（包括你）写不了，这样才不会互相覆盖");
+            }
+            for (Path o : owns) {
+                if (!o.startsWith(root) || o.equals(root)) {
+                    return ToolResult.error("owns 要是工作区里的具体文件或目录，不能是整个工作区: " + o);
+                }
+            }
             synchronized (lock) {
                 if (open() >= MAX_THREADS) {
                     return ToolResult.error("已经开着 " + MAX_THREADS + " 个子 agent 了（做完没关的也占名额）。"
                             + "先用 close_agent 关掉不再需要的，或者自己做。");
                 }
             }
+            synchronized (lock) {
+                for (Child c : children.values()) {
+                    if (!c.running || c.closed) {
+                        continue;
+                    }
+                    for (Path o : owns) {
+                        for (Path theirs : c.owns) {
+                            if (o.startsWith(theirs) || theirs.startsWith(o)) {
+                                return ToolResult.error(show(o) + " 和正在跑的 " + c.id + " 负责的 " + show(theirs)
+                                        + " 重叠了。写入范围要互不相交：换一种拆法，或者等它做完");
+                            }
+                        }
+                    }
+                }
+            }
             String id = "agent-" + SEQ.incrementAndGet();
-            Agent agent = new Agent(clients.get(), toolsFor(role), parentAgent.systemPrompt(),
+            Agent agent = new Agent(clients.get(), toolsFor(role, id), parentAgent.systemPrompt(),
                     childMaxSteps, contexts.get())
                     .withWritingTools(BuiltinTools.WRITING_TOOLS);
             if (args.path("fork_context").asBoolean(false)) {
                 agent.restore(forked(parentAgent.conversation()));
             }
-            Child child = new Child(id, role, agent);
+            Child child = new Child(id, role, agent, owns);
             agent.withMailbox(new ChildInbox(child));
             agent.onEvent(event -> {
                 if (event instanceof AgentEvent.Failed f) {
@@ -506,7 +634,8 @@ public final class SubAgents implements Mailbox {
                     return ToolResult.error("已经开着 " + MAX_THREADS + " 个子 agent 了，先 close_agent 关掉不需要的");
                 }
                 children.put(id, child);
-                startTurn(child, brief(id, role, message));
+                startTurn(child, brief(id, role, owns.isEmpty() ? message
+                        : message + "\n\n你负责（只有你能写、你也只能写）：" + owned(child)));
             }
             spawned.incrementAndGet();
             log.info("派出 {}（{}）: {}", id, role.id(), message.length() > 80 ? message.substring(0, 80) + "…" : message);
@@ -741,6 +870,63 @@ public final class SubAgents implements Mailbox {
                 out.set("status", status(child));
                 return json(out);
             }
+        }
+    }
+
+    /**
+     * 带归属检查的写文件工具。包在 {@code write_file} / {@code create_project} 外面，
+     * 每个写入方（主 agent、各个子 agent）各一份，写之前问 {@link #checkWrite}。
+     *
+     * <p>bash 也能写文件，这里拦不住——和 {@link BuiltinTools#WRITING_TOOLS} 是同一个口径：
+     * 绝大多数改动走写文件工具，挡住它就挡住了「两边反复覆盖同一个文件」的主路。
+     */
+    final class OwnedWrite implements Tool {
+        final Tool inner;
+        private final String writer;
+
+        OwnedWrite(Tool inner, String writer) {
+            this.inner = inner;
+            this.writer = writer;
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public String description() {
+            return inner.description();
+        }
+
+        @Override
+        public String parametersSchema() {
+            return inner.parametersSchema();
+        }
+
+        @Override
+        public boolean parallelSafe() {
+            return inner.parallelSafe();
+        }
+
+        @Override
+        public ToolResult execute(JsonNode args) {
+            List<String> paths = new ArrayList<>();
+            if (args.hasNonNull("path") && args.get("path").isTextual()) {
+                paths.add(args.get("path").asText());
+            }
+            args.path("files").forEach(f -> {
+                if (f.path("path").isTextual()) {
+                    paths.add(f.path("path").asText());
+                }
+            });
+            args.path("dirs").forEach(d -> {
+                if (d.isTextual()) {
+                    paths.add(d.asText());
+                }
+            });
+            String refused = checkWrite(writer, paths);
+            return refused == null ? inner.execute(args) : ToolResult.error(refused);
         }
     }
 

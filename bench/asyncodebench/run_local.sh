@@ -6,7 +6,10 @@
 #
 # 前提：~/workspace/AsynCodeBench 已经 setup_evaluation.sh 过、.env 填了 key；
 # 适配器拷在 reproductions/async-swe-agents/my_agents/；target/myagent.jar 已打包。
-# 任务容器在本机是 arm64，所以默认用 aarch64 的 JRE（服务器上是 linux-x64 那份）。
+# 框架固定用 --platform linux/amd64 起任务容器，在 Apple Silicon 上走 Rosetta 模拟，所以 JRE 用 linux-x64 那份。
+# 镜像要用 docker-container 构建器（acb）构建：Docker Desktop 的 containerd 镜像存储里，
+# 默认构建器构建出的镜像不带平台信息，docker run --platform 找不到它。只用环境变量指定，不动全局默认构建器：
+#   docker buildx create --name acb --driver docker-container
 set -u
 LABEL=$1; CFG=$2; RUNS=${3:-1}; TASK=${4:-cookiecutter}; PROTO=${5:-single}
 ACB=${ACB_ROOT:-$HOME/workspace/AsynCodeBench}
@@ -14,9 +17,13 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNNER="$ACB/reproductions/async-swe-agents"
 LOG="$REPO/bench/results/acb-local"; mkdir -p "$LOG"
 cp "$REPO/bench/asyncodebench/myagent_adapter.py" "$RUNNER/my_agents/myagent_adapter.py"
-CFG=$(python3 -c 'import json,sys,os; c=json.loads(sys.argv[1]); c.setdefault("jar",sys.argv[2]); c.setdefault("jre",os.path.expanduser("~/jre/jre17-aarch64.tar.gz")); c.setdefault("timeout",3600); print(json.dumps(c))' "$CFG" "$REPO/target/myagent.jar")
+CFG=$(python3 -c 'import json,sys,os; c=json.loads(sys.argv[1]); c.setdefault("jar",sys.argv[2]); c.setdefault("jre",os.path.expanduser("~/jre/jre17-x64.tar.gz")); c.setdefault("timeout",3600); print(json.dumps(c))' "$CFG" "$REPO/target/myagent.jar")
 cd "$RUNNER" || exit 1
 export PATH="$RUNNER/.venv/bin:$PATH"
+export BUILDX_BUILDER=acb
+# 框架构建时不给 buildx 指定平台，构建阶段就按本机 arm64 跑，装进镜像的是 aarch64 的 Python，
+# 而运行时是 amd64——容器一起来就 exec 失败。整个构建都钉在 amd64 上
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
 export ENV_FILE="$RUNNER/.env"; source scripts/env.sh
 STAMP=$(date +%m%d%H%M)
 for i in $(seq 1 "$RUNS"); do

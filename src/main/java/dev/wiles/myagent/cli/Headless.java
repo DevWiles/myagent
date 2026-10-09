@@ -177,7 +177,7 @@ public final class Headless {
                 AtomicInteger subagentSteps = new AtomicInteger();
                 SubAgents.Mode subMode = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
                 SubAgents subagents = subMode == SubAgents.Mode.OFF ? null
-                        : new SubAgents(clients, tools, () -> new ContextManager(config.contextTokens()),
+                        : new SubAgents(clients, tools, workspace.root(), () -> new ContextManager(config.contextTokens()),
                                 maxSteps, subMode, (id, event) -> {
                                     if (event instanceof AgentEvent.Thinking) {
                                         subagentSteps.incrementAndGet();
@@ -232,6 +232,10 @@ public final class Headless {
                     outcome.scores().forEach(summary.withArray("reviewScores")::add);
                 } else {
                     text = agent.run(prompt);
+                }
+                if (subagents != null && !subagents.stopAll(15_000)) {
+                    // 进程马上要退，还在跑的子 agent 会被腰斩在半路——记一笔，评测时好对账
+                    summary.put("subagentsStillRunning", true);
                 }
                 summary.put("status", failed.get() == null ? "COMPLETED" : "FAILED");
                 if (failed.get() != null) {

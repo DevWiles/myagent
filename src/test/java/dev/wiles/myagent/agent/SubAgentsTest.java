@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentsTest {
 
     private static final ObjectMapper M = new ObjectMapper();
+    private static final java.nio.file.Path ROOT = java.nio.file.Path.of("/tmp/ws");
 
     /** 按剧本回答的假模型，记下每次收到的消息和工具菜单。 */
     static final class Script implements LlmClient {
@@ -113,13 +114,17 @@ class SubAgentsTest {
         final Agent parent;
 
         Rig(SubAgents.Mode mode, Script... childScripts) {
+            this(mode, 0, childScripts);
+        }
+
+        Rig(SubAgents.Mode mode, int parentMaxSteps, Script... childScripts) {
             children.addAll(List.of(childScripts));
             subagents = new SubAgents(() -> {
                 Script next = children.poll();
                 return next == null ? new Script() : next;
-            }, tools, ContextManager::new, 0, mode, (id, e) -> eventIds.add(id));
+            }, tools, ROOT, ContextManager::new, 0, mode, (id, e) -> eventIds.add(id));
             tools.registerAll(subagents.tools());
-            parent = new Agent(parentLlm, tools, "SYSTEM-PROMPT");
+            parent = new Agent(parentLlm, tools, "SYSTEM-PROMPT", parentMaxSteps);
             subagents.attach(parent);
         }
 
@@ -180,7 +185,7 @@ class SubAgentsTest {
         });
         Rig rig = new Rig(child);
         List<ChatMessage>[] finalSeen = new List[1];
-        rig.parentLlm.call("spawn_agent", "{\"message\":\"修 a.py\",\"agent_type\":\"worker\"}");
+        rig.parentLlm.call("spawn_agent", "{\"message\":\"修 a.py\",\"agent_type\":\"worker\",\"owns\":[\"src/a.py\"]}");
         rig.parentLlm.steps.add(m -> {
             release.countDown();                          // spawn 已经返回了，子 agent 还卡着
             return ChatMessage.assistant("我这边做完了");
@@ -395,5 +400,69 @@ class SubAgentsTest {
         assertFalse(plain.contains("## 主动委派"));
         assertTrue(proactive.contains("## 主动委派"));
         assertTrue(proactive.startsWith(plain), "只在尾部多一段，前面逐字不变");
+    }
+
+    @Test
+    @DisplayName("归属：worker 必须写 owns；它跑着时主 agent 写不了它的文件，它也写不了别人的；范围不许重叠；交回后放开")
+    void ownedPathsAreLockedWhileWorkerRuns() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        String[] childWriteResult = new String[1];
+        Script child = new Script();
+        child.call("write_file", "{\"path\":\"src/other.py\",\"content\":\"x\"}");
+        child.steps.add(m -> {
+            childWriteResult[0] = m.get(m.size() - 1).content();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return ChatMessage.assistant("改好了 src/a.py");
+        });
+        Rig rig = new Rig(child);
+
+        ToolResult noOwns = rig.exec("spawn_agent", Map.of("message", "写 a", "agent_type", "worker"));
+        assertFalse(noOwns.ok());
+        assertTrue(noOwns.content().contains("owns"));
+
+        String id = rig.spawn(Map.of("message", "写 a", "agent_type", "worker", "owns", List.of("src/a.py", "pkg")));
+
+        long until = System.currentTimeMillis() + 5_000;
+        while (childWriteResult[0] == null && System.currentTimeMillis() < until) {
+            Thread.sleep(10);
+        }
+        assertNotNull(childWriteResult[0]);
+        assertTrue(childWriteResult[0].contains("不归你"), "worker 只能写自己负责的: " + childWriteResult[0]);
+
+        ToolResult mainBlocked = rig.exec("write_file", Map.of("path", "/tmp/ws/src/a.py", "content", "y"));
+        assertFalse(mainBlocked.ok(), "绝对路径也认得出是同一个文件");
+        assertTrue(mainBlocked.content().contains(id));
+        assertFalse(rig.exec("write_file", Map.of("path", "pkg/sub/m.py", "content", "y")).ok(), "目录下的文件也归它");
+        assertTrue(rig.exec("write_file", Map.of("path", "src/b.py", "content", "y")).ok(), "别的文件照写");
+
+        ToolResult overlap = rig.exec("spawn_agent",
+                Map.of("message", "写 pkg/sub", "agent_type", "worker", "owns", List.of("pkg/sub")));
+        assertFalse(overlap.ok());
+        assertTrue(overlap.content().contains("重叠"));
+
+        release.countDown();
+        awaitIdle(rig.subagents);
+        assertTrue(rig.exec("write_file", Map.of("path", "src/a.py", "content", "z")).ok(), "交回结果后放开");
+    }
+
+    @Test
+    @DisplayName("主 agent 用满步数被迫收尾：先叫停还在跑的子 agent；stopAll 等它们停稳")
+    void forcedConclusionStopsChildren() throws Exception {
+        Script child = new Script();
+        child.blockUntilCancelled = new CountDownLatch(1);
+        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 1, child);
+        rig.parentLlm.call("spawn_agent", "{\"message\":\"慢活\"}");
+        rig.parentLlm.reply("先写到这儿");
+
+        String text = rig.parent.run("干活");
+
+        assertTrue(text.contains("最大步数"));
+        assertTrue(rig.subagents.stopAll(5_000), "收尾时已经叫停，stopAll 很快返回");
+        assertFalse(rig.subagents.busy());
+        assertFalse(rig.subagents.hasMail(), "主 agent 叫停的，不发通知");
     }
 }
