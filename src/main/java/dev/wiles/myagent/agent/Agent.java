@@ -144,6 +144,8 @@ public final class Agent {
     private Set<String> writingTools = Set.of();
     /** 后台预压缩。默认是关掉的那一版，行为退化成「到硬线才同步压」。 */
     private Precompute precompute;
+    /** 跑循环之外送进来的话（子 agent 的结果、追加的指示）。null 表示没有这条通道。 */
+    private Mailbox mailbox;
 
     /**
      * 估算值到实测值的换算系数。
@@ -256,6 +258,17 @@ public final class Agent {
         return this;
     }
 
+    /** 接上收件箱：每一步请求前收一次，交卷前还有人在跑就等。见 {@link Mailbox}。 */
+    public Agent withMailbox(Mailbox mailbox) {
+        this.mailbox = mailbox;
+        return this;
+    }
+
+    /** 系统提示词。子 agent 原样沿用主 agent 的这一份，前缀缓存才命中得上。 */
+    public String systemPrompt() {
+        return systemPrompt;
+    }
+
     /** 告诉它哪些工具算「改了文件」，钉住块要用。 */
     public Agent withWritingTools(Set<String> writingTools) {
         this.writingTools = writingTools == null ? Set.of() : Set.copyOf(writingTools);
@@ -286,6 +299,9 @@ public final class Agent {
         Thread running = toolThread;
         if (running != null) {
             running.interrupt();   // 正在跑的工具：bash 会当场杀掉子进程，见 runInterruptibly
+        }
+        if (mailbox != null) {
+            mailbox.interruptAll();  // 它派出去的子 agent 一起停
         }
     }
 
@@ -319,6 +335,9 @@ public final class Agent {
         measured = false;
         if (precompute != null) {
             precompute.discard();
+        }
+        if (mailbox != null) {
+            mailbox.shutdown();      // 上一段对话派出去的子 agent，这一段不认识它们
         }
     }
 
@@ -449,6 +468,7 @@ public final class Agent {
                 if (shouldStop()) {
                     return abort(userInput, step);
                 }
+                deliverMail();
                 emit(new AgentEvent.Thinking(step));
 
                 List<ToolSpec> specs = tools.specs();
@@ -470,6 +490,9 @@ public final class Agent {
                 history.add(assistant);
 
                 if (!assistant.hasToolCalls()) {
+                    if (awaitMail()) {
+                        continue;        // 子 agent 交了结果（或者有人追加了话）：读完接着干，不收口
+                    }
                     String text = response.text();
                     unfinished = null;   // 这一轮走完了，「上一轮没做完」不再成立
                     emit(new AgentEvent.Done(text, step));
@@ -525,6 +548,50 @@ public final class Agent {
             emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "调用模型失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 收件箱里的话作为 user 消息追加。只在步与步之间调：此刻上一步的工具结果都已回填，
+     * 插一条 user 消息不会把 tool_calls 和它的结果拆开。
+     */
+    private void deliverMail() {
+        if (mailbox == null) {
+            return;
+        }
+        for (String message : mailbox.drain()) {
+            history.add(ChatMessage.user(message));
+        }
+    }
+
+    /**
+     * 模型要交卷了：收件箱里有话，或者还有子 agent 在跑，就先别收口。
+     *
+     * @return true 表示接着循环（有话要读，或者被叫停了要回到循环顶上走 abort）
+     */
+    private boolean awaitMail() {
+        if (mailbox == null) {
+            return false;
+        }
+        boolean announced = false;
+        while (!mailbox.hasMail()) {
+            if (!mailbox.busy()) {
+                return false;
+            }
+            if (shouldStop()) {
+                return true;
+            }
+            if (!announced) {
+                emit(new AgentEvent.Thought("还有子 agent 在跑，等它们交了结果再收尾"));
+                announced = true;
+            }
+            try {
+                mailbox.awaitChange(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true;
+            }
+        }
+        return true;
     }
 
     /** 串行执行一次工具调用：发事件、执行、回填历史。 */

@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
-import dev.wiles.myagent.agent.DelegateTool;
+import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
@@ -119,8 +119,8 @@ public final class AgentServer extends WebSocketServer {
      */
     private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
 
-    /** MYAGENT_DELEGATE=0 时主对话没有 delegate 工具。默认有——照 Claude Code，子 agent 是标配。 */
-    private static final boolean DELEGATE = !"0".equals(System.getenv("MYAGENT_DELEGATE"));
+    /** 子 agent 怎么派：MYAGENT_SUBAGENTS=off / explicit（默认，照 Codex：用户没要求不派）/ proactive。 */
+    private static final SubAgents.Mode SUBAGENTS = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
 
     /** 正在进行的收尾审查，按停时要一起掐。 */
     private volatile ReviewLoop reviewing;
@@ -278,10 +278,13 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
-        // 子 agent：主对话可以派它去查/跑/审。只读模式也接——它本来就不能改文件，
-        // 菜单按注册表筛，没有 bash 的 verify 就退化成只读。MYAGENT_DELEGATE=0 关掉（评测对照）
-        if (DELEGATE) {
-            tools.register(new DelegateTool(this::newClient, tools, workspace.root(), this::onAgentEvent));
+        // 子 agent（照 Codex）：spawn_agent 异步派出，结果以通知送回主对话。
+        // 只读模式也接——子 agent 的菜单从同一张注册表里筛，那里本来就没有写工具
+        SubAgents subagents = SUBAGENTS == SubAgents.Mode.OFF || !config.hasApiKey() ? null
+                : new SubAgents(this::newClient, tools, () -> contextManager(options.readOnly()),
+                        Agent.DEFAULT_MAX_STEPS, SUBAGENTS, this::onAgentEvent);
+        if (subagents != null) {
+            tools.registerAll(subagents.tools());
         }
         // 检查点：每条会动手的命令开跑前把工作区拍进影子仓库（不碰工作区自己的 .git）。
         // 只读模式不会改任何东西，不拍
@@ -321,6 +324,9 @@ public final class AgentServer extends WebSocketServer {
                         .withWritingTools(BuiltinTools.WRITING_TOOLS)
                         .onEvent(this::onAgentEvent)
                 : null;
+        if (subagents != null) {
+            subagents.attach(agent);
+        }
         this.planner = config.hasApiKey()
                 ? new Planner(newClient())
                         .readOnly(options.readOnly())
@@ -1208,7 +1214,7 @@ public final class AgentServer extends WebSocketServer {
         int n = Math.max(0, Math.min(historySize, hist.size()));
         int users = 0;
         for (int i = 0; i < n; i++) {
-            if ("user".equals(hist.get(i).role())) {
+            if ("user".equals(hist.get(i).role()) && !SubAgents.isNotice(hist.get(i).content())) {
                 users++;
             }
         }
@@ -1355,7 +1361,7 @@ public final class AgentServer extends WebSocketServer {
         onAgentEvent(task.id(), event);
     }
 
-    /** 带任务号的入口：计划/流水线的工序、主对话派出的子 agent（{@code delegate-N}）都走这儿。 */
+    /** 带任务号的入口：计划/流水线的工序、主对话派出的子 agent（{@code agent-N}）都走这儿。 */
     private void onAgentEvent(String taskId, AgentEvent event) {
         checkpointBeforeTool(event);
         recordToAudit(event);

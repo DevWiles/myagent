@@ -250,6 +250,19 @@ chrome-devtools 一家 29 个工具就把基线窗口从 3.3k 顶到 9.9k token�
 （不写 `--browserUrl` 的话一切照旧：chrome-devtools-mcp 自己管浏览器，
 myagent 一步都不插手。`--isolated` 每次开临时 profile，进程一死浏览器跟着死。）
 
+### 子 agent（照 Codex）
+
+主 agent 有五个工具：`spawn_agent` / `send_input` / `wait_agent` / `close_agent` / `resume_agent`。
+
+- `spawn_agent` **立刻返回**，子 agent 在后台和主 agent 同时干活；做完时结果以
+  `<subagent_notification>` 自动送进主对话，主 agent 只在关键路径卡住时才 `wait_agent`。
+- 三种类型：`default`（和主 agent 同样的工具）、`explorer`（没有写文件的工具，问代码库的具体问题）、
+  `worker`（直接改工作区，派活时要划清各自负责的文件——大家共用一个目录）。
+- 同时开着最多 6 个（做完没关的也算），子 agent 不能再派（深度 1）。主 agent 交卷前会等还在跑的子 agent；
+  按停时它们一起停。
+- 什么时候派由 `MYAGENT_SUBAGENTS` 决定：`explicit`（默认，和 Codex 一样——你说了「用子 agent」「并行做」
+  才派）、`proactive`（能并行就派）、`off`（不给这几个工具）。
+
 ### 技能（标准 SKILL.md）
 
 技能是**用户自己写的说明书**：一个目录、一份 `SKILL.md`，`---` 围起来的 YAML 头加
