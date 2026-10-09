@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.DelegationDecider;
 import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.config.Config;
@@ -173,10 +174,21 @@ public final class Headless {
                 MemoryIndex index = memory.index(workspace.root(),
                         MemoryIndex.budgetFor(config.contextTokens()));
                 // 子 agent：照 Codex，spawn_agent 异步派出、结果以通知送回，worker 能直接改工作区。
-                // MYAGENT_SUBAGENTS=off/explicit（默认，用户没要求不派）/proactive（能并行就派），评测做对照用
+                // MYAGENT_SUBAGENTS=off/explicit（默认，用户没要求不派）/proactive（能并行就派）
+                // /auto（开工前由决策器定：不委派就不给派遣工具，委派就带着计划开工），评测做对照用
                 AtomicInteger subagentSteps = new AtomicInteger();
                 SubAgents.Mode subMode = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
-                SubAgents subagents = subMode == SubAgents.Mode.OFF ? null
+                DelegationDecider.Decision decision = null;
+                if (subMode == SubAgents.Mode.AUTO) {
+                    decision = new DelegationDecider(clients.get(), workspace.root(), SubAgents.MAX_THREADS)
+                            .decide(prompt, maxSteps);
+                    summary.set("delegation", decision.toJson());
+                    System.err.println("[trace] decide " + (decision.delegate()
+                            ? "委派 " + decision.subtasks().size() + " 个子任务" : "不委派") + "：" + decision.reason());
+                }
+                boolean withSubagents = subMode != SubAgents.Mode.OFF
+                        && (subMode != SubAgents.Mode.AUTO || decision.delegate());
+                SubAgents subagents = !withSubagents ? null
                         : new SubAgents(clients, tools, workspace.root(), () -> new ContextManager(config.contextTokens()),
                                 maxSteps, subMode, (id, event) -> {
                                     if (event instanceof AgentEvent.Thinking) {
@@ -194,6 +206,9 @@ public final class Headless {
                         .withWritingTools(BuiltinTools.WRITING_TOOLS);
                 if (subagents != null) {
                     subagents.attach(agent);
+                    if (decision != null) {
+                        subagents.post(decision.render());     // 排在用户原话之后，第一步请求前送到
+                    }
                 }
                 AtomicInteger steps = new AtomicInteger();
                 AtomicReference<String> failed = new AtomicReference<>();

@@ -43,7 +43,8 @@ import java.util.function.Supplier;
  *   <li><b>上限</b>：同时开着的最多 {@link #MAX_THREADS} 个（做完没关的也算），深度 1——
  *       子 agent 的菜单上没有这五个工具（Codex 的 {@code agent_max_threads = 6}、{@code agent_max_depth = 1}）。</li>
  *   <li><b>默认不主动派</b>：{@link Mode#EXPLICIT} 时工具描述里写明「用户没明确要求就不派」，
- *       这是 Codex 的默认；{@link Mode#PROACTIVE} 换成「能并行就派」。</li>
+ *       这是 Codex 的默认；{@link Mode#PROACTIVE} 换成「能并行就派」；{@link Mode#AUTO} 是开工前由
+ *       {@link DelegationDecider} 决定，不委派就不给这几个工具，委派就把计划放进主 agent 的对话。</li>
  * </ul>
  *
  * <h3>子 agent 的系统提示词就是主 agent 那一份</h3>
@@ -76,11 +77,14 @@ public final class SubAgents implements Mailbox {
     /** 通知的开头。界面按 user 消息数截转录时要跳过它——那不是人说的话。 */
     public static final String NOTICE_TAG = "<subagent_notification>";
 
+    /** 开局委派计划的开头（{@link DelegationDecider.Decision#render()}）。同样不是人说的话。 */
+    public static final String PLAN_TAG = "<delegation_plan>";
+
     /** 什么时候派。见类注释。 */
     public enum Mode {
-        OFF, EXPLICIT, PROACTIVE;
+        OFF, EXPLICIT, PROACTIVE, AUTO;
 
-        /** 环境变量 {@code MYAGENT_SUBAGENTS} 的值：off / explicit（默认）/ proactive。 */
+        /** 环境变量 {@code MYAGENT_SUBAGENTS} 的值：off / explicit（默认）/ proactive / auto。 */
         public static Mode parse(String value) {
             if (value == null || value.isBlank()) {
                 return EXPLICIT;
@@ -89,8 +93,9 @@ public final class SubAgents implements Mailbox {
                 case "off", "0", "false", "no" -> OFF;
                 case "proactive" -> PROACTIVE;
                 case "explicit" -> EXPLICIT;
+                case "auto" -> AUTO;
                 default -> throw new IllegalArgumentException(
-                        "MYAGENT_SUBAGENTS 只认 off / explicit / proactive，收到: " + value);
+                        "MYAGENT_SUBAGENTS 只认 off / explicit / proactive / auto，收到: " + value);
             };
         }
     }
@@ -119,7 +124,7 @@ public final class SubAgents implements Mailbox {
     static {
         // 提示词文件缺了不会有任何症状，只是子 agent 少了规矩。启动就读一遍
         for (String path : List.of("subagents/spawn.md", "subagents/explicit.md",
-                "subagents/proactive.md", "subagents/child.md")) {
+                "subagents/proactive.md", "subagents/auto.md", "subagents/child.md")) {
             REPO.loadRequired(path);
         }
         ROLES.values().forEach(role -> REPO.loadRequired(role.rulesPath()));
@@ -253,7 +258,18 @@ public final class SubAgents implements Mailbox {
     }
 
     public static boolean isNotice(String content) {
-        return content != null && content.startsWith(NOTICE_TAG);
+        return content != null && (content.startsWith(NOTICE_TAG) || content.startsWith(PLAN_TAG));
+    }
+
+    /**
+     * 往主 agent 的收件箱里放一段话，它下一次请求模型前收到。
+     * 开局委派计划走这条：排在用户原话之后、第一次请求之前，用户原话仍然是记录里的第一条。
+     */
+    public void post(String text) {
+        synchronized (lock) {
+            notices.add(new Notice("", text));
+            lock.notifyAll();
+        }
     }
 
     // ---------------------------------------------------------------- 主 agent 的收件箱
@@ -531,8 +547,11 @@ public final class SubAgents implements Mailbox {
         for (Role role : List.of(DEFAULT, EXPLORER, WORKER)) {
             roles.append("- ").append(role.id()).append("：").append(role.description().strip()).append('\n');
         }
-        String modeText = REPO.loadRequired(mode == Mode.PROACTIVE
-                ? "subagents/proactive.md" : "subagents/explicit.md").strip();
+        String modeText = REPO.loadRequired(switch (mode) {
+            case PROACTIVE -> "subagents/proactive.md";
+            case AUTO -> "subagents/auto.md";
+            default -> "subagents/explicit.md";
+        }).strip();
         return REPO.loadRequired("subagents/spawn.md")
                 .replace("{{mode}}", modeText)
                 .replace("{{roles}}", roles.toString().strip())

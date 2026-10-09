@@ -119,8 +119,22 @@ public final class AgentServer extends WebSocketServer {
      */
     private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
 
-    /** 子 agent 怎么派：MYAGENT_SUBAGENTS=off / explicit（默认，照 Codex：用户没要求不派）/ proactive。 */
-    private static final SubAgents.Mode SUBAGENTS = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
+    /**
+     * 子 agent 怎么派：MYAGENT_SUBAGENTS=off / explicit（默认，照 Codex：用户没要求不派）/ proactive / auto。
+     *
+     * <p>auto（开工前跑委派决策器）目前只在无头单次运行里生效。交互模式下每句话都先多一次决策请求，
+     * 连「你好」也要付一次，这笔账还没想清楚，所以这里按 explicit 处理。
+     */
+    private static final SubAgents.Mode SUBAGENTS = interactive(
+            SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS")));
+
+    private static SubAgents.Mode interactive(SubAgents.Mode mode) {
+        if (mode == SubAgents.Mode.AUTO) {
+            log.info("MYAGENT_SUBAGENTS=auto 目前只在 --once 里生效，交互模式按 explicit 处理");
+            return SubAgents.Mode.EXPLICIT;
+        }
+        return mode;
+    }
 
     /** 正在进行的收尾审查，按停时要一起掐。 */
     private volatile ReviewLoop reviewing;

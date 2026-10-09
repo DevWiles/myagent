@@ -465,4 +465,26 @@ class SubAgentsTest {
         assertFalse(rig.subagents.busy());
         assertFalse(rig.subagents.hasMail(), "主 agent 叫停的，不发通知");
     }
+
+    @Test
+    @DisplayName("auto：计划排在用户原话之后、第一次请求前送到；spawn_agent 说明换成「照计划派」")
+    void autoPlanIsDeliveredAfterUserInput() {
+        assertEquals(SubAgents.Mode.AUTO, SubAgents.Mode.parse("auto"));
+        Rig rig = new Rig(SubAgents.Mode.AUTO);
+        rig.subagents.post(SubAgents.PLAN_TAG + "\n1. [worker] 写 a\n</delegation_plan>");
+        List<ChatMessage>[] first = new List[1];
+        rig.parentLlm.steps.add(m -> {
+            first[0] = m;
+            return ChatMessage.assistant("好");
+        });
+
+        rig.parent.run("原始需求");
+
+        List<ChatMessage> sent = first[0];
+        assertEquals("原始需求", sent.get(sent.size() - 2).content(), "用户原话仍在前");
+        assertTrue(sent.get(sent.size() - 1).content().startsWith(SubAgents.PLAN_TAG));
+        String desc = rig.subagents.spawnDescription();
+        assertTrue(desc.contains("按开局的委派计划派"));
+        assertFalse(desc.contains("否则不要派子 agent"));
+    }
 }
