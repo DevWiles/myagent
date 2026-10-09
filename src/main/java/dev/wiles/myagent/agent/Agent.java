@@ -493,6 +493,12 @@ public final class Agent {
                     if (awaitMail()) {
                         continue;        // 子 agent 交了结果（或者有人追加了话）：读完接着干，不收口
                     }
+                    String unfinishedWork = mailbox == null ? null : mailbox.beforeFinish();
+                    if (unfinishedWork != null) {
+                        history.add(ChatMessage.user(unfinishedWork));
+                        emit(new AgentEvent.Thought("子 agent 改过的文件还没验证，先验证再收尾"));
+                        continue;
+                    }
                     String text = response.text();
                     unfinished = null;   // 这一轮走完了，「上一轮没做完」不再成立
                     emit(new AgentEvent.Done(text, step));

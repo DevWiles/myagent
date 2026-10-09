@@ -17,6 +17,10 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -79,6 +83,23 @@ public final class SubAgents implements Mailbox {
 
     /** 开局委派计划的开头（{@link DelegationDecider.Decision#render()}）。同样不是人说的话。 */
     public static final String PLAN_TAG = "<delegation_plan>";
+
+    /** 收尾前的验证提醒（{@link #beforeFinish()}）。同样不是人说的话。 */
+    public static final String VERIFY_TAG = "<verify_reminder>";
+
+    /** 通知里列出的命令条数上限：只留最近的，早期的探索命令对判断结果没用。 */
+    static final int MAX_EVIDENCE_COMMANDS = 8;
+
+    /**
+     * 认作「跑测试」的命令。主 agent 跑过其中之一，子 agent 此前的改动就算验证过了——
+     * 不管结果过没过：它看到了真实输出，接受还是返工是它的判断。
+     */
+    static final Pattern TEST_COMMAND = Pattern.compile(
+            "(?<![\\w.-])(pytest|py\\.test|unittest|tox|nox|mvn\\b[^|;&]*\\b(test|verify)|gradlew?\\b[^|;&]*\\btest"
+                    + "|npm (run )?test|yarn test|pnpm test|bun test|go test|cargo test|make (test|check)|ctest)(?![\\w.-])");
+
+    /** bash / run_tests 输出末尾的「退出码: N」。 */
+    private static final Pattern EXIT_CODE = Pattern.compile("退出码: (-?\\d+)\\s*$");
 
     /** 什么时候派。见类注释。 */
     public enum Mode {
@@ -157,12 +178,27 @@ public final class SubAgents implements Mailbox {
         /** 它负责的文件/目录（绝对、规范化）。它跑着的时候只有它能写；空表示不独占。 */
         final List<Path> owns;
 
+        // ---- 框架看到的事实（写进通知，不靠它自己说） ----
+        /** 写文件工具成功写过的路径。bash 里写的看不到。 */
+        final LinkedHashSet<String> filesWritten = new LinkedHashSet<>();
+        /** 跑过的 bash / run_tests：命令、退出码、结果摘要。 */
+        final List<Evidence> commands = new ArrayList<>();
+        /** 被写入锁挡下的次数（越界写）。 */
+        int refusals;
+        int steps;
+        /** 开跑但还没结束的工具调用：结束事件里只有 id，命令要从开始事件里拿。 */
+        final Map<Integer, AgentEvent.ToolStarted> inFlight = new ConcurrentHashMap<>();
+
         Child(String id, Role role, Agent agent, List<Path> owns) {
             this.id = id;
             this.role = role;
             this.agent = agent;
             this.owns = owns;
         }
+    }
+
+    /** 一条命令的事实：哪个工具、什么命令、退出码（拿不到是 null）、结果摘要。 */
+    record Evidence(String tool, String command, Integer exit, String summary) {
     }
 
     /** 主 agent 收件箱里的一条：哪个子 agent 的、说什么。wait_agent 拿过结果的会被撤掉。 */
@@ -173,6 +209,15 @@ public final class SubAgents implements Mailbox {
     private final Map<String, Child> children = new LinkedHashMap<>();
     private final List<Notice> notices = new ArrayList<>();
     private final AtomicInteger spawned = new AtomicInteger();
+
+    // ---- 收尾验证：子 agent 写过、主 agent 还没跑过测试的文件 ----
+    /** 子 agent 写过、主 agent 之后还没跑过测试的文件（显示用的相对路径）。 */
+    private final LinkedHashSet<String> unverified = new LinkedHashSet<>();
+    /** 提醒过的那一批。同一批不再提醒——主 agent 看了提醒仍决定收尾，那是它的判断。 */
+    private final LinkedHashSet<String> reminded = new LinkedHashSet<>();
+    private int verifyReminders;
+    /** 主 agent 写文件被锁挡下的次数（它去改了派出去的文件）。 */
+    private int mainRefusals;
 
     private final Supplier<LlmClient> clients;
     private final ToolRegistry allTools;
@@ -216,9 +261,58 @@ public final class SubAgents implements Mailbox {
         for (Tool tool : List.copyOf(allTools.all())) {
             if (BuiltinTools.WRITING_TOOLS.contains(tool.name()) && !(tool instanceof OwnedWrite)) {
                 allTools.replace(new OwnedWrite(tool, MAIN));
+            } else if (Set.of("bash", "run_tests").contains(tool.name()) && !(tool instanceof MainTestWatch)) {
+                allTools.replace(new MainTestWatch(tool));
             }
         }
         return this;
+    }
+
+    /**
+     * 收尾检查：子 agent 写过的文件，主 agent 之后有没有跑过测试。
+     * 没有就提醒一次（同一批文件只提醒一次），列出是哪些文件、谁改的。
+     */
+    @Override
+    public String beforeFinish() {
+        synchronized (lock) {
+            if (unverified.isEmpty() || reminded.containsAll(unverified)) {
+                return null;
+            }
+            reminded.addAll(unverified);
+            verifyReminders++;
+            return VERIFY_TAG + "\n子 agent 改过这些文件，你之后还没跑过测试：" + String.join("、", unverified)
+                    + "。\n子 agent 说做完了不算数。收尾前先看一眼这些改动、跑一遍相关测试，"
+                    + "根据真实结果决定接受、修补还是返工；确实无法验证就在答复里明说没验证。\n</verify_reminder>";
+        }
+    }
+
+    /**
+     * 评测摘要用：派了几个、写入冲突几次、收尾提醒几次，以及每个子 agent 的事实记录。
+     */
+    public ObjectNode report() {
+        synchronized (lock) {
+            ObjectNode out = JSON.createObjectNode();
+            out.put("spawned", spawned.get());
+            int childRefusals = children.values().stream().mapToInt(c -> c.refusals).sum();
+            out.put("writeConflicts", mainRefusals + childRefusals);
+            out.put("mainWriteRefusals", mainRefusals);
+            out.put("verifyReminders", verifyReminders);
+            out.put("unverifiedAtEnd", unverified.size());
+            var list = out.putArray("children");
+            for (Child c : children.values()) {
+                ObjectNode n = list.addObject();
+                n.put("id", c.id);
+                n.put("type", c.role.id());
+                n.put("state", c.state.name().toLowerCase(Locale.ROOT));
+                n.put("steps", c.steps);
+                c.owns.forEach(o -> n.withArray("owns").add(show(o)));
+                c.filesWritten.forEach(n.putArray("filesWritten")::add);
+                n.put("commands", c.commands.size());
+                n.put("testRuns", c.commands.stream().filter(e -> TEST_COMMAND.matcher(e.command()).find()).count());
+                n.put("refusals", c.refusals);
+            }
+            return out;
+        }
     }
 
     /**
@@ -258,7 +352,8 @@ public final class SubAgents implements Mailbox {
     }
 
     public static boolean isNotice(String content) {
-        return content != null && (content.startsWith(NOTICE_TAG) || content.startsWith(PLAN_TAG));
+        return content != null && (content.startsWith(NOTICE_TAG) || content.startsWith(PLAN_TAG)
+                || content.startsWith(VERIFY_TAG));
     }
 
     /**
@@ -328,6 +423,8 @@ public final class SubAgents implements Mailbox {
             }
             children.clear();
             notices.clear();
+            unverified.clear();
+            reminded.clear();
             lock.notifyAll();
         }
     }
@@ -431,7 +528,105 @@ public final class SubAgents implements Mailbox {
         body.put("agent_id", child.id);
         body.put("agent_type", child.role.id());
         body.set("status", status(child));
+        body.set("observed", observed(child));
         return NOTICE_TAG + "\n" + body.toPrettyString() + "\n</subagent_notification>";
+    }
+
+    /**
+     * 框架记录的事实：它实际写了哪些文件、跑了哪些命令、结果如何、越界写被挡了几次。
+     * 和它自己的总结放在一起，主 agent 一眼能看出「说测试全过」有没有真跑过。
+     */
+    private static ObjectNode observed(Child child) {
+        ObjectNode o = JSON.createObjectNode();
+        child.filesWritten.forEach(o.putArray("files_written")::add);
+        var cmds = o.putArray("commands");
+        List<Evidence> all = child.commands;
+        for (Evidence e : all.subList(Math.max(0, all.size() - MAX_EVIDENCE_COMMANDS), all.size())) {
+            ObjectNode n = cmds.addObject();
+            n.put("tool", e.tool());
+            n.put("command", e.command());
+            if (e.exit() == null) {
+                n.putNull("exit");
+            } else {
+                n.put("exit", e.exit());
+            }
+            n.put("summary", e.summary());
+        }
+        if (all.size() > MAX_EVIDENCE_COMMANDS) {
+            o.put("commands_omitted", all.size() - MAX_EVIDENCE_COMMANDS);
+        }
+        o.put("tests_run", all.stream().anyMatch(e -> TEST_COMMAND.matcher(e.command()).find()));
+        o.put("write_refusals", child.refusals);
+        o.put("steps", child.steps);
+        o.put("note", "以上是框架记录的实际工具调用，不是它的自述；用 bash 写的文件不在 files_written 里");
+        return o;
+    }
+
+    /** 从开始/结束事件里记下事实。在子 agent 的线程上调。 */
+    private void record(Child child, AgentEvent event) {
+        if (event instanceof AgentEvent.Thinking) {
+            synchronized (lock) {
+                child.steps++;
+            }
+        } else if (event instanceof AgentEvent.ToolStarted t) {
+            child.inFlight.put(t.id(), t);
+        } else if (event instanceof AgentEvent.ToolFinished f) {
+            AgentEvent.ToolStarted t = child.inFlight.remove(f.id());
+            if (t == null || !f.ok()) {
+                return;             // 被拒的写入在 checkWrite 里记过了；工具自己失败的不算事实
+            }
+            JsonNode args = parseArgs(t.arguments());
+            synchronized (lock) {
+                if (BuiltinTools.WRITING_TOOLS.contains(f.tool())) {
+                    for (String path : writePaths(args)) {
+                        String shown = show(resolve(path));
+                        child.filesWritten.add(shown);
+                        unverified.add(shown);
+                        reminded.remove(shown);       // 又改了一遍，是新的一批
+                    }
+                } else if (Set.of("bash", "run_tests").contains(f.tool())) {
+                    child.commands.add(evidence(f.tool(), args.path("command").asText(""), f.output()));
+                }
+            }
+        }
+    }
+
+    static Evidence evidence(String tool, String command, String output) {
+        String out = output == null ? "" : output.strip();
+        Integer exit = null;
+        Matcher m = EXIT_CODE.matcher(out);
+        if (m.find()) {
+            exit = Integer.parseInt(m.group(1));
+            out = out.substring(0, m.start()).strip();
+        }
+        String[] lines = out.split("\n");
+        String last = lines.length == 0 ? "" : lines[lines.length - 1].strip();
+        String cmd = command.replaceAll("\\s+", " ").strip();
+        return new Evidence(tool, cmd.length() > 200 ? cmd.substring(0, 200) + "…" : cmd, exit,
+                last.length() > 200 ? last.substring(0, 200) + "…" : last);
+    }
+
+    private static JsonNode parseArgs(String json) {
+        try {
+            JsonNode n = json == null ? null : JSON.readTree(json);
+            return n == null ? JSON.createObjectNode() : n;
+        } catch (Exception e) {
+            return JSON.createObjectNode();
+        }
+    }
+
+    /** 写文件工具参数里的路径：顶层 path、files[].path、dirs[]（和 {@link OwnedWrite} 同一个口径）。 */
+    private static List<String> writePaths(JsonNode args) {
+        List<String> paths = new ArrayList<>();
+        if (args.path("path").isTextual()) {
+            paths.add(args.path("path").asText());
+        }
+        args.path("files").forEach(f -> {
+            if (f.path("path").isTextual()) {
+                paths.add(f.path("path").asText());
+            }
+        });
+        return paths;
     }
 
     private static String agentMessage(String message) {
@@ -463,7 +658,8 @@ public final class SubAgents implements Mailbox {
             if (TOOL_NAMES.contains(tool.name()) || role.excluded().contains(tool.name())) {
                 continue;
             }
-            narrowed.register(tool instanceof OwnedWrite w ? new OwnedWrite(w.inner, id) : tool);
+            narrowed.register(tool instanceof OwnedWrite w ? new OwnedWrite(w.inner, id)
+                    : tool instanceof MainTestWatch m ? m.inner : tool);
         }
         return narrowed;
     }
@@ -499,6 +695,11 @@ public final class SubAgents implements Mailbox {
                     }
                     for (Path o : c.owns) {
                         if (p.startsWith(o)) {
+                            if (self != null) {
+                                self.refusals++;
+                            } else {
+                                mainRefusals++;
+                            }
                             return show(p) + " 现在归 " + c.id + "（正在跑，负责 " + owned(c) + "）。"
                                     + "等它交回结果再改，或者用 send_input 让它改，或者 close_agent 收回。"
                                     + "派出去的活不要自己再做一遍。";
@@ -506,6 +707,7 @@ public final class SubAgents implements Mailbox {
                     }
                 }
                 if (self != null && !self.owns.isEmpty() && self.owns.stream().noneMatch(p::startsWith)) {
+                    self.refusals++;
                     return "你只负责 " + owned(self) + "，" + show(p) + " 不归你。"
                             + "需要改别的文件，就在最后的答复里写清楚要改什么，交给主 agent。";
                 }
@@ -646,6 +848,7 @@ public final class SubAgents implements Mailbox {
                         child.failure = f.reason();
                     }
                 }
+                record(child, event);
                 events.accept(id, event);
             });
             synchronized (lock) {
@@ -946,6 +1149,51 @@ public final class SubAgents implements Mailbox {
             });
             String refused = checkWrite(writer, paths);
             return refused == null ? inner.execute(args) : ToolResult.error(refused);
+        }
+    }
+
+    /**
+     * 包在主 agent 的 bash / run_tests 外面：跑的是测试命令，就把子 agent 此前的改动记为已验证。
+     * 只包主 agent 那一份——子 agent 自己跑测试不算主 agent 验证过。
+     */
+    final class MainTestWatch implements Tool {
+        final Tool inner;
+
+        MainTestWatch(Tool inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public String name() {
+            return inner.name();
+        }
+
+        @Override
+        public String description() {
+            return inner.description();
+        }
+
+        @Override
+        public String parametersSchema() {
+            return inner.parametersSchema();
+        }
+
+        @Override
+        public boolean parallelSafe() {
+            return inner.parallelSafe();
+        }
+
+        @Override
+        public ToolResult execute(JsonNode args) {
+            ToolResult result = inner.execute(args);
+            String command = args.path("command").asText("");
+            if (result.ok() && (inner.name().equals("run_tests") || TEST_COMMAND.matcher(command).find())) {
+                synchronized (lock) {
+                    unverified.clear();
+                    reminded.clear();
+                }
+            }
+            return result;
         }
     }
 

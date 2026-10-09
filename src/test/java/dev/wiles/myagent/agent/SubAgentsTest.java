@@ -99,7 +99,10 @@ class SubAgentsTest {
             public String name() { return name; }
             public String description() { return name; }
             public String parametersSchema() { return "{\"type\":\"object\",\"properties\":{}}"; }
-            public ToolResult execute(JsonNode args) { return ToolResult.ok(name + " ok"); }
+            public ToolResult execute(JsonNode args) {
+                // bash 回得像真的一样：最后一行是测试摘要，末尾是退出码——证据解析靠这个格式
+                return ToolResult.ok(name.equals("bash") ? "..F\n1 failed, 2 passed in 0.1s\n退出码: 1" : name + " ok");
+            }
         };
     }
 
@@ -486,5 +489,103 @@ class SubAgentsTest {
         String desc = rig.subagents.spawnDescription();
         assertTrue(desc.contains("按开局的委派计划派"));
         assertFalse(desc.contains("否则不要派子 agent"));
+    }
+
+    /** 写 a.py、跑一次 pytest、交卷的子 agent。 */
+    static Script workerThatWritesAndTests() {
+        return new Script()
+                .call("write_file", "{\"path\":\"a.py\",\"content\":\"x\"}")
+                .call("bash", "{\"command\":\"python -m pytest -q tests\"}")
+                .reply("做完了，测试全过");
+    }
+
+    @Test
+    @DisplayName("通知里带框架记录的事实：实际写了哪些文件、跑了什么命令、退出码和摘要——不靠它自述")
+    void noticeCarriesObservedEvidence() throws Exception {
+        Rig rig = new Rig(workerThatWritesAndTests());
+        String id = rig.spawn(Map.of("message", "写 a", "agent_type", "worker", "owns", List.of("a.py")));
+        awaitIdle(rig.subagents);
+
+        String notice = rig.subagents.drain().get(0);
+        JsonNode body = M.readTree(notice.substring(notice.indexOf('{'), notice.lastIndexOf('}') + 1));
+        JsonNode seen = body.path("observed");
+        assertEquals("a.py", seen.path("files_written").get(0).asText());
+        JsonNode cmd = seen.path("commands").get(0);
+        assertEquals("python -m pytest -q tests", cmd.path("command").asText());
+        assertEquals(1, cmd.path("exit").asInt(), "它说「测试全过」，框架看到的是退出码 1");
+        assertEquals("1 failed, 2 passed in 0.1s", cmd.path("summary").asText());
+        assertTrue(seen.path("tests_run").asBoolean());
+        assertTrue(body.path("status").path("completed").asText().contains("测试全过"));
+
+        JsonNode report = rig.subagents.report();
+        assertEquals(1, report.path("spawned").asInt());
+        assertEquals(id, report.path("children").get(0).path("id").asText());
+        assertEquals(1, report.path("children").get(0).path("testRuns").asInt());
+    }
+
+    @Test
+    @DisplayName("收尾检查：子 agent 改了文件、主 agent 没跑测试就交卷——提醒一次；跑过测试就放行")
+    void finishingRequiresVerificationAfterChildWrites() {
+        Rig rig = new Rig(workerThatWritesAndTests());
+        List<ChatMessage>[] reminded = new List[1];
+        rig.parentLlm.call("spawn_agent", "{\"message\":\"写 a\",\"agent_type\":\"worker\",\"owns\":[\"a.py\"]}");
+        rig.parentLlm.call("wait_agent", m -> "{\"targets\":[\"" + lastAgentId(m) + "\"]}");
+        rig.parentLlm.reply("完成了");                                   // 没验证就想交卷
+        rig.parentLlm.call("bash", m -> {
+            reminded[0] = m;
+            return "{\"command\":\"python -m pytest -q\"}";
+        });
+        rig.parentLlm.reply("验证过了，完成");
+
+        assertEquals("验证过了，完成", rig.parent.run("写 a，用 worker"));
+        String last = reminded[0].get(reminded[0].size() - 1).content();
+        assertTrue(last.startsWith(SubAgents.VERIFY_TAG));
+        assertTrue(last.contains("a.py"));
+        JsonNode report = rig.subagents.report();
+        assertEquals(1, report.path("verifyReminders").asInt());
+        assertEquals(0, report.path("unverifiedAtEnd").asInt());
+    }
+
+    @Test
+    @DisplayName("同一批改动只提醒一次：主 agent 看了提醒仍决定收尾，就让它收尾，并记下没验证")
+    void reminderIsOneShot() {
+        Rig rig = new Rig(workerThatWritesAndTests());
+        rig.parentLlm.call("spawn_agent", "{\"message\":\"写 a\",\"agent_type\":\"worker\",\"owns\":[\"a.py\"]}");
+        rig.parentLlm.call("wait_agent", m -> "{\"targets\":[\"" + lastAgentId(m) + "\"]}");
+        rig.parentLlm.reply("完成了");
+        rig.parentLlm.reply("没法跑测试，直接交");
+
+        assertEquals("没法跑测试，直接交", rig.parent.run("写 a"));
+        JsonNode report = rig.subagents.report();
+        assertEquals(1, report.path("verifyReminders").asInt());
+        assertEquals(1, report.path("unverifiedAtEnd").asInt(), "没验证的照实记下，不当作验证过");
+    }
+
+    @Test
+    @DisplayName("主 agent 去写派出去的文件被挡下，记作一次写入冲突")
+    void mainRefusalCountsAsConflict() throws Exception {
+        Script child = new Script();
+        child.blockUntilCancelled = new CountDownLatch(1);
+        Rig rig = new Rig(child);
+        rig.spawn(Map.of("message", "写 a", "agent_type", "worker", "owns", List.of("a.py")));
+
+        assertFalse(rig.exec("write_file", Map.of("path", "a.py", "content", "y")).ok());
+        assertEquals(1, rig.subagents.report().path("writeConflicts").asInt());
+        rig.subagents.stopAll(5_000);
+    }
+
+    @Test
+    @DisplayName("命令证据：退出码和最后一行摘要；没有退出码的记 null；测试命令识别")
+    void evidenceParsing() {
+        SubAgents.Evidence e = SubAgents.evidence("run_tests", "pytest -q", "....\n4 passed in 0.2s\n退出码: 0");
+        assertEquals(0, e.exit());
+        assertEquals("4 passed in 0.2s", e.summary());
+        assertNull(SubAgents.evidence("bash", "ls", "a\nb").exit());
+        for (String cmd : List.of("python -m pytest -q", "mvn -q test", "./gradlew test", "npm test", "go test ./...")) {
+            assertTrue(SubAgents.TEST_COMMAND.matcher(cmd).find(), cmd);
+        }
+        for (String cmd : List.of("ls tests", "cat pytest.ini", "grep -r test src")) {
+            assertFalse(SubAgents.TEST_COMMAND.matcher(cmd).find(), cmd);
+        }
     }
 }

@@ -35,4 +35,13 @@ public interface Mailbox {
 
     /** 对话清空：全部关掉、忘掉。 */
     void shutdown();
+
+    /**
+     * 模型要交卷了、也没有新消息时最后问一句：还有什么必须先做的？
+     * 返回一段话就作为 user 消息追加、接着循环；null 表示可以收尾。
+     * 用来拦「子 agent 改了文件、主 agent 一次都没验证就宣布完成」。
+     */
+    default String beforeFinish() {
+        return null;
+    }
 }

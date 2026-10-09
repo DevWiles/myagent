@@ -259,6 +259,10 @@ public final class Headless {
                 summary.put("steps", steps.get());
                 summary.put("subagentMode", subMode.name().toLowerCase());
                 summary.put("subagents", subagents == null ? 0 : subagents.spawned());
+                if (subagents != null) {
+                    // 写入冲突、收尾验证提醒、每个子 agent 实际写了什么跑了什么——评测归因用
+                    summary.set("subagentReport", subagents.report());
+                }
                 summary.put("subagentSteps", subagentSteps.get());
                 exit = failed.get() == null ? 0 : 1;
             }
