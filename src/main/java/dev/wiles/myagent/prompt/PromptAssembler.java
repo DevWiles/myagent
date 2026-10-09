@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
  *   base.md                恒定：身份 / 语言 / 工作区 / 工作方式 / 回答风格
  * + modes/{mode}.md        这一份是给谁用的
  * + policy/readonly.md     只读时才有
+ * + policy/subagents-proactive.md  主动委派时才有
  * + 长期记忆索引            放最后，理由见下
  * </pre>
  *
@@ -76,6 +77,9 @@ public final class PromptAssembler {
         sections.add(repository.loadRequired(mode.resourcePath()));
         if (ctx.readOnly()) {
             sections.add(repository.loadRequired("policy/readonly.md"));
+        }
+        if (ctx.proactiveSubagents()) {
+            sections.add(repository.loadRequired("policy/subagents-proactive.md"));
         }
 
         String assembled = String.join("\n\n", sections);

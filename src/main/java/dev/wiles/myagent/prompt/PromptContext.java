@@ -17,11 +17,13 @@ public final class PromptContext {
     private final Map<String, String> variables;
     private final String memoryIndex;
     private final boolean readOnly;
+    private final boolean proactiveSubagents;
 
     private PromptContext(Builder b) {
         this.variables = Map.copyOf(b.variables);
         this.memoryIndex = b.memoryIndex;
         this.readOnly = b.readOnly;
+        this.proactiveSubagents = b.proactiveSubagents;
     }
 
     public static Builder builder() {
@@ -46,10 +48,16 @@ public final class PromptContext {
         return readOnly;
     }
 
+    /** 主动委派：能并行就派子 agent，不等用户开口。 */
+    public boolean proactiveSubagents() {
+        return proactiveSubagents;
+    }
+
     public static final class Builder {
         private final Map<String, String> variables = new LinkedHashMap<>();
         private String memoryIndex;
         private boolean readOnly;
+        private boolean proactiveSubagents;
 
         /** 填一个 {@code {{名字}}} 占位符。值为 null 按空串算。 */
         public Builder variable(String name, String value) {
@@ -65,6 +73,16 @@ public final class PromptContext {
         /** 只读模式要<b>明说</b>，不能靠模型从「菜单上没有写工具」自己推断。 */
         public Builder readOnly(boolean readOnly) {
             this.readOnly = readOnly;
+            return this;
+        }
+
+        /**
+         * 主动委派要写进系统提示词，不能只放在 {@code spawn_agent} 的工具说明里：
+         * 只放在工具说明里时，cookiecutter 上主 agent 调了 110 次工具、一次都没派。
+         * Codex 也是把这句话作为单独的一条指令发给模型，而不是藏在工具说明里。
+         */
+        public Builder proactiveSubagents(boolean proactive) {
+            this.proactiveSubagents = proactive;
             return this;
         }
 

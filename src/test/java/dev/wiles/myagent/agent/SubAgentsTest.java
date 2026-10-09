@@ -385,4 +385,15 @@ class SubAgentsTest {
             assertFalse(d.contains("{{"), "占位符都要替换掉");
         }
     }
+
+    @Test
+    @DisplayName("主动委派写进系统提示词（只放工具说明里模型不看），默认不写；在记忆索引之前，前缀缓存不受影响")
+    void proactiveModeIsInSystemPrompt() {
+        java.nio.file.Path root = java.nio.file.Path.of("/tmp/ws");
+        String plain = SystemPrompt.forWorkspace(root, null, false);
+        String proactive = SystemPrompt.forWorkspace(root, null, false, true);
+        assertFalse(plain.contains("## 主动委派"));
+        assertTrue(proactive.contains("## 主动委派"));
+        assertTrue(proactive.startsWith(plain), "只在尾部多一段，前面逐字不变");
+    }
 }

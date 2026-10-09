@@ -315,7 +315,7 @@ public final class AgentServer extends WebSocketServer {
                 ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
                                 MemoryIndex.budgetFor(config.contextTokens())),
-                                options.readOnly()),
+                                options.readOnly(), subagents != null && SUBAGENTS == SubAgents.Mode.PROACTIVE),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，取消就失灵

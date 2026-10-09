@@ -188,7 +188,8 @@ public final class Headless {
                     tools.registerAll(subagents.tools());
                 }
                 Agent agent = new Agent(clients.get(), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), index, false),
+                        SystemPrompt.forWorkspace(workspace.root(), index, false,
+                                subMode == SubAgents.Mode.PROACTIVE),
                         maxSteps, new ContextManager(config.contextTokens()))
                         .withWritingTools(BuiltinTools.WRITING_TOOLS);
                 if (subagents != null) {
