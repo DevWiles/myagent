@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.DelegateTool;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
@@ -117,6 +118,9 @@ public final class AgentServer extends WebSocketServer {
      * 默认关：等评测证明它划算再考虑默认开。和 AUTO_PLAN 一样先做成环境变量，评测驱动脚本好切。
      */
     private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
+
+    /** MYAGENT_DELEGATE=0 时主对话没有 delegate 工具。默认有——照 Claude Code，子 agent 是标配。 */
+    private static final boolean DELEGATE = !"0".equals(System.getenv("MYAGENT_DELEGATE"));
 
     /** 正在进行的收尾审查，按停时要一起掐。 */
     private volatile ReviewLoop reviewing;
@@ -274,6 +278,11 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
+        // 子 agent：主对话可以派它去查/跑/审。只读模式也接——它本来就不能改文件，
+        // 菜单按注册表筛，没有 bash 的 verify 就退化成只读。MYAGENT_DELEGATE=0 关掉（评测对照）
+        if (DELEGATE) {
+            tools.register(new DelegateTool(this::newClient, tools, workspace.root(), this::onAgentEvent));
+        }
         // 检查点：每条会动手的命令开跑前把工作区拍进影子仓库（不碰工作区自己的 .git）。
         // 只读模式不会改任何东西，不拍
         dev.wiles.myagent.snapshot.ShadowRepo shadow = options.readOnly() ? null
@@ -1343,9 +1352,14 @@ public final class AgentServer extends WebSocketServer {
      * 当成同一条线上的先后两步。主对话走上面那个不带号的入口。
      */
     private void onAgentEvent(Task task, AgentEvent event) {
+        onAgentEvent(task.id(), event);
+    }
+
+    /** 带任务号的入口：计划/流水线的工序、主对话派出的子 agent（{@code delegate-N}）都走这儿。 */
+    private void onAgentEvent(String taskId, AgentEvent event) {
         checkpointBeforeTool(event);
         recordToAudit(event);
-        publish(Protocol.encode(event, task.id()));
+        publish(Protocol.encode(event, taskId));
     }
 
     /**

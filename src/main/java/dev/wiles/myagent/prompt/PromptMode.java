@@ -27,6 +27,8 @@ public enum PromptMode {
 
     /** 计划里的一步：只干这一步，不越界。 */
     TASK("modes/task.md", true, List.of("## 身份", "## 语言", "## 工作区")),
+    /** 主 agent 派出的子 agent：干净上下文，只做一件事，只回结论。 */
+    DELEGATE("modes/delegate.md", true, List.of("## 身份", "## 语言", "## 工作区", "看不到主 agent 的对话")),
 
     /** 规划器：把目标拆成任务依赖图。不动手。 */
     PLANNER("modes/planner.md", false, List.of("只输出一个 JSON 对象")),

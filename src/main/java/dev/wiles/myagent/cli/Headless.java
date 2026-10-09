@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.DelegateTool;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.context.ContextManager;
@@ -171,6 +172,21 @@ public final class Headless {
             } else {
                 MemoryIndex index = memory.index(workspace.root(),
                         MemoryIndex.budgetFor(config.contextTokens()));
+                // 子 agent：主 agent 可以派它去查/跑/审，结论回传。它的动静带着 delegate-N 的号打出来。
+                // 默认开（Claude Code 的子 agent 也是默认有的）；MYAGENT_DELEGATE=0 关掉，评测做对照用
+                AtomicInteger delegateSteps = new AtomicInteger();
+                AtomicInteger delegations = new AtomicInteger();
+                if (!"0".equals(System.getenv("MYAGENT_DELEGATE"))) {
+                    tools.register(new DelegateTool(clients, tools, workspace.root(), (id, event) -> {
+                        if (event instanceof AgentEvent.Thinking t && t.step() == 1) {
+                            delegations.incrementAndGet();
+                        }
+                        if (event instanceof AgentEvent.Thinking) {
+                            delegateSteps.incrementAndGet();
+                        }
+                        trace(id, event);
+                    }));
+                }
                 Agent agent = new Agent(clients.get(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), index, false),
                         maxSteps, new ContextManager(config.contextTokens()))
@@ -218,6 +234,8 @@ public final class Headless {
                     summary.put("failed", failed.get());
                 }
                 summary.put("steps", steps.get());
+                summary.put("delegations", delegations.get());
+                summary.put("delegateSteps", delegateSteps.get());
                 exit = failed.get() == null ? 0 : 1;
             }
         } catch (RuntimeException e) {

@@ -25,6 +25,7 @@ PROJECT = os.path.dirname(BENCH)
 JAR = os.path.join(PROJECT, "target", "myagent.jar")
 TASKS = os.path.join(BENCH, "tasks")
 IMAGE = "myagent-sandbox:v2"
+NO_DELEGATE = False   # --no-delegate：主 agent 没有 delegate 工具，做「有无子 agent」的对照
 IGNORE = ("__pycache__", ".pytest_cache", ".claude", "hidden_tests")
 
 
@@ -73,9 +74,10 @@ def docker_base(name, work, home, extra_env=()):
     return cmd
 
 
-def start_myagent(name, work, home, auto_plan_off, final_review=False):
+def start_myagent(name, work, home, auto_plan_off, final_review=False, delegate=True):
     cmd = docker_base(name, work, home, [f"MYAGENT_AUTO_PLAN={'0' if auto_plan_off else '1'}",
-                                         f"MYAGENT_FINAL_REVIEW={'1' if final_review else '0'}"])
+                                         f"MYAGENT_FINAL_REVIEW={'1' if final_review else '0'}",
+                                         f"MYAGENT_DELEGATE={'1' if delegate else '0'}"])
     cmd += ["-p", "127.0.0.1::7777", IMAGE, "java", "-jar", "/opt/myagent.jar", "--serve", "--lan", "--port", "7777", "-d", "/work"]
     r = sh(cmd)
     if r.returncode != 0:
@@ -96,7 +98,7 @@ def is_test_cmd(cmd):
 # ---------------------------------------------------------------- myagent
 def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
     token, port = start_myagent(name, work, home, auto_plan_off=(mode in ("react", "react+review")),
-                                final_review=(mode == "react+review"))
+                                final_review=(mode == "react+review"), delegate=not NO_DELEGATE)
     ws = websocket.create_connection(f"ws://127.0.0.1:{port}/?token={token}", timeout=60, suppress_origin=True)
     ready = json.loads(ws.recv())
     rec["model"] = ready.get("model")
@@ -308,7 +310,10 @@ def main():
     ap.add_argument("--only-source", default="", help="hand / exercism")
     ap.add_argument("--timeout", type=int, default=3600, help="单题上限（秒）。默认一小时：规划/流水线一题要跑好几道工序，15 分钟偏紧")
     ap.add_argument("--jar", default=None, help="换一个后端 jar（默认 target/myagent.jar），用来做同模型的新旧版本对照")
+    ap.add_argument("--no-delegate", action="store_true", help="关掉主 agent 的 delegate 工具（MYAGENT_DELEGATE=0），做有无子 agent的对照")
     args = ap.parse_args()
+    global NO_DELEGATE
+    NO_DELEGATE = args.no_delegate
     if args.jar:
         global JAR
         JAR = os.path.abspath(args.jar)
