@@ -11,6 +11,7 @@ Config keys (``--agent-config-json``):
   jar         host path of myagent.jar          (default ~/myagent.jar)
   jre         host path of a linux-x64 JRE tgz  (default ~/jre/jre17.tar.gz)
   max_steps   override the per-assignment step cap (default: request.max_iterations)
+  delegate    false -> MYAGENT_DELEGATE=0, the main agent gets no `delegate` tool (A/B control)
   timeout     seconds per assignment (default 1500)
   model       model id for myagent (default: LLM_MODEL env without provider prefix)
 Credentials come from the model environment (LLM_BASE_URL / LLM_API_KEY), never
@@ -56,6 +57,7 @@ class MyAgentAdapter(AgentAdapter):
         self.jar = os.path.expanduser(self.config.get("jar", "~/myagent.jar"))
         self.jre = os.path.expanduser(self.config.get("jre", "~/jre/jre17.tar.gz"))
         self.timeout = float(self.config.get("timeout", 1500))
+        self.delegate = bool(self.config.get("delegate", True))
         self.model = _model_id(self.config.get("model"))
         self._ready = set()          # workspace ids where the runtime is installed
 
@@ -174,7 +176,8 @@ class MyAgentAdapter(AgentAdapter):
             os.unlink(local)
 
         max_steps = int(self.config.get("max_steps") or request.max_iterations or 25)
-        cmd = (f"cd {shlex.quote(path)} && HOME={HOME} {RT}/jre/bin/java -Duser.home={HOME} -Xmx512m "
+        delegate_env = "" if self.delegate else "MYAGENT_DELEGATE=0 "
+        cmd = (f"cd {shlex.quote(path)} && HOME={HOME} {delegate_env}{RT}/jre/bin/java -Duser.home={HOME} -Xmx512m "
                f"-jar {RT}/myagent.jar --once {prompt_path} --once-mode {self.mode} -d {shlex.quote(path)} "
                f"--unsafe --max-steps {max_steps} --once-out {out_path} 2>/tmp/myagent-stderr-{tag}.log")
         run = _sh(ws, cmd, timeout=self.timeout)
@@ -220,5 +223,7 @@ class MyAgentAdapter(AgentAdapter):
                       "reviews": summary.get("reviews"), "review_verdicts": summary.get("reviewVerdicts"),
                       "review_scores": summary.get("reviewScores"), "review_restored": summary.get("reviewRestored"),
                       "review_steps": summary.get("reviewSteps"),
+                      "delegate": self.delegate, "delegations": summary.get("delegations"),
+                      "delegate_steps": summary.get("delegateSteps"),
                       "duration_s": round(time.time() - t0, 1)},
         )
