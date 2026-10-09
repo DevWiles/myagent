@@ -296,7 +296,8 @@ public final class AgentServer extends WebSocketServer {
         // 只读模式也接——子 agent 的菜单从同一张注册表里筛，那里本来就没有写工具
         SubAgents subagents = SUBAGENTS == SubAgents.Mode.OFF || !config.hasApiKey() ? null
                 : new SubAgents(this::newClient, tools, workspace.root(), () -> contextManager(options.readOnly()),
-                        Agent.DEFAULT_MAX_STEPS, SUBAGENTS, this::onAgentEvent);
+                        SubAgents.Settings.fromEnv(System::getenv, Agent.DEFAULT_MAX_STEPS, null),
+                        SUBAGENTS, this::onAgentEvent);
         if (subagents != null) {
             tools.registerAll(subagents.tools());
         }

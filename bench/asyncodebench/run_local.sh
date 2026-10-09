@@ -25,9 +25,9 @@ export BUILDX_BUILDER=acb
 # 而运行时是 amd64——容器一起来就 exec 失败。整个构建都钉在 amd64 上
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
 export ENV_FILE="$RUNNER/.env"; source scripts/env.sh
-STAMP=$(date +%m%d%H%M)
 for i in $(seq 1 "$RUNS"); do
-  RID="myagent-$LABEL-$PROTO-L$STAMP-$i"
+  # 时间戳精确到秒：矩阵里同一分钟可能连着起好几次，按分钟会撞名
+  RID="myagent-$LABEL-$PROTO-L$(date +%m%d%H%M%S)-$i"
   echo "$(date '+%F %T') START $TASK/$PROTO $LABEL #$i ($RID) cfg=$CFG" | tee -a "$LOG/chain.log"
   t0=$(date +%s)
   asyncodebench run --task "asyncodebench:$TASK" --protocol "$PROTO" --model "$LLM_MODEL" \
@@ -39,4 +39,6 @@ for i in $(seq 1 "$RUNS"); do
   if [ -n "$dir" ]; then asyncodebench validate-run "$dir" > "$LOG/$RID.validate" 2>&1; v="validate=$?"; fi
   for c in $(docker ps --format '{{.Names}}' | grep '^agent-server-'); do docker rm -f "$c" >/dev/null 2>&1; done
   echo "$(date '+%F %T') END   $TASK/$PROTO $LABEL #$i rc=$rc $(( $(date +%s) - t0 ))s $v dir=$dir" | tee -a "$LOG/chain.log"
+  # 矩阵评测（run_matrix.sh）靠这份清单知道哪次运行属于哪个组、哪道题
+  [ -n "${MANIFEST:-}" ] && echo "$LABEL $TASK $PROTO $RID $rc" >> "$MANIFEST"
 done

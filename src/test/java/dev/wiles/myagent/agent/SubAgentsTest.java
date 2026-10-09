@@ -121,13 +121,18 @@ class SubAgentsTest {
         }
 
         Rig(SubAgents.Mode mode, int parentMaxSteps, Script... childScripts) {
+            this(mode, parentMaxSteps, SubAgents.Settings.defaults(0), childScripts);
+        }
+
+        Rig(SubAgents.Mode mode, int parentMaxSteps, SubAgents.Settings settings, Script... childScripts) {
             children.addAll(List.of(childScripts));
             subagents = new SubAgents(() -> {
                 Script next = children.poll();
                 return next == null ? new Script() : next;
-            }, tools, ROOT, ContextManager::new, 0, mode, (id, e) -> eventIds.add(id));
+            }, tools, ROOT, ContextManager::new, settings, mode, (id, e) -> eventIds.add(id));
             tools.registerAll(subagents.tools());
-            parent = new Agent(parentLlm, tools, "SYSTEM-PROMPT", parentMaxSteps);
+            parent = new Agent(parentLlm, tools, "SYSTEM-PROMPT", parentMaxSteps)
+                    .withStepBudget(settings.budget());
             subagents.attach(parent);
         }
 
@@ -261,7 +266,7 @@ class SubAgentsTest {
     }
 
     @Test
-    @DisplayName("名额：开着的最多 6 个，做完没关的也算；close 一个就能再派")
+    @DisplayName("名额：开着的最多 3 个（默认），做完没关的也算；close 一个就能再派")
     void openAgentsAreCapped() throws Exception {
         Script[] scripts = new Script[8];
         for (int i = 0; i < scripts.length; i++) {
@@ -269,17 +274,17 @@ class SubAgentsTest {
         }
         Rig rig = new Rig(scripts);
         List<String> ids = new ArrayList<>();
-        for (int i = 0; i < SubAgents.MAX_THREADS; i++) {
+        for (int i = 0; i < SubAgents.DEFAULT_MAX_THREADS; i++) {
             ids.add(rig.spawn(Map.of("message", "活 " + i)));
         }
         awaitIdle(rig.subagents);
-        ToolResult seventh = rig.exec("spawn_agent", Map.of("message", "第七个"));
+        ToolResult seventh = rig.exec("spawn_agent", Map.of("message", "第四个"));
         assertFalse(seventh.ok());
         assertTrue(seventh.content().contains("close_agent"));
 
         ToolResult closed = rig.exec("close_agent", Map.of("target", ids.get(0)));
         assertTrue(closed.content().contains("\"completed\""), "返回关之前的状态");
-        assertNotNull(rig.spawn(Map.of("message", "第七个")));
+        assertNotNull(rig.spawn(Map.of("message", "第四个")));
     }
 
     @Test
@@ -587,5 +592,78 @@ class SubAgentsTest {
         for (String cmd : List.of("ls tests", "cat pytest.ini", "grep -r test src")) {
             assertFalse(SubAgents.TEST_COMMAND.matcher(cmd).find(), cmd);
         }
+    }
+
+    static SubAgents.Settings settings(Map<String, String> env, int childSteps, StepBudget budget) {
+        return SubAgents.Settings.fromEnv(env::get, childSteps, budget);
+    }
+
+    @Test
+    @DisplayName("配置：默认并发 3、三种类型、子 agent 步数同主 agent、30 分钟时限；环境变量能改，写错就报")
+    void settingsFromEnv() {
+        SubAgents.Settings d = settings(Map.of(), 100, null);
+        assertEquals(3, d.maxThreads());
+        assertEquals(java.util.Set.of("default", "explorer", "worker"), d.roles());
+        assertEquals(100, d.childMaxSteps());
+        assertEquals(30 * 60_000L, d.childTimeoutMillis());
+
+        SubAgents.Settings b = settings(Map.of("MYAGENT_SUBAGENT_MAX", "2", "MYAGENT_SUBAGENT_ROLES", "Explorer",
+                "MYAGENT_SUBAGENT_STEPS", "20", "MYAGENT_SUBAGENT_TIMEOUT", "90"), 100, null);
+        assertEquals(2, b.maxThreads());
+        assertEquals(java.util.Set.of("explorer"), b.roles());
+        assertEquals(20, b.childMaxSteps());
+        assertEquals(90_000L, b.childTimeoutMillis());
+
+        assertThrows(IllegalArgumentException.class, () -> settings(Map.of("MYAGENT_SUBAGENT_MAX", "x"), 1, null));
+        assertThrows(IllegalArgumentException.class, () -> settings(Map.of("MYAGENT_SUBAGENT_MAX", "0"), 1, null));
+        assertThrows(IllegalArgumentException.class, () -> settings(Map.of("MYAGENT_SUBAGENT_ROLES", "reviewer"), 1, null));
+    }
+
+    @Test
+    @DisplayName("只允许 explorer（对照组 B）：派 worker 被拒，说明里也只列 explorer")
+    void rolesAreRestricted() throws Exception {
+        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0,
+                settings(Map.of("MYAGENT_SUBAGENT_ROLES", "explorer"), 0, null), new Script().reply("查完"));
+        ToolResult worker = rig.exec("spawn_agent", Map.of("message", "写 a", "agent_type", "worker", "owns", List.of("a.py")));
+        assertFalse(worker.ok());
+        assertTrue(worker.content().contains("只允许派 explorer"));
+        assertTrue(rig.exec("spawn_agent", Map.of("message", "查 a", "agent_type", "explorer")).ok());
+        String desc = rig.subagents.spawnDescription();
+        assertTrue(desc.contains("- explorer："));
+        assertFalse(desc.contains("- worker："));
+        awaitIdle(rig.subagents);
+    }
+
+    @Test
+    @DisplayName("子 agent 超过时限：叫停，按出错交回（不当作做完），通知照发")
+    void childTimeoutIsAnError() throws Exception {
+        Script child = new Script();
+        child.blockUntilCancelled = new CountDownLatch(1);
+        SubAgents.Settings quick = new SubAgents.Settings(3, java.util.Set.of("default", "explorer", "worker"),
+                0, 200, null);
+        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0, quick, child);
+        String id = rig.spawn(Map.of("message", "慢活"));
+
+        awaitIdle(rig.subagents);
+        ToolResult waited = rig.exec("wait_agent", Map.of("targets", List.of(id)));
+        assertTrue(waited.content().contains("errored"), waited.content());
+        assertTrue(waited.content().contains("时限"), waited.content());
+    }
+
+    @Test
+    @DisplayName("共用步数预算：子 agent 的步数也从里面扣；用完时主 agent 收尾，文案说明是共用预算")
+    void sharedStepBudget() throws Exception {
+        StepBudget budget = new StepBudget(3);
+        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0, settings(Map.of(), 0, budget), new Script().reply("子做完"));
+        rig.parentLlm.call("spawn_agent", "{\"message\":\"小活\"}");                 // 主 1 步，子 1 步
+        rig.parentLlm.call("wait_agent", m -> "{\"targets\":[\"" + lastAgentId(m) + "\"]}"); // 主第 2 步
+        rig.parentLlm.call("read_file", "{}");                                         // 第 4 步取不到
+        rig.parentLlm.reply("到此为止");
+
+        String text = rig.parent.run("干活");
+
+        assertEquals(3, budget.used());
+        assertTrue(text.contains("总步数预算 3"), text);
+        assertEquals(3, rig.subagents.report().path("totalStepsUsed").asInt());
     }
 }

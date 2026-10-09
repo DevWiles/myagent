@@ -44,8 +44,10 @@ import java.util.function.Supplier;
  *       光靠提示词约束不住。{@code explorer} 没有写文件的工具。</li>
  *   <li><b>能复用</b>：{@code send_input} 给已有的子 agent 追加话（排队或打断），它的上下文还在；
  *       {@code close_agent} 关掉释放名额，{@code resume_agent} 再打开。</li>
- *   <li><b>上限</b>：同时开着的最多 {@link #MAX_THREADS} 个（做完没关的也算），深度 1——
- *       子 agent 的菜单上没有这五个工具（Codex 的 {@code agent_max_threads = 6}、{@code agent_max_depth = 1}）。</li>
+ *   <li><b>上限</b>：同时开着的最多 {@link Settings#maxThreads()} 个（做完没关的也算，默认
+ *       {@link #DEFAULT_MAX_THREADS}），深度 1——子 agent 的菜单上没有这五个工具
+ *       （Codex 是 {@code agent_max_threads = 6}、{@code agent_max_depth = 1}；并发先压到 3，
+ *       cookiecutter 上几个 agent 同时请求就撞 429，再按实验调）。</li>
  *   <li><b>默认不主动派</b>：{@link Mode#EXPLICIT} 时工具描述里写明「用户没明确要求就不派」，
  *       这是 Codex 的默认；{@link Mode#PROACTIVE} 换成「能并行就派」；{@link Mode#AUTO} 是开工前由
  *       {@link DelegationDecider} 决定，不委派就不给这几个工具，委派就把计划放进主 agent 的对话。</li>
@@ -61,8 +63,88 @@ public final class SubAgents implements Mailbox {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final PromptRepository REPO = PromptRepository.createDefault();
 
-    /** 同时开着的子 agent 上限，做完没关的也算。Codex 默认 6。 */
-    public static final int MAX_THREADS = 6;
+    /** 同时开着的子 agent 上限的默认值，做完没关的也算。Codex 默认 6，这里先压到 3。 */
+    public static final int DEFAULT_MAX_THREADS = 3;
+
+    /** 子 agent 一轮的墙钟时限默认值：30 分钟，跑不完就叫停、按出错交回。 */
+    public static final long DEFAULT_CHILD_TIMEOUT_MILLIS = 30 * 60_000L;
+
+    /**
+     * 可调的几个旋钮，都来自环境变量（见 {@link #fromEnv}）。
+     *
+     * @param maxThreads         同时开着的子 agent 上限
+     * @param roles              允许派的类型（default / explorer / worker 的子集）
+     * @param childMaxSteps      子 agent 每一轮的步数上限，{@code <= 0} 不限
+     * @param childTimeoutMillis 子 agent 每一轮的墙钟时限，{@code <= 0} 不限
+     * @param budget             和主 agent 共用的步数预算，null 表示不共用
+     */
+    public record Settings(int maxThreads, Set<String> roles, int childMaxSteps, long childTimeoutMillis,
+                           StepBudget budget) {
+
+        public Settings {
+            if (maxThreads <= 0) {
+                throw new IllegalArgumentException("子 agent 并发上限要大于 0: " + maxThreads);
+            }
+            roles = Set.copyOf(roles);
+            if (roles.isEmpty() || !Set.of("default", "explorer", "worker").containsAll(roles)) {
+                throw new IllegalArgumentException("子 agent 类型只认 default / explorer / worker: " + roles);
+            }
+        }
+
+        public static Settings defaults(int childMaxSteps) {
+            return new Settings(DEFAULT_MAX_THREADS, Set.of("default", "explorer", "worker"), childMaxSteps,
+                    DEFAULT_CHILD_TIMEOUT_MILLIS, null);
+        }
+
+        /**
+         * MYAGENT_SUBAGENT_MAX（并发）、MYAGENT_SUBAGENT_ROLES（逗号分隔，如 explorer）、
+         * MYAGENT_SUBAGENT_STEPS（每轮步数，默认同主 agent）、MYAGENT_SUBAGENT_TIMEOUT（每轮秒数）。
+         * 共用预算由调用方传（它也管主 agent）。
+         */
+        public static Settings fromEnv(java.util.function.Function<String, String> env, int defaultChildSteps,
+                                       StepBudget budget) {
+            String roles = env.apply("MYAGENT_SUBAGENT_ROLES");
+            return new Settings(
+                    intOr(env.apply("MYAGENT_SUBAGENT_MAX"), DEFAULT_MAX_THREADS),
+                    roles == null || roles.isBlank() ? Set.of("default", "explorer", "worker")
+                            : Set.of(roles.toLowerCase(Locale.ROOT).replace(" ", "").split(",")),
+                    intOr(env.apply("MYAGENT_SUBAGENT_STEPS"), defaultChildSteps),
+                    intOr(env.apply("MYAGENT_SUBAGENT_TIMEOUT"), (int) (DEFAULT_CHILD_TIMEOUT_MILLIS / 1000)) * 1000L,
+                    budget);
+        }
+
+        public static int intOr(String value, int fallback) {
+            if (value == null || value.isBlank()) {
+                return fallback;
+            }
+            try {
+                return Integer.parseInt(value.strip());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("要一个整数，收到: " + value);
+            }
+        }
+
+        /** 写进评测摘要。 */
+        ObjectNode toJson() {
+            ObjectNode o = JSON.createObjectNode();
+            o.put("maxThreads", maxThreads);
+            roles.stream().sorted().forEach(o.putArray("roles")::add);
+            o.put("childMaxSteps", childMaxSteps);
+            o.put("childTimeoutSeconds", childTimeoutMillis / 1000);
+            if (budget != null) {
+                o.put("totalStepBudget", budget.total());
+            }
+            return o;
+        }
+    }
+
+    /** 子 agent 超时的看门狗。一个进程一条线程就够：它只负责到点叫停。 */
+    private static final java.util.concurrent.ScheduledExecutorService WATCHDOG =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "subagent-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
 
     /** 交回主 agent 的一次结果封顶。子 agent 被要求写短，这是兜底。 */
     static final int MAX_RESULT_CHARS = 8_000;
@@ -173,6 +255,10 @@ public final class SubAgents implements Mailbox {
         boolean stoppedByParent;
         /** send_input(interrupt=true) 送来的话：这一轮停下后马上拿它开新的一轮。 */
         String interruptWith;
+        /** 第几轮。看门狗到点时只叫停它盯的那一轮，不误伤之后新开的。 */
+        int turn;
+        /** 这一轮是被看门狗叫停的。 */
+        boolean timedOut;
         /** send_input 排队的话，它下一步请求前收到（{@link Agent} 的收件箱）。 */
         final List<String> queued = new ArrayList<>();
         /** 它负责的文件/目录（绝对、规范化）。它跑着的时候只有它能写；空表示不独占。 */
@@ -223,7 +309,7 @@ public final class SubAgents implements Mailbox {
     private final ToolRegistry allTools;
     private final Path root;
     private final Supplier<ContextManager> contexts;
-    private final int childMaxSteps;
+    private final Settings settings;
     private final Mode mode;
     private final BiConsumer<String, AgentEvent> events;
     private volatile Agent parent;
@@ -233,11 +319,11 @@ public final class SubAgents implements Mailbox {
      * @param allTools      主 agent 的全量注册表，子 agent 的菜单在派出那一刻从这里筛
      * @param workspaceRoot 工作区根目录，{@code owns} 和写文件的路径都按它解析
      * @param contexts      每个子 agent 一份上下文管理器（和主 agent 同样的窗口）
-     * @param childMaxSteps 子 agent 每一轮的步数上限，{@code <= 0} 不限（和主 agent 一样）
+     * @param settings      并发、允许的类型、子 agent 的步数和时限、共用预算
      * @param events        子 agent 的动静往哪发，第一个参数是它的 id（{@code agent-N}）；传 null 不发
      */
     public SubAgents(Supplier<LlmClient> clients, ToolRegistry allTools, Path workspaceRoot,
-                     Supplier<ContextManager> contexts, int childMaxSteps, Mode mode,
+                     Supplier<ContextManager> contexts, Settings settings, Mode mode,
                      BiConsumer<String, AgentEvent> events) {
         if (mode == Mode.OFF) {
             throw new IllegalArgumentException("OFF 就别造它");
@@ -246,7 +332,7 @@ public final class SubAgents implements Mailbox {
         this.allTools = allTools;
         this.root = workspaceRoot.toAbsolutePath().normalize();
         this.contexts = contexts;
-        this.childMaxSteps = childMaxSteps;
+        this.settings = settings;
         this.mode = mode;
         this.events = events == null ? (id, e) -> { } : events;
     }
@@ -293,6 +379,10 @@ public final class SubAgents implements Mailbox {
         synchronized (lock) {
             ObjectNode out = JSON.createObjectNode();
             out.put("spawned", spawned.get());
+            out.set("settings", settings.toJson());
+            if (settings.budget() != null) {
+                out.put("totalStepsUsed", settings.budget().used());
+            }
             int childRefusals = children.values().stream().mapToInt(c -> c.refusals).sum();
             out.put("writeConflicts", mainRefusals + childRefusals);
             out.put("mainWriteRefusals", mainRefusals);
@@ -437,6 +527,19 @@ public final class SubAgents implements Mailbox {
         child.state = State.RUNNING;
         child.failure = null;
         child.stoppedByParent = false;
+        child.timedOut = false;
+        int turn = ++child.turn;
+        if (settings.childTimeoutMillis() > 0) {
+            WATCHDOG.schedule(() -> {
+                synchronized (lock) {
+                    if (child.running && child.turn == turn) {
+                        child.timedOut = true;
+                        child.agent.cancel();
+                        log.warn("子 agent {} 超过 {} 秒，已叫停", child.id, settings.childTimeoutMillis() / 1000);
+                    }
+                }
+            }, settings.childTimeoutMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
         Thread worker = new Thread(() -> {
             String text = null;
             Throwable error = null;
@@ -470,6 +573,14 @@ public final class SubAgents implements Mailbox {
                 }
                 if (child.stoppedByParent) {
                     child.state = State.INTERRUPTED;
+                    return;
+                }
+                if (child.timedOut) {
+                    // 超时不是「做完了」：按出错交回，带上它到此为止的话，主 agent 决定返工还是接手
+                    child.state = State.ERRORED;
+                    child.result = "超过 " + settings.childTimeoutMillis() / 1000 + " 秒的时限，被叫停"
+                            + (text == null || text.isBlank() ? "" : "。它到此为止的产出（可能不完整）:\n" + text);
+                    notices.add(new Notice(child.id, notice(child)));
                     return;
                 }
                 if (error != null) {
@@ -747,6 +858,9 @@ public final class SubAgents implements Mailbox {
     String spawnDescription() {
         StringBuilder roles = new StringBuilder();
         for (Role role : List.of(DEFAULT, EXPLORER, WORKER)) {
+            if (!settings.roles().contains(role.id())) {
+                continue;
+            }
             roles.append("- ").append(role.id()).append("：").append(role.description().strip()).append('\n');
         }
         String modeText = REPO.loadRequired(switch (mode) {
@@ -797,6 +911,10 @@ public final class SubAgents implements Mailbox {
             if (role == null) {
                 return ToolResult.error("agent_type 只认 default / explorer / worker，收到: " + type);
             }
+            if (!settings.roles().contains(role.id())) {
+                return ToolResult.error("这次只允许派 " + String.join(" / ", settings.roles().stream().sorted().toList())
+                        + "，不能派 " + role.id() + "。这部分你自己做。");
+            }
             Agent parentAgent = parent;
             if (parentAgent == null) {
                 return ToolResult.error("子 agent 没接到主 agent 上（SubAgents.attach 没调）");
@@ -813,8 +931,8 @@ public final class SubAgents implements Mailbox {
                 }
             }
             synchronized (lock) {
-                if (open() >= MAX_THREADS) {
-                    return ToolResult.error("已经开着 " + MAX_THREADS + " 个子 agent 了（做完没关的也占名额）。"
+                if (open() >= settings.maxThreads()) {
+                    return ToolResult.error("已经开着 " + settings.maxThreads() + " 个子 agent 了（做完没关的也占名额）。"
                             + "先用 close_agent 关掉不再需要的，或者自己做。");
                 }
             }
@@ -835,8 +953,9 @@ public final class SubAgents implements Mailbox {
             }
             String id = "agent-" + SEQ.incrementAndGet();
             Agent agent = new Agent(clients.get(), toolsFor(role, id), parentAgent.systemPrompt(),
-                    childMaxSteps, contexts.get())
-                    .withWritingTools(BuiltinTools.WRITING_TOOLS);
+                    settings.childMaxSteps(), contexts.get())
+                    .withWritingTools(BuiltinTools.WRITING_TOOLS)
+                    .withStepBudget(settings.budget());
             if (args.path("fork_context").asBoolean(false)) {
                 agent.restore(forked(parentAgent.conversation()));
             }
@@ -852,8 +971,8 @@ public final class SubAgents implements Mailbox {
                 events.accept(id, event);
             });
             synchronized (lock) {
-                if (open() >= MAX_THREADS) {      // 两次检查之间别人也派了
-                    return ToolResult.error("已经开着 " + MAX_THREADS + " 个子 agent 了，先 close_agent 关掉不需要的");
+                if (open() >= settings.maxThreads()) {      // 两次检查之间别人也派了
+                    return ToolResult.error("已经开着 " + settings.maxThreads() + " 个子 agent 了，先 close_agent 关掉不需要的");
                 }
                 children.put(id, child);
                 startTurn(child, brief(id, role, owns.isEmpty() ? message
@@ -1078,8 +1197,8 @@ public final class SubAgents implements Mailbox {
                     return ToolResult.error("没有这个子 agent: " + id);
                 }
                 if (child.closed) {
-                    if (open() >= MAX_THREADS) {
-                        return ToolResult.error("已经开着 " + MAX_THREADS + " 个子 agent 了，先 close_agent 关掉不需要的");
+                    if (open() >= settings.maxThreads()) {
+                        return ToolResult.error("已经开着 " + settings.maxThreads() + " 个子 agent 了，先 close_agent 关掉不需要的");
                     }
                     if (child.running) {
                         return ToolResult.error(id + " 还在收尾，稍后再试");

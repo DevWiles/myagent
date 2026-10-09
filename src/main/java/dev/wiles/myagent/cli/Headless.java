@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.agent.DelegationDecider;
+import dev.wiles.myagent.agent.StepBudget;
 import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.config.Config;
@@ -178,10 +179,15 @@ public final class Headless {
                 // /auto（开工前由决策器定：不委派就不给派遣工具，委派就带着计划开工），评测做对照用
                 AtomicInteger subagentSteps = new AtomicInteger();
                 SubAgents.Mode subMode = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
+                // MYAGENT_TOTAL_STEPS：主 agent 和子 agent 共用的步数预算（算力对齐的对照用），不设就不共用
+                int totalSteps = SubAgents.Settings.intOr(System.getenv("MYAGENT_TOTAL_STEPS"), 0);
+                StepBudget budget = totalSteps > 0 ? new StepBudget(totalSteps) : null;
+                SubAgents.Settings subSettings = SubAgents.Settings.fromEnv(System::getenv, maxSteps, budget);
                 DelegationDecider.Decision decision = null;
                 if (subMode == SubAgents.Mode.AUTO) {
-                    decision = new DelegationDecider(clients.get(), workspace.root(), SubAgents.MAX_THREADS)
-                            .decide(prompt, maxSteps);
+                    decision = new DelegationDecider(clients.get(), workspace.root(), subSettings.maxThreads(),
+                            subSettings.roles())
+                            .decide(prompt, totalSteps > 0 ? totalSteps : maxSteps);
                     summary.set("delegation", decision.toJson());
                     System.err.println("[trace] decide " + (decision.delegate()
                             ? "委派 " + decision.subtasks().size() + " 个子任务" : "不委派") + "：" + decision.reason());
@@ -190,7 +196,7 @@ public final class Headless {
                         && (subMode != SubAgents.Mode.AUTO || decision.delegate());
                 SubAgents subagents = !withSubagents ? null
                         : new SubAgents(clients, tools, workspace.root(), () -> new ContextManager(config.contextTokens()),
-                                maxSteps, subMode, (id, event) -> {
+                                subSettings, subMode, (id, event) -> {
                                     if (event instanceof AgentEvent.Thinking) {
                                         subagentSteps.incrementAndGet();
                                     }
@@ -203,7 +209,11 @@ public final class Headless {
                         SystemPrompt.forWorkspace(workspace.root(), index, false,
                                 subMode == SubAgents.Mode.PROACTIVE),
                         maxSteps, new ContextManager(config.contextTokens()))
-                        .withWritingTools(BuiltinTools.WRITING_TOOLS);
+                        .withWritingTools(BuiltinTools.WRITING_TOOLS)
+                        .withStepBudget(budget);
+                if (budget != null) {
+                    summary.put("totalStepBudget", budget.total());
+                }
                 if (subagents != null) {
                     subagents.attach(agent);
                     if (decision != null) {
@@ -262,6 +272,9 @@ public final class Headless {
                 if (subagents != null) {
                     // 写入冲突、收尾验证提醒、每个子 agent 实际写了什么跑了什么——评测归因用
                     summary.set("subagentReport", subagents.report());
+                }
+                if (budget != null) {
+                    summary.put("totalStepsUsed", budget.used());
                 }
                 summary.put("subagentSteps", subagentSteps.get());
                 exit = failed.get() == null ? 0 : 1;

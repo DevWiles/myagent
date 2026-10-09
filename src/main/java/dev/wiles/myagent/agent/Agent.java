@@ -146,6 +146,10 @@ public final class Agent {
     private Precompute precompute;
     /** 跑循环之外送进来的话（子 agent 的结果、追加的指示）。null 表示没有这条通道。 */
     private Mailbox mailbox;
+    /** 和子 agent 共用的步数预算。null 表示只看自己的 maxSteps。 */
+    private StepBudget budget;
+    /** 这一轮是不是因为共用预算用完才收尾的（收尾文案要说清是哪条线）。 */
+    private boolean budgetExhausted;
 
     /**
      * 估算值到实测值的换算系数。
@@ -261,6 +265,12 @@ public final class Agent {
     /** 接上收件箱：每一步请求前收一次，交卷前还有人在跑就等。见 {@link Mailbox}。 */
     public Agent withMailbox(Mailbox mailbox) {
         this.mailbox = mailbox;
+        return this;
+    }
+
+    /** 接上和子 agent 共用的步数预算（见 {@link StepBudget}）。 */
+    public Agent withStepBudget(StepBudget budget) {
+        this.budget = budget;
         return this;
     }
 
@@ -454,6 +464,7 @@ public final class Agent {
      */
     public String run(String userInput) {
         cancelled = false;
+        budgetExhausted = false;
         // 断点之后的第一句话：前面拼上中断说明，告诉模型现场怎么读（见 Interruption.resumeNote）。
         // 「继续」也好、换了个说法也好，都走这一条——不认关键词。
         // 只拼一次：这一轮说完，unfinished 就清了
@@ -469,6 +480,10 @@ public final class Agent {
                     return abort(userInput, step);
                 }
                 deliverMail();
+                if (budget != null && !budget.take()) {
+                    budgetExhausted = true;
+                    break;               // 共用预算用完了：和撞上自己的步数上限一样收尾
+                }
                 emit(new AgentEvent.Thinking(step));
 
                 List<ToolSpec> specs = tools.specs();
@@ -538,7 +553,7 @@ public final class Agent {
 
             // 跑满了还没收敛。再给最后一次机会，但**不带工具**——
             // 模型没得选，只能用文字交代目前进展，循环就此收口。
-            log.warn("达到最大步数 {}，强制收敛", maxSteps);
+            log.warn("{}，强制收敛", limitLabel());
             return forceConclusion(userInput);
 
         } catch (LlmException e) {
@@ -1196,15 +1211,21 @@ public final class Agent {
             history.add(conclusion);
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
-            unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
+            unfinished = new Interruption(limitLabel(), userInput, maxSteps,
                     clock.getAsLong(), conversation().size());
-            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
-            return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
+            emit(new AgentEvent.Failed(limitLabel() + "，已强制收尾", unfinished));
+            return text + "\n\n(已" + limitLabel() + " 限制，任务可能未完成)";
         } catch (LlmException e) {
             history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
-            seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
+            seal(limitLabel() + "，收尾请求也失败了", userInput, maxSteps);
             emit(new AgentEvent.Failed(e.getMessage(), unfinished));
-            return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
+            return limitLabel() + "，且收尾请求失败: " + e.getMessage();
         }
+    }
+
+    /** 撞上的是哪条线。自己的步数上限沿用原来的说法（评测脚本按它认「跑满步数」）。 */
+    private String limitLabel() {
+        return budgetExhausted ? "达到总步数预算 " + budget.total() + "（主 agent 和子 agent 共用）"
+                : "达到最大步数 " + maxSteps;
     }
 }

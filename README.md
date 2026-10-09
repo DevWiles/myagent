@@ -259,10 +259,24 @@ myagent 一步都不插手。`--isolated` 每次开临时 profile，进程一死
   `<subagent_notification>` 自动送进主对话，主 agent 只在关键路径卡住时才 `wait_agent`。
 - 三种类型：`default`（和主 agent 同样的工具）、`explorer`（没有写文件的工具，问代码库的具体问题）、
   `worker`（直接改工作区，派活时要划清各自负责的文件——大家共用一个目录）。
-- 同时开着最多 6 个（做完没关的也算），子 agent 不能再派（深度 1）。主 agent 交卷前会等还在跑的子 agent；
-  按停时它们一起停。
+- 子 agent 不能再派（深度 1）。主 agent 交卷前会等还在跑的子 agent；按停时它们一起停。
+- 派 worker 必须写明 `owns`（它负责的文件或目录）：它跑着时别人写不了这些路径，它也只能写这些路径。
+- 子 agent 交回的通知里带 `observed`——框架记录的实际写了哪些文件、跑了哪些命令和退出码，不靠它自述。
+  子 agent 改过的文件主 agent 没跑过测试就想交卷，会被提醒一次。
 - 什么时候派由 `MYAGENT_SUBAGENTS` 决定：`explicit`（默认，和 Codex 一样——你说了「用子 agent」「并行做」
-  才派）、`proactive`（能并行就派）、`off`（不给这几个工具）。
+  才派）、`proactive`（能并行就派）、`auto`（开工前由委派决策器判断，不委派就不给派遣工具；
+  目前只在 `--once` 里生效）、`off`（不给这几个工具）。
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `MYAGENT_SUBAGENT_MAX` | `3` | 同时开着的子 agent 上限（做完没关的也算） |
+| `MYAGENT_SUBAGENT_ROLES` | 全部 | 允许派的类型，逗号分隔，如 `explorer` |
+| `MYAGENT_SUBAGENT_STEPS` | 同主 agent | 子 agent 每一轮的步数上限 |
+| `MYAGENT_SUBAGENT_TIMEOUT` | `1800` | 子 agent 每一轮的时限（秒），超时按出错交回 |
+| `MYAGENT_TOTAL_STEPS` | 不设 | 主 agent 和子 agent 共用的步数预算（算力对齐的对照用） |
+
+本机评测：`bench/asyncodebench/run_matrix.sh A,D cookiecutter 3` 按组交替跑，
+`bench/asyncodebench/summarize.py <清单>` 汇总成表（组的定义见脚本开头）。
 
 ### 技能（标准 SKILL.md）
 

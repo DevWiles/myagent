@@ -12,8 +12,13 @@ Config keys (``--agent-config-json``):
   jre         host path of a linux-x64 JRE tgz  (default ~/jre/jre17.tar.gz)
   max_steps   override the per-assignment step cap; 0 = unlimited (default: request.max_iterations,
               i.e. the benchmark's own response budget)
-  subagents   off | explicit | proactive -> MYAGENT_SUBAGENTS (Codex-style spawn_agent tools;
-              default explicit = only when asked, proactive = spawn whenever it parallelizes)
+  subagents   off | explicit | proactive | auto -> MYAGENT_SUBAGENTS (Codex-style spawn_agent tools;
+              default explicit = only when asked, proactive = spawn whenever it parallelizes,
+              auto = an up-front delegation decision; no spawn tools at all when it declines)
+  subagent_max / subagent_roles / subagent_steps / subagent_timeout
+              -> MYAGENT_SUBAGENT_MAX / _ROLES (e.g. "explorer") / _STEPS / _TIMEOUT (seconds)
+  total_steps -> MYAGENT_TOTAL_STEPS: one step budget shared by the main agent and its subagents
+              (compute-matched comparisons); unset = only the main agent's max_steps applies
   timeout     seconds per assignment (default 1500)
   model       model id for myagent (default: LLM_MODEL env without provider prefix)
 Credentials come from the model environment (LLM_BASE_URL / LLM_API_KEY), never
@@ -184,6 +189,11 @@ class MyAgentAdapter(AgentAdapter):
         else:
             max_steps = int(request.max_iterations or 0)
         sub_env = f"MYAGENT_SUBAGENTS={shlex.quote(self.subagents)} "
+        for key, env in (("subagent_max", "MYAGENT_SUBAGENT_MAX"), ("subagent_roles", "MYAGENT_SUBAGENT_ROLES"),
+                         ("subagent_steps", "MYAGENT_SUBAGENT_STEPS"), ("subagent_timeout", "MYAGENT_SUBAGENT_TIMEOUT"),
+                         ("total_steps", "MYAGENT_TOTAL_STEPS")):
+            if key in self.config:
+                sub_env += f"{env}={shlex.quote(str(self.config[key]))} "
         cmd = (f"cd {shlex.quote(path)} && HOME={HOME} {sub_env}{RT}/jre/bin/java -Duser.home={HOME} -Xmx512m "
                f"-jar {RT}/myagent.jar --once {prompt_path} --once-mode {self.mode} -d {shlex.quote(path)} "
                f"--unsafe --max-steps {max_steps} --once-out {out_path} 2>/tmp/myagent-stderr-{tag}.log")
@@ -232,5 +242,8 @@ class MyAgentAdapter(AgentAdapter):
                       "review_steps": summary.get("reviewSteps"),
                       "subagent_mode": self.subagents, "subagents": summary.get("subagents"),
                       "subagent_steps": summary.get("subagentSteps"),
+                      "delegation": summary.get("delegation"), "subagent_report": summary.get("subagentReport"),
+                      "total_step_budget": summary.get("totalStepBudget"),
+                      "total_steps_used": summary.get("totalStepsUsed"),
                       "duration_s": round(time.time() - t0, 1)},
         )

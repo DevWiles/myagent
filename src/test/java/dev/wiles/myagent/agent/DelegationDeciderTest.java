@@ -142,4 +142,16 @@ class DelegationDeciderTest {
         assertFalse(d.delegate());
         assertTrue(d.reason().contains("调用失败"));
     }
+
+    @Test
+    @DisplayName("只允许 explorer 时，计划里出现 worker 就退回单 agent；提示词里写明允许的类型")
+    void plansRespectAllowedRoles(@TempDir Path ws) {
+        DelegationDecider.Decision d = DelegationDecider.parse(TWO_WORKERS, 6, java.util.Set.of("explorer"));
+        assertFalse(d.delegate());
+        assertTrue(d.reason().contains("不允许的类型 worker"), d.reason());
+
+        Fake llm = new Fake("{\"delegate\": false, \"reason\": \"小\"}");
+        new DelegationDecider(llm, ws, 2, java.util.Set.of("explorer")).decide("任务", 0);
+        assertTrue(llm.seen.get(0).get(0).content().contains("这一次只允许派：explorer"));
+    }
 }

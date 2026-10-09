@@ -127,23 +127,33 @@ public final class DelegationDecider {
     private final LlmClient client;
     private final Path workspaceRoot;
     private final int maxSubtasks;
+    private final Set<String> roles;
 
     /**
      * @param client      专用客户端（JSON 模式、低温度会改它的状态，别和主 agent 共用）
      * @param maxSubtasks 子任务上限，和子 agent 并发上限对齐
+     * @param roles       允许派的类型（对照组 B 只给 explorer）
      */
-    public DelegationDecider(LlmClient client, Path workspaceRoot, int maxSubtasks) {
+    public DelegationDecider(LlmClient client, Path workspaceRoot, int maxSubtasks, Set<String> roles) {
         this.client = client;
         this.workspaceRoot = workspaceRoot;
         this.maxSubtasks = maxSubtasks;
+        this.roles = Set.copyOf(roles);
     }
+
+    public DelegationDecider(LlmClient client, Path workspaceRoot, int maxSubtasks) {
+        this(client, workspaceRoot, maxSubtasks, ALL_ROLES);
+    }
+
+    static final Set<String> ALL_ROLES = Set.of("explorer", "worker", "default");
 
     /**
      * @param task     用户原话
      * @param maxSteps 主 agent 的步数预算，{@code <= 0} 表示不限
      */
     public Decision decide(String task, int maxSteps) {
-        String system = REPO.loadRequired(PROMPT).replace("{{max}}", String.valueOf(maxSubtasks));
+        String system = REPO.loadRequired(PROMPT).replace("{{max}}", String.valueOf(maxSubtasks))
+                .replace("{{types}}", String.join("、", roles.stream().sorted().toList()));
         String user = "## 任务（用户原话）\n" + task
                 + "\n\n## 预算\n主 agent 步数上限：" + (maxSteps <= 0 ? "不限" : maxSteps)
                 + "；子 agent 同时最多 " + maxSubtasks + " 个。"
@@ -156,7 +166,7 @@ public final class DelegationDecider {
             log.warn("委派决策调用失败，按单 agent 处理", e);
             return Decision.single("决策器调用失败，按单 agent 处理: " + e.getMessage(), "");
         }
-        return parse(raw, maxSubtasks);
+        return parse(raw, maxSubtasks, roles);
     }
 
     private String digest() {
@@ -167,8 +177,12 @@ public final class DelegationDecider {
         }
     }
 
-    /** 解析加校验。包内可见：测试直接喂模型输出。 */
     static Decision parse(String raw, int maxSubtasks) {
+        return parse(raw, maxSubtasks, ALL_ROLES);
+    }
+
+    /** 解析加校验。包内可见：测试直接喂模型输出。 */
+    static Decision parse(String raw, int maxSubtasks, Set<String> roles) {
         JsonNode node;
         try {
             int start = raw == null ? -1 : raw.indexOf('{');
@@ -192,8 +206,13 @@ public final class DelegationDecider {
         List<Subtask> subtasks = new ArrayList<>();
         for (JsonNode s : node.path("subtasks")) {
             String type = text(s, "agent_type").toLowerCase(Locale.ROOT);
-            if (!Set.of("explorer", "worker", "default").contains(type)) {
+            if (!ALL_ROLES.contains(type)) {
                 type = "default";
+            }
+            if (!roles.contains(type)) {
+                return new Decision(false, "子任务用了不允许的类型 " + type + "（这次只允许 "
+                        + String.join("/", roles.stream().sorted().toList()) + "），按单 agent 处理（决策器原本的理由："
+                        + reason + "）", benefit, risks, cost, List.of(), raw);
             }
             String goal = text(s, "goal");
             if (goal.isBlank()) {
