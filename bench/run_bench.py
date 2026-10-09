@@ -5,7 +5,7 @@
   python3 bench/run_bench.py --agent myagent --mode react [--tasks a,b] [--label L] [--timeout 3600]
   python3 bench/run_bench.py --agent claude                 # Claude Code 无头模式，接同一个 DeepSeek 模型
 agent：myagent（WebSocket 协议驱动）/ claude（`claude -p` + stream-json）
-mode（仅 myagent）：react / prompt / plan / team
+mode（仅 myagent）：react / react+review（单写者 + 收尾独立审查）/ prompt / plan / team
 结果：bench/results/<label>/<task>.json + summary.json；沙盒镜像 myagent-sandbox:v2（非 root 用户 bench）。
 """
 import argparse
@@ -73,8 +73,9 @@ def docker_base(name, work, home, extra_env=()):
     return cmd
 
 
-def start_myagent(name, work, home, auto_plan_off):
-    cmd = docker_base(name, work, home, [f"MYAGENT_AUTO_PLAN={'0' if auto_plan_off else '1'}"])
+def start_myagent(name, work, home, auto_plan_off, final_review=False):
+    cmd = docker_base(name, work, home, [f"MYAGENT_AUTO_PLAN={'0' if auto_plan_off else '1'}",
+                                         f"MYAGENT_FINAL_REVIEW={'1' if final_review else '0'}"])
     cmd += ["-p", "127.0.0.1::7777", IMAGE, "java", "-jar", "/opt/myagent.jar", "--serve", "--lan", "--port", "7777", "-d", "/work"]
     r = sh(cmd)
     if r.returncode != 0:
@@ -94,13 +95,14 @@ def is_test_cmd(cmd):
 
 # ---------------------------------------------------------------- myagent
 def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
-    token, port = start_myagent(name, work, home, auto_plan_off=(mode == "react"))
+    token, port = start_myagent(name, work, home, auto_plan_off=(mode in ("react", "react+review")),
+                                final_review=(mode == "react+review"))
     ws = websocket.create_connection(f"ws://127.0.0.1:{port}/?token={token}", timeout=60, suppress_origin=True)
     ready = json.loads(ws.recv())
     rec["model"] = ready.get("model")
     if not ready.get("hasApiKey"):
         raise RuntimeError("no api key in sandbox")
-    ws.send(json.dumps({"t": "prompt", "text": prompt} if mode in ("prompt", "react") else
+    ws.send(json.dumps({"t": "prompt", "text": prompt} if mode in ("prompt", "react", "react+review") else
                        {"t": "plan", "goal": prompt} if mode == "plan" else {"t": "team", "goal": prompt}))
     t0 = time.time()
     deadline = t0 + timeout
@@ -300,7 +302,7 @@ def run_task(task, meta, agent, mode, label, timeout, results_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", choices=["myagent", "claude"], default="myagent")
-    ap.add_argument("--mode", choices=["react", "prompt", "plan", "team"], default="react")
+    ap.add_argument("--mode", choices=["react", "react+review", "prompt", "plan", "team"], default="react")
     ap.add_argument("--label", default=None)
     ap.add_argument("--tasks", default="")
     ap.add_argument("--only-source", default="", help="hand / exercism")

@@ -6,7 +6,8 @@ is uploaded into the container once, and every assignment is executed with
 ``java -jar myagent.jar --once`` (headless single run, auto-approve).
 
 Config keys (``--agent-config-json``):
-  mode        "react" (default) or "team"     -> myagent --once-mode
+  mode        "react" (default), "react+review" (single writer + final independent review)
+              or "team"                         -> myagent --once-mode
   jar         host path of myagent.jar          (default ~/myagent.jar)
   jre         host path of a linux-x64 JRE tgz  (default ~/jre/jre17.tar.gz)
   max_steps   override the per-assignment step cap (default: request.max_iterations)
@@ -216,5 +217,8 @@ class MyAgentAdapter(AgentAdapter):
             events=events,
             metadata={"mode": self.mode, "model": self.model, "status": summary.get("status"),
                       "rounds": summary.get("rounds"), "exit_code": run.exit_code,
+                      "reviews": summary.get("reviews"), "review_verdicts": summary.get("reviewVerdicts"),
+                      "review_scores": summary.get("reviewScores"), "review_restored": summary.get("reviewRestored"),
+                      "review_steps": summary.get("reviewSteps"),
                       "duration_s": round(time.time() - t0, 1)},
         )

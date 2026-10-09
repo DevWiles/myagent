@@ -52,6 +52,7 @@ import dev.wiles.myagent.plan.PlanStore;
 import dev.wiles.myagent.plan.AgentRole;
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.team.Pipeline;
+import dev.wiles.myagent.team.ReviewLoop;
 import dev.wiles.myagent.team.TeamListener;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.plan.Planner;
@@ -110,6 +111,15 @@ public final class AgentServer extends WebSocketServer {
     private static final Logger log = LoggerFactory.getLogger(AgentServer.class);
     /** MYAGENT_AUTO_PLAN=0 时 prompt 不再按字面启发式改走规划；评测里用它做纯单 agent 对照 */
     private static final boolean AUTO_PLAN = !"0".equals(System.getenv("MYAGENT_AUTO_PLAN"));
+
+    /**
+     * MYAGENT_FINAL_REVIEW=1 时，每句话改了文件就做一次收尾独立审查（{@link ReviewLoop}）。
+     * 默认关：等评测证明它划算再考虑默认开。和 AUTO_PLAN 一样先做成环境变量，评测驱动脚本好切。
+     */
+    private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
+
+    /** 正在进行的收尾审查，按停时要一起掐。 */
+    private volatile ReviewLoop reviewing;
 
     private final CliOptions options;
     private final Config config;
@@ -757,7 +767,29 @@ public final class AgentServer extends WebSocketServer {
         worker.submit(() -> {
             long startedAt = System.currentTimeMillis();
             try {
-                agent.run(text);                 // 事件在 onAgentEvent 里已经播出去了
+                if (FINAL_REVIEW) {
+                    // 审查方的事件带着 final-review 的任务号播出去，和计划子任务同一条通道
+                    ReviewLoop loop = new ReviewLoop(this::newClient, tools, workspace.root(),
+                            this::onAgentEvent);
+                    reviewing = loop;
+                    try {
+                        loop.run(new ReviewLoop.MainTurn() {
+                            @Override
+                            public String run(String input) {
+                                return agent.run(input);
+                            }
+
+                            @Override
+                            public boolean failed() {
+                                return agent.unfinished().isPresent();
+                            }
+                        }, text);
+                    } finally {
+                        reviewing = null;
+                    }
+                } else {
+                    agent.run(text);             // 事件在 onAgentEvent 里已经播出去了
+                }
             } catch (RuntimeException e) {
                 log.error("agent 跑挂了", e);
                 publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
@@ -1040,6 +1072,10 @@ public final class AgentServer extends WebSocketServer {
     }
 
     private void handleCancel() {
+        ReviewLoop loop = reviewing;
+        if (loop != null) {
+            loop.cancel();                      // 先掐审查：不然它可能刚好要把意见交回去，又开一轮修改
+        }
         if (agent != null) {
             agent.cancel();
         }

@@ -16,6 +16,7 @@ import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.team.Pipeline;
+import dev.wiles.myagent.team.ReviewLoop;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.team.TeamStatus;
 import dev.wiles.myagent.tool.BuiltinTools;
@@ -184,7 +185,34 @@ public final class Headless {
                     }
                     trace("agent", event);
                 });
-                text = agent.run(prompt);
+                if ("react+review".equals(options.onceMode())) {
+                    AtomicInteger reviewSteps = new AtomicInteger();
+                    ReviewLoop loop = new ReviewLoop(clients, tools, workspace.root(), (stage, event) -> {
+                        if (event instanceof AgentEvent.Thinking) {
+                            reviewSteps.incrementAndGet();
+                        }
+                        trace(stage.id(), event);
+                    });
+                    ReviewLoop.Outcome outcome = loop.run(new ReviewLoop.MainTurn() {
+                        @Override
+                        public String run(String input) {
+                            return agent.run(input);
+                        }
+
+                        @Override
+                        public boolean failed() {
+                            return failed.get() != null;
+                        }
+                    }, prompt);
+                    text = outcome.text();
+                    summary.put("reviews", outcome.reviews());
+                    summary.put("reviewSteps", reviewSteps.get());
+                    summary.put("reviewRestored", outcome.restored());
+                    outcome.verdicts().forEach(summary.withArray("reviewVerdicts")::add);
+                    outcome.scores().forEach(summary.withArray("reviewScores")::add);
+                } else {
+                    text = agent.run(prompt);
+                }
                 summary.put("status", failed.get() == null ? "COMPLETED" : "FAILED");
                 if (failed.get() != null) {
                     summary.put("failed", failed.get());
