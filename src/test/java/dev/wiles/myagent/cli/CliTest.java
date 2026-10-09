@@ -64,8 +64,10 @@ class CliTest {
         assertEquals("react", Cli.parse(new String[]{"--once", "-"}).onceMode());
         assertThrows(IllegalArgumentException.class,
                 () -> Cli.parse(new String[]{"--once", "p", "--once-mode", "swarm"}));
+        assertEquals(0, Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}).maxSteps(),
+                "0 表示不限，和不传一样");
         assertThrows(IllegalArgumentException.class,
-                () -> Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}));
+                () -> Cli.parse(new String[]{"--once", "p", "--max-steps", "-1"}));
     }
 
     @Test

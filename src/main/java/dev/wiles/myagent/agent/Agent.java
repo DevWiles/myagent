@@ -62,11 +62,21 @@ public final class Agent {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
 
     /**
-     * 单次 run 最多跑几轮。
-     * 模型是可能陷进死循环的（反复读同一个文件、反复试同一条命令），
-     * 没有这个上限，一次对话就能把你的额度烧光。
+     * 单次 run 最多跑几轮。{@code <= 0} 表示不限——这是默认。
+     *
+     * <h3>为什么默认不限</h3>
+     * 照 Claude Code：交互模式没有步数上限，无头模式的 {@code --max-turns} 是可选项、默认不设。
+     * 原来的 25 步是按「改一个小 bug」定的，真实仓库上一个任务读、改、跑测试、再改，
+     * 25 步根本不够；撞上限的代价不是少跑几步，是这一轮在半路被强制收尾。
+     * AsynCodeBench cookiecutter 上三次单 agent 全是跑满步数被截断的，成绩差多少
+     * 全看截断那一刻活干到哪儿（142 ~ 180/202），而不是能力。
+     *
+     * <h3>不限步数，那靠什么防失控</h3>
+     * 和 Claude Code 一样：随时能按停（连带正在跑的工具和子 agent）；上下文涨到窗口的 80%
+     * 起后台压缩；单个工具、单批并行调用、429 重试都各有时限。死循环烧钱的情况，
+     * 要防就显式传上限（{@code --max-steps}，评测框架会传它自己的预算）。
      */
-    public static final int DEFAULT_MAX_STEPS = 25;
+    public static final int DEFAULT_MAX_STEPS = 0;
 
     /**
      * 到了硬线、且后台正在算时，最多等它多久。
@@ -435,7 +445,7 @@ public final class Agent {
         int step = 0;
 
         try {
-            for (step = 1; step <= maxSteps; step++) {
+            for (step = 1; maxSteps <= 0 || step <= maxSteps; step++) {
                 if (shouldStop()) {
                     return abort(userInput, step);
                 }

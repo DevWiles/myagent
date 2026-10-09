@@ -10,7 +10,8 @@ Config keys (``--agent-config-json``):
               or "team"                         -> myagent --once-mode
   jar         host path of myagent.jar          (default ~/myagent.jar)
   jre         host path of a linux-x64 JRE tgz  (default ~/jre/jre17.tar.gz)
-  max_steps   override the per-assignment step cap (default: request.max_iterations)
+  max_steps   override the per-assignment step cap; 0 = unlimited (default: request.max_iterations,
+              i.e. the benchmark's own response budget)
   delegate    false -> MYAGENT_DELEGATE=0, the main agent gets no `delegate` tool (A/B control)
   timeout     seconds per assignment (default 1500)
   model       model id for myagent (default: LLM_MODEL env without provider prefix)
@@ -175,7 +176,12 @@ class MyAgentAdapter(AgentAdapter):
         finally:
             os.unlink(local)
 
-        max_steps = int(self.config.get("max_steps") or request.max_iterations or 25)
+        # 显式配了就听配置（0 = 不限，照 Claude Code 默认）；没配就用框架的响应预算
+        # （standard-100 档是 100——那是题库的统一规则，改了成绩就不和别人可比）
+        if "max_steps" in self.config:
+            max_steps = int(self.config["max_steps"])
+        else:
+            max_steps = int(request.max_iterations or 0)
         delegate_env = "" if self.delegate else "MYAGENT_DELEGATE=0 "
         cmd = (f"cd {shlex.quote(path)} && HOME={HOME} {delegate_env}{RT}/jre/bin/java -Duser.home={HOME} -Xmx512m "
                f"-jar {RT}/myagent.jar --once {prompt_path} --once-mode {self.mode} -d {shlex.quote(path)} "
