@@ -4,6 +4,7 @@ import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.tool.builtin.BashTool;
 import dev.wiles.myagent.tool.builtin.RunTestsTool;
 import dev.wiles.myagent.tool.builtin.CreateProjectTool;
+import dev.wiles.myagent.tool.builtin.EditFileTool;
 import dev.wiles.myagent.tool.builtin.GlobTool;
 import dev.wiles.myagent.tool.builtin.GrepTool;
 import dev.wiles.myagent.tool.builtin.ListDirTool;
@@ -32,7 +33,7 @@ public final class BuiltinTools {
      * 将来加了新的写工具，在这儿补一个名字就行，压缩那边不用改。
      */
     public static final java.util.Set<String> WRITING_TOOLS =
-            java.util.Set.of("write_file", "create_project");
+            java.util.Set.of("write_file", "edit_file", "create_project");
 
     private BuiltinTools() {
     }
@@ -114,6 +115,7 @@ public final class BuiltinTools {
         ToolRegistry registry = new ToolRegistry()
                 .register(new ReadFileTool(workspace))
                 .register(new WriteFileTool(workspace, new FileWriteGuard(), approval))
+                .register(new EditFileTool(workspace, new FileWriteGuard(), approval))
                 .register(new ListDirTool(workspace))
                 .register(new GrepTool(workspace))
                 .register(new GlobTool(workspace))

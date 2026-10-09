@@ -107,7 +107,7 @@ public final class SubAgents implements Mailbox {
               - 有几个能各自独立回答的问题时，同时派几个 explorer。等结果的时候接着做不依赖这些结果的活——并行是委派最大的好处。
               - 相关的追问用 send_input 交给已有的 explorer，不要新派。
               它没有写文件的工具。""",
-            "subagents/roles/explorer.md", Set.of("write_file", "create_project", "remember"));
+            "subagents/roles/explorer.md", Set.of("write_file", "edit_file", "create_project", "remember"));
     static final Role WORKER = new Role("worker", """
             用来干活：实现功能的一部分、修测试或 bug、把大重构拆成独立的几块。
               - 用 owns 明确交代它**负责哪些文件/模块**（所有权，必填），比如「worker 1 负责鉴权模块，worker 2 负责数据库层」。它跑着的时候这些路径只有它能写，你也写不了。
@@ -874,7 +874,7 @@ public final class SubAgents implements Mailbox {
     }
 
     /**
-     * 带归属检查的写文件工具。包在 {@code write_file} / {@code create_project} 外面，
+     * 带归属检查的写文件工具。包在 {@code write_file} / {@code edit_file} / {@code create_project} 外面，
      * 每个写入方（主 agent、各个子 agent）各一份，写之前问 {@link #checkWrite}。
      *
      * <p>bash 也能写文件，这里拦不住——和 {@link BuiltinTools#WRITING_TOOLS} 是同一个口径：

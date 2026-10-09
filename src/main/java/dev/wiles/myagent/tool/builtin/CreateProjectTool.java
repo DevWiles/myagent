@@ -57,7 +57,7 @@ public final class CreateProjectTool implements Tool {
     @Override
     public String description() {
         return "一次性创建多个目录和文件，用于初始化项目骨架。"
-                + "只在需要同时创建多个文件时使用；只改一个文件请用 write_file。"
+                + "只在需要同时创建多个文件时使用；只改一个文件请用 edit_file，只新建一个文件请用 write_file。"
                 + "已存在的文件默认不会被覆盖。";
     }
 
