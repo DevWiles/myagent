@@ -51,6 +51,12 @@ cd 你要让它干活的目录
 两件事都带新鲜度判断，没改动就直接跳过，启动和裸跑界面一样快。
 敲命令时所在的目录就是 agent 的工作区。
 
+想在任何目录直接敲 `myagent`，把它软链进 PATH 里的某个目录就行（脚本会解开软链找回仓库）：
+
+```bash
+ln -s "$PWD/myagent-tui" ~/.local/bin/myagent    # 在仓库根目录执行
+```
+
 ### 用手机连
 
 装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
