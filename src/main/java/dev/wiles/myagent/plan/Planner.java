@@ -125,7 +125,9 @@ public final class Planner {
             requireRunnableRoles(parsed.tasks());
             // 建图这一步同样可能失败（id 重复、悬空依赖、成环），
             // 它的报错一样要回灌——尤其是环的路径，模型看了才知道该断哪条边
-            return new Plan(parsed.goal(), TaskGraph.of(parsed.tasks()));
+            // 原话原样存进计划：goal 是转述，转述会漏，执行时每个子任务都要看到原话
+            return new Plan(parsed.goal(), TaskGraph.of(parsed.tasks()), goal,
+                    parsed.requirements());
         });
     }
 
@@ -135,9 +137,14 @@ public final class Planner {
      * @param findings 父任务在 ReAct 子循环里摸到的情况，原样交给模型
      */
     public List<Task> planSubTasks(Task parent, String findings) {
+        return planSubTasks(parent, findings, TaskBrief.NONE);
+    }
+
+    /** 带着整体目标拆：子规划同样不能只看父任务那句转述。 */
+    public List<Task> planSubTasks(Task parent, String findings, TaskBrief brief) {
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.system(PlanPrompt.subPlanSystem(readOnly, context)));
-        messages.add(ChatMessage.user(PlanPrompt.subPlanUser(parent, findings)));
+        messages.add(ChatMessage.user(PlanPrompt.subPlanUser(parent, findings, brief)));
 
         return attempt(messages, "子规划", reply -> {
             List<Task> tasks = PlanParser.parseSubTasks(reply, parent);

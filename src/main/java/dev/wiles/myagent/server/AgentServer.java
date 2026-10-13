@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.context.ContextManager;
 import dev.wiles.myagent.context.Precompute;
@@ -52,6 +53,7 @@ import dev.wiles.myagent.plan.PlanStore;
 import dev.wiles.myagent.plan.AgentRole;
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.team.Pipeline;
+import dev.wiles.myagent.team.ReviewLoop;
 import dev.wiles.myagent.team.TeamListener;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.plan.Planner;
@@ -110,6 +112,32 @@ public final class AgentServer extends WebSocketServer {
     private static final Logger log = LoggerFactory.getLogger(AgentServer.class);
     /** MYAGENT_AUTO_PLAN=0 时 prompt 不再按字面启发式改走规划；评测里用它做纯单 agent 对照 */
     private static final boolean AUTO_PLAN = !"0".equals(System.getenv("MYAGENT_AUTO_PLAN"));
+
+    /**
+     * MYAGENT_FINAL_REVIEW=1 时，每句话改了文件就做一次收尾独立审查（{@link ReviewLoop}）。
+     * 默认关：等评测证明它划算再考虑默认开。和 AUTO_PLAN 一样先做成环境变量，评测驱动脚本好切。
+     */
+    private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
+
+    /**
+     * 子 agent 怎么派：MYAGENT_SUBAGENTS=off / explicit（默认，照 Codex：用户没要求不派）/ proactive / auto。
+     *
+     * <p>auto（开工前跑委派决策器）目前只在无头单次运行里生效。交互模式下每句话都先多一次决策请求，
+     * 连「你好」也要付一次，这笔账还没想清楚，所以这里按 explicit 处理。
+     */
+    private static final SubAgents.Mode SUBAGENTS = interactive(
+            SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS")));
+
+    private static SubAgents.Mode interactive(SubAgents.Mode mode) {
+        if (mode == SubAgents.Mode.AUTO) {
+            log.info("MYAGENT_SUBAGENTS=auto 目前只在 --once 里生效，交互模式按 explicit 处理");
+            return SubAgents.Mode.EXPLICIT;
+        }
+        return mode;
+    }
+
+    /** 正在进行的收尾审查，按停时要一起掐。 */
+    private volatile ReviewLoop reviewing;
 
     private final CliOptions options;
     private final Config config;
@@ -264,6 +292,15 @@ public final class AgentServer extends WebSocketServer {
         this.mcp = options.readOnly() ? McpServers.start(new McpConfig(Map.of()))
                 : McpServers.start(McpConfig.load());
         tools.registerAll(guardBrowserTools(mcp.tools(), policy));
+        // 子 agent（照 Codex）：spawn_agent 异步派出，结果以通知送回主对话。
+        // 只读模式也接——子 agent 的菜单从同一张注册表里筛，那里本来就没有写工具
+        SubAgents subagents = SUBAGENTS == SubAgents.Mode.OFF || !config.hasApiKey() ? null
+                : new SubAgents(this::newClient, tools, workspace.root(), () -> contextManager(options.readOnly()),
+                        SubAgents.Settings.fromEnv(System::getenv, Agent.DEFAULT_MAX_STEPS, null),
+                        SUBAGENTS, this::onAgentEvent);
+        if (subagents != null) {
+            tools.registerAll(subagents.tools());
+        }
         // 检查点：每条会动手的命令开跑前把工作区拍进影子仓库（不碰工作区自己的 .git）。
         // 只读模式不会改任何东西，不拍
         dev.wiles.myagent.snapshot.ShadowRepo shadow = options.readOnly() ? null
@@ -293,7 +330,7 @@ public final class AgentServer extends WebSocketServer {
                 ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
                                 MemoryIndex.budgetFor(config.contextTokens())),
-                                options.readOnly()),
+                                options.readOnly(), subagents != null && SUBAGENTS == SubAgents.Mode.PROACTIVE),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，取消就失灵
@@ -302,6 +339,9 @@ public final class AgentServer extends WebSocketServer {
                         .withWritingTools(BuiltinTools.WRITING_TOOLS)
                         .onEvent(this::onAgentEvent)
                 : null;
+        if (subagents != null) {
+            subagents.attach(agent);
+        }
         this.planner = config.hasApiKey()
                 ? new Planner(newClient())
                         .readOnly(options.readOnly())
@@ -757,7 +797,29 @@ public final class AgentServer extends WebSocketServer {
         worker.submit(() -> {
             long startedAt = System.currentTimeMillis();
             try {
-                agent.run(text);                 // 事件在 onAgentEvent 里已经播出去了
+                if (FINAL_REVIEW) {
+                    // 审查方的事件带着 final-review 的任务号播出去，和计划子任务同一条通道
+                    ReviewLoop loop = new ReviewLoop(this::newClient, tools, workspace.root(),
+                            this::onAgentEvent);
+                    reviewing = loop;
+                    try {
+                        loop.run(new ReviewLoop.MainTurn() {
+                            @Override
+                            public String run(String input) {
+                                return agent.run(input);
+                            }
+
+                            @Override
+                            public boolean failed() {
+                                return agent.unfinished().isPresent();
+                            }
+                        }, text);
+                    } finally {
+                        reviewing = null;
+                    }
+                } else {
+                    agent.run(text);             // 事件在 onAgentEvent 里已经播出去了
+                }
             } catch (RuntimeException e) {
                 log.error("agent 跑挂了", e);
                 publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
@@ -1040,6 +1102,10 @@ public final class AgentServer extends WebSocketServer {
     }
 
     private void handleCancel() {
+        ReviewLoop loop = reviewing;
+        if (loop != null) {
+            loop.cancel();                      // 先掐审查：不然它可能刚好要把意见交回去，又开一轮修改
+        }
         if (agent != null) {
             agent.cancel();
         }
@@ -1073,6 +1139,7 @@ public final class AgentServer extends WebSocketServer {
             row.put("label", cp.label());
             row.put("time", cp.time());
             row.put("turn", userTurnsBefore(cp.historySize()));
+            row.put("kind", cp.kind());
         }
         peer.send(frame);
     }
@@ -1095,7 +1162,7 @@ public final class AgentServer extends WebSocketServer {
             return;
         }
         dev.wiles.myagent.snapshot.Checkpoints.Checkpoint cp =
-                id == 0 ? checkpoints.latest() : checkpoints.get(id);
+                id == 0 ? checkpoints.latestTurn() : checkpoints.get(id);
         if (cp == null) {
             peer.send(error(id == 0 ? "没有可回的检查点——这段会话里还没有跑过任何一轮"
                     : "没有 #" + id + " 这个检查点，用 /rewind 看清单"));
@@ -1121,7 +1188,13 @@ public final class AgentServer extends WebSocketServer {
                 if (!scope.equals("code")) {
                     List<dev.wiles.myagent.llm.ChatMessage> hist = agent.history();
                     int n = Math.max(1, Math.min(cp.historySize(), hist.size()));
-                    agent.restore(n <= 1 ? List.of() : hist.subList(1, n));
+                    List<dev.wiles.myagent.llm.ChatMessage> kept = n <= 1 ? List.of() : hist.subList(1, n);
+                    // 工具级的点落在一轮中间：模型点了工具、结果还没回来。按「回退」封口，
+                    // 而不是交给 restore 按「上次会话中断」去补——那句话在这儿是假的
+                    if (!dev.wiles.myagent.context.HistoryRepair.isIntact(kept)) {
+                        kept = dev.wiles.myagent.context.HistoryRepair.seal(kept, "已回退");
+                    }
+                    agent.restore(kept);
                     sessions.save(sessionId, agent.history(), workspace.root(),
                             config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
                             agent.unfinished().orElse(null));
@@ -1156,7 +1229,7 @@ public final class AgentServer extends WebSocketServer {
         int n = Math.max(0, Math.min(historySize, hist.size()));
         int users = 0;
         for (int i = 0; i < n; i++) {
-            if ("user".equals(hist.get(i).role())) {
+            if ("user".equals(hist.get(i).role()) && !SubAgents.isNotice(hist.get(i).content())) {
                 users++;
             }
         }
@@ -1288,6 +1361,7 @@ public final class AgentServer extends WebSocketServer {
     // ---------------------------------------------------------------- 发事件
 
     private void onAgentEvent(AgentEvent event) {
+        checkpointBeforeTool(event);
         recordToAudit(event);
         publish(Protocol.encode(event));
     }
@@ -1299,8 +1373,57 @@ public final class AgentServer extends WebSocketServer {
      * 当成同一条线上的先后两步。主对话走上面那个不带号的入口。
      */
     private void onAgentEvent(Task task, AgentEvent event) {
+        onAgentEvent(task.id(), event);
+    }
+
+    /** 带任务号的入口：计划/流水线的工序、主对话派出的子 agent（{@code agent-N}）都走这儿。 */
+    private void onAgentEvent(String taskId, AgentEvent event) {
+        checkpointBeforeTool(event);
         recordToAudit(event);
-        publish(Protocol.encode(event, task.id()));
+        publish(Protocol.encode(event, taskId));
+    }
+
+    /**
+     * 会动手的工具开跑前拍一张工具级检查点（见 {@code Checkpoints#markTool}）。
+     *
+     * <h3>为什么挂在 ToolStarted 上</h3>
+     * {@code Agent.executeOne} 是<b>先同步发 ToolStarted、再执行</b>的，而 emit 是同步回调，
+     * 所以这里拍完，工具才动手——主对话和计划/流水线的子循环都走这两个入口，一处挂上全覆盖。
+     * 并行凑批的那条路只放 parallelSafe 的工具（不改工作区），这里也按同一个判据跳过，
+     * 两边的「会不会动世界」用的是同一句话。
+     *
+     * <p>对话长度取主 agent 此刻的记录：主对话里这一刻正是「模型点了这个工具、还没拿到结果」，
+     * 回对话到这儿时由 {@link #handleRewind} 封口；子任务的历史不在主记录里，
+     * 取到的是这一轮开跑时的长度，回对话就等于回到这一轮之前。
+     */
+    private void checkpointBeforeTool(AgentEvent event) {
+        if (!(event instanceof AgentEvent.ToolStarted t) || tools.parallelSafe(t.tool())
+                || agent == null) {
+            return;
+        }
+        checkpoints.markTool(toolLabel(t.tool(), t.arguments()), agent.history().size());
+    }
+
+    /** 「write_file src/a.py」「bash mvn -q test」——清单里一眼认得出是哪一步。 */
+    static String toolLabel(String tool, String argumentsJson) {
+        String detail = "";
+        try {
+            var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(argumentsJson);
+            for (String key : List.of("path", "command", "url", "name")) {
+                if (node != null && node.hasNonNull(key) && node.get(key).isTextual()) {
+                    detail = node.get(key).asText();
+                    break;
+                }
+            }
+            if (detail.isEmpty() && node != null && node.path("files").isArray()) {
+                List<String> paths = new java.util.ArrayList<>();
+                node.get("files").forEach(f -> paths.add(f.path("path").asText()));
+                detail = String.join(", ", paths);
+            }
+        } catch (Exception e) {
+            detail = argumentsJson == null ? "" : argumentsJson;
+        }
+        return brief(tool + (detail.isBlank() ? "" : " " + detail));
     }
 
     /**

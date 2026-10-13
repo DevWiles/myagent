@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.DelegationDecider;
+import dev.wiles.myagent.agent.StepBudget;
+import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
 import dev.wiles.myagent.config.Config;
 import dev.wiles.myagent.context.ContextManager;
@@ -16,6 +19,7 @@ import dev.wiles.myagent.memory.MemoryStore;
 import dev.wiles.myagent.plan.PlanContext;
 import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.team.Pipeline;
+import dev.wiles.myagent.team.ReviewLoop;
 import dev.wiles.myagent.team.TeamResult;
 import dev.wiles.myagent.team.TeamStatus;
 import dev.wiles.myagent.tool.BuiltinTools;
@@ -170,10 +174,52 @@ public final class Headless {
             } else {
                 MemoryIndex index = memory.index(workspace.root(),
                         MemoryIndex.budgetFor(config.contextTokens()));
+                // 子 agent：照 Codex，spawn_agent 异步派出、结果以通知送回，worker 能直接改工作区。
+                // MYAGENT_SUBAGENTS=off/explicit（默认，用户没要求不派）/proactive（能并行就派）
+                // /auto（开工前由决策器定：不委派就不给派遣工具，委派就带着计划开工），评测做对照用
+                AtomicInteger subagentSteps = new AtomicInteger();
+                SubAgents.Mode subMode = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
+                // MYAGENT_TOTAL_STEPS：主 agent 和子 agent 共用的步数预算（算力对齐的对照用），不设就不共用
+                int totalSteps = SubAgents.Settings.intOr(System.getenv("MYAGENT_TOTAL_STEPS"), 0);
+                StepBudget budget = totalSteps > 0 ? new StepBudget(totalSteps) : null;
+                SubAgents.Settings subSettings = SubAgents.Settings.fromEnv(System::getenv, maxSteps, budget);
+                DelegationDecider.Decision decision = null;
+                if (subMode == SubAgents.Mode.AUTO) {
+                    decision = new DelegationDecider(clients.get(), workspace.root(), subSettings.maxThreads(),
+                            subSettings.roles())
+                            .decide(prompt, totalSteps > 0 ? totalSteps : maxSteps);
+                    summary.set("delegation", decision.toJson());
+                    System.err.println("[trace] decide " + (decision.delegate()
+                            ? "委派 " + decision.subtasks().size() + " 个子任务" : "不委派") + "：" + decision.reason());
+                }
+                boolean withSubagents = subMode != SubAgents.Mode.OFF
+                        && (subMode != SubAgents.Mode.AUTO || decision.delegate());
+                SubAgents subagents = !withSubagents ? null
+                        : new SubAgents(clients, tools, workspace.root(), () -> new ContextManager(config.contextTokens()),
+                                subSettings, subMode, (id, event) -> {
+                                    if (event instanceof AgentEvent.Thinking) {
+                                        subagentSteps.incrementAndGet();
+                                    }
+                                    trace(id, event);
+                                });
+                if (subagents != null) {
+                    tools.registerAll(subagents.tools());
+                }
                 Agent agent = new Agent(clients.get(), tools,
-                        SystemPrompt.forWorkspace(workspace.root(), index, false),
+                        SystemPrompt.forWorkspace(workspace.root(), index, false,
+                                subMode == SubAgents.Mode.PROACTIVE),
                         maxSteps, new ContextManager(config.contextTokens()))
-                        .withWritingTools(BuiltinTools.WRITING_TOOLS);
+                        .withWritingTools(BuiltinTools.WRITING_TOOLS)
+                        .withStepBudget(budget);
+                if (budget != null) {
+                    summary.put("totalStepBudget", budget.total());
+                }
+                if (subagents != null) {
+                    subagents.attach(agent);
+                    if (decision != null) {
+                        subagents.post(decision.render());     // 排在用户原话之后，第一步请求前送到
+                    }
+                }
                 AtomicInteger steps = new AtomicInteger();
                 AtomicReference<String> failed = new AtomicReference<>();
                 agent.onEvent(event -> {
@@ -184,12 +230,53 @@ public final class Headless {
                     }
                     trace("agent", event);
                 });
-                text = agent.run(prompt);
+                if ("react+review".equals(options.onceMode())) {
+                    AtomicInteger reviewSteps = new AtomicInteger();
+                    ReviewLoop loop = new ReviewLoop(clients, tools, workspace.root(), (stage, event) -> {
+                        if (event instanceof AgentEvent.Thinking) {
+                            reviewSteps.incrementAndGet();
+                        }
+                        trace(stage.id(), event);
+                    });
+                    ReviewLoop.Outcome outcome = loop.run(new ReviewLoop.MainTurn() {
+                        @Override
+                        public String run(String input) {
+                            return agent.run(input);
+                        }
+
+                        @Override
+                        public boolean failed() {
+                            return failed.get() != null;
+                        }
+                    }, prompt);
+                    text = outcome.text();
+                    summary.put("reviews", outcome.reviews());
+                    summary.put("reviewSteps", reviewSteps.get());
+                    summary.put("reviewRestored", outcome.restored());
+                    outcome.verdicts().forEach(summary.withArray("reviewVerdicts")::add);
+                    outcome.scores().forEach(summary.withArray("reviewScores")::add);
+                } else {
+                    text = agent.run(prompt);
+                }
+                if (subagents != null && !subagents.stopAll(15_000)) {
+                    // 进程马上要退，还在跑的子 agent 会被腰斩在半路——记一笔，评测时好对账
+                    summary.put("subagentsStillRunning", true);
+                }
                 summary.put("status", failed.get() == null ? "COMPLETED" : "FAILED");
                 if (failed.get() != null) {
                     summary.put("failed", failed.get());
                 }
                 summary.put("steps", steps.get());
+                summary.put("subagentMode", subMode.name().toLowerCase());
+                summary.put("subagents", subagents == null ? 0 : subagents.spawned());
+                if (subagents != null) {
+                    // 写入冲突、收尾验证提醒、每个子 agent 实际写了什么跑了什么——评测归因用
+                    summary.set("subagentReport", subagents.report());
+                }
+                if (budget != null) {
+                    summary.put("totalStepsUsed", budget.used());
+                }
+                summary.put("subagentSteps", subagentSteps.get());
                 exit = failed.get() == null ? 0 : 1;
             }
         } catch (RuntimeException e) {

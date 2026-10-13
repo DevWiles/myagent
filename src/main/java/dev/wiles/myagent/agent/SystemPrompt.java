@@ -65,10 +65,17 @@ public final class SystemPrompt {
      * 能力被裁剪时要交代一句，别留给模型猜。
      */
     public static String forWorkspace(Path workspaceRoot, MemoryIndex memory, boolean readOnly) {
+        return forWorkspace(workspaceRoot, memory, readOnly, false);
+    }
+
+    /** 再带上「主动委派」：{@code MYAGENT_SUBAGENTS=proactive} 时，能并行就派子 agent。 */
+    public static String forWorkspace(Path workspaceRoot, MemoryIndex memory, boolean readOnly,
+                                      boolean proactiveSubagents) {
         return ASSEMBLER.assemble(PromptMode.AGENT, PromptContext.builder()
                 .variable("workspace", String.valueOf(workspaceRoot))
                 .memoryIndex(memory == null ? null : memory.render())
                 .readOnly(readOnly)
+                .proactiveSubagents(proactiveSubagents)
                 .build());
     }
 }

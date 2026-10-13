@@ -57,7 +57,7 @@ public final class BashTool implements Tool {
         return "在工作区根目录下执行一条 shell 命令，返回标准输出和标准错误的合并结果。"
                 + "适合运行构建、测试、git 等命令。"
                 + "禁止用它查看目录或读写文件——列目录必须用 list_dir，读文件必须用 read_file，"
-                + "写文件必须用 write_file。"
+                + "改已有文件用 edit_file，新建文件用 write_file。"
                 + "不要执行需要交互输入的命令。"
                 + "删除文件、访问网络、安装依赖等操作会先征求用户同意，可能被拒绝。";
     }

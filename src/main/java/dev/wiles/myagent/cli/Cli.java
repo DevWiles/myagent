@@ -72,8 +72,10 @@ public final class Cli {
                 case "--once-mode" -> {
                     requireValue(args, i, arg);
                     onceMode = args[++i];
-                    if (!onceMode.equals("react") && !onceMode.equals("team")) {
-                        throw new IllegalArgumentException("--once-mode 只认 react 或 team，收到: " + onceMode);
+                    if (!onceMode.equals("react") && !onceMode.equals("team")
+                            && !onceMode.equals("react+review")) {
+                        throw new IllegalArgumentException(
+                                "--once-mode 只认 react、react+review 或 team，收到: " + onceMode);
                     }
                 }
                 case "--once-out" -> {
@@ -87,8 +89,8 @@ public final class Cli {
                     } catch (NumberFormatException e) {
                         throw new IllegalArgumentException("--max-steps 要跟一个数字，收到: " + args[i]);
                     }
-                    if (maxSteps < 1) {
-                        throw new IllegalArgumentException("--max-steps 必须大于 0");
+                    if (maxSteps < 0) {
+                        throw new IllegalArgumentException("--max-steps 不能是负数（0 表示不限）");
                     }
                 }
                 default -> throw new IllegalArgumentException(arg.startsWith("-")
@@ -146,9 +148,10 @@ public final class Cli {
                       --once <文件>    无头单次运行：读文件里的提示词（"-" 读 stdin），跑完就退。
                                        危险动作一律自动批准——只在沙盒/容器里用。
                                        最后的回答打到 stdout，退出码 0 = 正常收口
-                      --once-mode <m>  单次运行的方式：react（默认）或 team（规划→施工→验收）
+                      --once-mode <m>  单次运行的方式：react（默认）、react+review（做完后独立审查一次，
+                                       有问题交回接着修）或 team（规划→施工→验收）
                       --once-out <文件> 单次运行的摘要（步数、token、状态）写成 JSON
-                      --max-steps <n>  单次运行的步数上限
+                      --max-steps <n>  单次运行的步数上限（默认不限；0 也表示不限）
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
                   -r, --readonly       只读模式：写文件和执行命令的工具压根不注册
@@ -158,7 +161,7 @@ public final class Cli {
 
                 配置:
                   ~/.myagent/config.json   {"apiKey": "sk-...", "model": "deepseek-flash"}
-                  环境变量 DEEPSEEK_API_KEY 优先级高于配置文件
+                  MYAGENT_API_KEY 高于配置文件，DEEPSEEK_API_KEY 只在配置文件没写 key 时才用
 
                 协议见 docs/protocol.md——照着它可以自己写一个界面。
                 """.formatted(VERSION);

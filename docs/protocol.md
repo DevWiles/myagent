@@ -354,7 +354,9 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 计划/流水线执行期间，子任务发出的 `text_delta` / `thought` / `tool_started` /
 `tool_finished` 会多带一个 **`task`** 字段（任务或工序的 id，如 `"t3"`、`"work"`）。
 并行的任务各自在发事件，界面靠它把动静归到正确的那条线上；不认识这个字段的老界面
-忽略即可，所以协议版本不升。主对话的事件没有这个字段。
+忽略即可，所以协议版本不升。主对话自己的事件没有这个字段；但主对话用 `spawn_agent` 派出的
+子 agent（照 Codex：后台异步跑、结果以 `<subagent_notification>` 注入主对话）发的事件带
+`"agent-N"`，走的是同一条通道。
 
 ### 3.3 审批
 
@@ -937,17 +939,25 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 ```
 界面 → {"t":"checkpoints"}
 后端 → {"t":"checkpoint_list","available":true,"retentionDays":30,
-        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0},
-                 {"id":2,"label":"再加个单测","time":1790733601002,"turn":1}]}
+        "items":[{"id":1,"label":"给配置模块加环境变量覆盖","time":1790733566194,"turn":0,"kind":"turn"},
+                 {"id":2,"label":"write_file src/config.py","time":1790733570311,"turn":1,"kind":"tool"},
+                 {"id":3,"label":"再加个单测","time":1790733601002,"turn":1,"kind":"turn"}]}
 
-界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个
+界面 → {"t":"rewind","id":1,"scope":"both"}        // scope: code | conversation | both；id 省略或 0 = 最近一个轮级点
 后端 → {"t":"busy","busy":true}
 后端 → {"t":"rewound","id":1,"label":"给配置模块加环境变量覆盖","scope":"both",
         "restored":["src/config.py","tests/new_test.py"],"userTurn":0,"remaining":1,"tokens":812}
 后端 → {"t":"busy","busy":false}
 
-界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个、scope=code（老界面用）
+界面 → {"t":"undo"}                                  // 等价于 rewind 最近一个轮级点、scope=code（老界面用）
 ```
+
+- `kind`：`turn` 是一轮开跑前拍的；`tool` 是一次**会动手**的工具调用（写文件、bash、MCP 等，
+  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和计划、流水线的子任务都拍。
+  工具级的点如果和清单里上一个点的文件内容完全相同（比如中间只跑了测试），不进清单。
+  老界面不认这个字段也无妨：清单照样能用，只是长了。`undo` 和 `id` 为 0 的 `rewind` 撤销的是**上一轮整轮**，不是上一步。
+- 回对话到工具级的点：记录截在「模型点了这个工具、结果还没回来」处，后端把没有结果的调用补成
+  「(已回退，这一步没有执行)」再存档，之后照常对话。
 
 - `turn` / `userTurn`：那个点之前用户说过几句。界面按它截转录——回对话之后，第 `userTurn` 句及之后的都不该再画。
 - `restored`：被还原或删除的相对路径（`scope=conversation` 时为空）。快照后新建的文件会被**删掉**，
@@ -1062,8 +1072,8 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 | 计划确认超过 900 秒没回 | 按否决处理，发 `plan_finished` | — |
 | 没有任何连接时需要确认 | 直接否决，不执行 | — |
 | `cancel` | 调度器不再开新任务、掐断正在跑的子循环和规划请求 | 正在跑的那个任务会变 `FAILED`，其余 `SKIPPED` |
-| 某个任务超时（默认 10 分钟） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
-| 某道工序超时（默认 15 分钟） | 按这道工序失败处理。worker 超时不结束流水线（验收会看到并决定怎么办）；第一轮拟方案超时→`FAILED`；验收超时→`PARTIAL` | 和失败一样显示 |
+| 某个任务超时（默认 1 小时） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
+| 某道工序超时（默认 1 小时） | 按这道工序失败处理。worker 超时不结束流水线（验收会看到并决定怎么办）；第一轮拟方案超时→`FAILED`；验收超时→`PARTIAL` | 和失败一样显示 |
 | 并行工具调用整批超时（默认 60 秒） | 超时那个发 `tool_finished`（`ok:false`），其余照常收 | 那一行标失败，别继续转圈 |
 | 规划失败（模型连 3 次给不出可用计划） | 发 `failed`，带原因 | 照常显示错误 |
 | 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |

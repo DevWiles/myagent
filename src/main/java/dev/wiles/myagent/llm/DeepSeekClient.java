@@ -29,8 +29,25 @@ public final class DeepSeekClient implements LlmClient {
     private static final Logger log = LoggerFactory.getLogger(DeepSeekClient.class);
     private static final MediaType JSON = MediaType.get("application/json");
 
-    /** 限流和服务端抖动重试几次，其余错误立刻抛出。 */
+    /** 网络抖动和 5xx 重试几次，其余错误立刻抛出。 */
     private static final int MAX_RETRIES = 2;
+
+    /**
+     * 429 单独计数，而且等得久得多。
+     *
+     * <h3>为什么不能和 5xx 共用「1s、2s 两次」</h3>
+     * 百炼的限流按<b>分钟</b>算 token（报的是 {@code insufficient_quota}，文档锚点是 token-limit），
+     * 等 3 秒窗口根本没滚过去，两次重试必然原样再撞一次，整轮就此作废。
+     * AsynCodeBench cookiecutter 上，单 agent 和 4 个并行 worker 全是这么死的，
+     * 中间那次流水线没撞上反而跑完了——限流成了「哪种模式赢」的决定因素，结论全被污染。
+     *
+     * <p>有 {@code Retry-After} 就听它的（封顶 {@link #RATE_LIMIT_MAX_WAIT_MILLIS}），
+     * 没有就 5、10、20、40、60、60 秒退避，合计三分多钟——足够一个分钟窗口滚过去两三次，
+     * 真是额度用完了也不过是多等三分钟再报错。等待期间照样每 50ms 看一眼按停。
+     */
+    static final int MAX_RATE_LIMIT_RETRIES = 6;
+    static final long RATE_LIMIT_BASE_WAIT_MILLIS = 5_000;
+    static final long RATE_LIMIT_MAX_WAIT_MILLIS = 60_000;
 
     private final ObjectMapper mapper = new ObjectMapper()
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
@@ -182,10 +199,13 @@ public final class DeepSeekClient implements LlmClient {
         // 这时一个字都还没打到用户屏幕上，重来不会重复输出。
         // 读流途中断了不重试：前半段已经出去了，由 Agent 统一把这一轮封口。
         int ticket = cancels.get();
-        for (int attempt = 0; ; attempt++) {
-            if (attempt > 0) {
-                sleepBackoff(attempt, ticket);
-                log.warn("流式请求重试第 {} 次", attempt);
+        int attempt = 0;            // 网络 / 5xx 的重试次数
+        int rateLimited = 0;        // 429 的重试次数，单独计
+        long waitMillis = 0;
+        for (int tries = 0; ; tries++) {
+            if (tries > 0) {
+                sleepMillis(waitMillis, ticket);
+                log.warn("流式请求重试第 {} 次", tries);
             }
             Call call = http.newCall(request);
             currentCall = call;
@@ -201,6 +221,8 @@ public final class DeepSeekClient implements LlmClient {
                     throw new LlmException("请求已取消", e);
                 }
                 if (attempt < MAX_RETRIES) {
+                    attempt++;
+                    waitMillis = quickBackoff(attempt);
                     log.warn("流式请求还没拿到响应就失败，准备重试: {}", e.getMessage());
                     continue;
                 }
@@ -210,7 +232,15 @@ public final class DeepSeekClient implements LlmClient {
                 if (!response.isSuccessful()) {
                     ResponseBody rb = response.body();
                     String text = rb == null ? "" : rb.string();
-                    if (isRetryable(response.code()) && attempt < MAX_RETRIES) {
+                    if (response.code() == 429 && rateLimited < MAX_RATE_LIMIT_RETRIES) {
+                        rateLimited++;
+                        waitMillis = rateLimitWait(rateLimited, response.header("Retry-After"));
+                        log.warn("HTTP 429，{} 秒后第 {} 次重试: {}", waitMillis / 1000, rateLimited, brief(text));
+                        continue;
+                    }
+                    if (response.code() >= 500 && attempt < MAX_RETRIES) {
+                        attempt++;
+                        waitMillis = quickBackoff(attempt);
                         log.warn("HTTP {}，准备重试: {}", response.code(), brief(text));
                         continue;
                     }
@@ -277,13 +307,15 @@ public final class DeepSeekClient implements LlmClient {
 
     /** 发请求并返回响应体字符串，内含有限次重试。 */
     private String execute(String jsonBody) {
-        IOException lastIoError = null;
         int ticket = cancels.get();
+        int attempt = 0;            // 网络 / 5xx 的重试次数
+        int rateLimited = 0;        // 429 的重试次数，单独计，理由见 MAX_RATE_LIMIT_RETRIES
+        long waitMillis = 0;
 
-        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (attempt > 0) {
-                sleepBackoff(attempt, ticket);
-                log.warn("重试第 {} 次", attempt);
+        for (int tries = 0; ; tries++) {
+            if (tries > 0) {
+                sleepMillis(waitMillis, ticket);
+                log.warn("重试第 {} 次", tries);
             }
 
             Request request = new Request.Builder()
@@ -305,7 +337,15 @@ public final class DeepSeekClient implements LlmClient {
                 if (response.isSuccessful()) {
                     return text;
                 }
-                if (isRetryable(response.code()) && attempt < MAX_RETRIES) {
+                if (response.code() == 429 && rateLimited < MAX_RATE_LIMIT_RETRIES) {
+                    rateLimited++;
+                    waitMillis = rateLimitWait(rateLimited, response.header("Retry-After"));
+                    log.warn("HTTP 429，{} 秒后第 {} 次重试: {}", waitMillis / 1000, rateLimited, brief(text));
+                    continue;
+                }
+                if (response.code() >= 500 && attempt < MAX_RETRIES) {
+                    attempt++;
+                    waitMillis = quickBackoff(attempt);
                     log.warn("HTTP {}，准备重试: {}", response.code(), brief(text));
                     continue;
                 }
@@ -317,18 +357,37 @@ public final class DeepSeekClient implements LlmClient {
                     // 原来这里不分辨：被掐断的请求也当网络错误，睡一觉再发一次
                     throw new LlmException("请求已取消", e);
                 }
-                lastIoError = e;
                 if (attempt < MAX_RETRIES) {
+                    attempt++;
+                    waitMillis = quickBackoff(attempt);
                     log.warn("网络异常，准备重试: {}", e.getMessage());
                     continue;
                 }
+                throw new LlmException("请求模型失败: " + e.getMessage(), e);
             }
         }
-        throw new LlmException("请求模型失败: " + lastIoError.getMessage(), lastIoError);
     }
 
-    private static boolean isRetryable(int code) {
-        return code == 429 || code >= 500;
+    /** 网络 / 5xx：1s、2s。 */
+    private static long quickBackoff(int attempt) {
+        return 1000L << (attempt - 1);
+    }
+
+    /**
+     * 429 等多久：服务端给了 {@code Retry-After}（秒）就听它的，否则 5s 起翻倍；都封顶 60s。
+     * {@code Retry-After} 也可能是 HTTP 日期——那种写法不认，按退避走，宁可多等一会儿也不解析错。
+     */
+    static long rateLimitWait(int retry, String retryAfter) {
+        if (retryAfter != null) {
+            try {
+                long seconds = Long.parseLong(retryAfter.trim());
+                return Math.min(RATE_LIMIT_MAX_WAIT_MILLIS, Math.max(1_000, seconds * 1000));
+            } catch (NumberFormatException ignored) {
+                // 日期格式，见上
+            }
+        }
+        long wait = RATE_LIMIT_BASE_WAIT_MILLIS << Math.min(retry - 1, 10);
+        return Math.min(RATE_LIMIT_MAX_WAIT_MILLIS, wait);
     }
 
     private static String explain(int code) {
@@ -341,9 +400,9 @@ public final class DeepSeekClient implements LlmClient {
         };
     }
 
-    /** 退避 1s、2s，切成小段睡，每段醒来看一眼有没有人按停。 */
-    private void sleepBackoff(int attempt, int ticket) {
-        long end = System.nanoTime() + (1000L << (attempt - 1)) * 1_000_000L;
+    /** 睡这么久，切成小段睡，每段醒来看一眼有没有人按停。 */
+    private void sleepMillis(long millis, int ticket) {
+        long end = System.nanoTime() + millis * 1_000_000L;
         try {
             while (true) {
                 if (cancels.get() != ticket) {

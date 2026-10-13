@@ -32,6 +32,7 @@ public final class TeamPrompt {
         // 宁可启动就炸
         REPO.loadRequired("team/planner.md");
         REPO.loadRequired("team/reviewer.md");
+        REPO.loadRequired("team/final-review.md");
     }
 
     private TeamPrompt() {
@@ -100,6 +101,24 @@ public final class TeamPrompt {
     public static String reviewerAcceptance(int steps) {
         return REPO.loadRequired("team/reviewer.md")
                 .replace("{{@steps}}", String.valueOf(steps));
+    }
+
+    /** 收尾审查的完成标准：跑完整测试、对照原话、看 diff，见 team/final-review.md。 */
+    public static String finalReviewAcceptance(int steps) {
+        return REPO.loadRequired("team/final-review.md")
+                .replace("{{@steps}}", String.valueOf(steps));
+    }
+
+    /**
+     * 收尾审查的材料。顺序和流水线验收一样：先事实（程序算的 diff），后转述（主 agent 的收尾说明）。
+     * 用户原话不在这里——它由 {@code TaskBrief} 排在整段提示词最前面。
+     */
+    public static String finalReviewBrief(int round, String diff, String mainAnswer) {
+        return "收尾审查第 " + round + " 轮：检查另一个 agent 刚完成的改动。\n\n"
+                + "【改动 diff——程序比对开工前后的工作区算出来的，不是它的自述】\n"
+                + (diff == null || diff.isBlank() ? "（没有检测到改动）" : diff)
+                + "\n\n【它的收尾说明——只作参考，可能夸大或漏说】\n"
+                + (mainAnswer == null || mainAnswer.isBlank() ? "（没有说明）" : mainAnswer);
     }
 
     private static String statusWord(TaskStatus status) {

@@ -256,4 +256,22 @@ class PlanCheckpointTest {
         assertTrue(assertThrows(IllegalArgumentException.class, checkpoint::toPlan)
                 .getMessage().contains("循环依赖"));
     }
+
+    @Test
+    @DisplayName("用户原话和需求清单往返保住；老存档没有这两个字段，读出来是空的交底")
+    void requestAndRequirementsSurviveRoundTrip() {
+        Task t1 = new Task("t1", "读点东西", TaskType.FILE_READ, List.of(), "读到了");
+        Plan plan = new Plan("修日期解析", TaskGraph.of(List.of(t1)),
+                "parse_date 的两位年和月日顺序都有问题，修好", List.of("R1 两位年报错", "R2 日月顺序"));
+
+        Plan back = roundTrip(plan);
+        assertEquals("parse_date 的两位年和月日顺序都有问题，修好", back.request());
+        assertEquals(List.of("R1 两位年报错", "R2 日月顺序"), back.requirements());
+
+        PlanCheckpoint old = new PlanCheckpoint(
+                PlanCheckpoint.FORMAT, WS.toString(), 1L, "目标", "RUNNING", 0, 0, 0, List.of(),
+                List.of(new PlanCheckpoint.TaskSnapshot("t1", "读点东西", "FILE_READ", null,
+                        List.of(), "读到了", null, null, 0, "PENDING", null, null, 0, 0)));
+        assertTrue(TaskBrief.of(old.toPlan()).isEmpty());
+    }
 }

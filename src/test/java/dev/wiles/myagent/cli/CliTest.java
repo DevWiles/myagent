@@ -64,8 +64,10 @@ class CliTest {
         assertEquals("react", Cli.parse(new String[]{"--once", "-"}).onceMode());
         assertThrows(IllegalArgumentException.class,
                 () -> Cli.parse(new String[]{"--once", "p", "--once-mode", "swarm"}));
+        assertEquals(0, Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}).maxSteps(),
+                "0 表示不限，和不传一样");
         assertThrows(IllegalArgumentException.class,
-                () -> Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}));
+                () -> Cli.parse(new String[]{"--once", "p", "--max-steps", "-1"}));
     }
 
     @Test
@@ -192,5 +194,12 @@ class CliTest {
         assertTrue(tui.find());
         assertEquals(Cli.VERSION, tui.group(1),
                 "界面和后端是一起发的一个东西，版本号分家只会让「你用的是哪个版本」问不清楚");
+    }
+
+    @Test
+    @DisplayName("--once-mode 认 react+review：单写者做完后独立审查一次")
+    void acceptsReactPlusReview() {
+        CliOptions o = Cli.parse(new String[]{"--once", "p.txt", "--once-mode", "react+review"});
+        assertEquals("react+review", o.onceMode());
     }
 }

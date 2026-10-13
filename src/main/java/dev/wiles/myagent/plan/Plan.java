@@ -16,6 +16,13 @@ import java.util.List;
  * 用户扫一眼就能判断模型有没有理解偏——如果这句话就不对，那下面拆得再漂亮也是白搭，
  * 该当场毙掉重来，而不是等它跑完十个任务才发现方向错了。
  *
+ * <h3>为什么还要存用户原话和需求清单</h3>
+ * goal 是转述，转述会漏。实测（bench/date_parse）：原话里写着「两位年」，
+ * 规划把规格交给一步「照着现有实现和测试整理」，测试没测两位年，这条就在转述里没了——
+ * coder 照着转述做、verifier 照着可见测试验，一路全绿，隐藏测试挂掉。
+ * 所以原话原样留一份（{@link #request}），规划器从原话抽的需求清单也留一份
+ * （{@link #requirements}），执行时交给<b>每一个</b>子任务，而不是只交给规划器。
+ *
  * <p>状态不从任务图里推算，而是存下来。因为 CREATED / RUNNING / CANCELLED
  * 这三种根本推不出来：一张全是 PENDING 的图，可能是还没开跑，也可能是刚被取消。
  */
@@ -23,6 +30,12 @@ public final class Plan {
 
     private final String goal;
     private final TaskGraph graph;
+
+    /** 用户的原话，一字不改。老存档、测试里手捏的计划没有它，是 null。 */
+    private final String request;
+
+    /** 规划器从原话里抽出的需求清单（R1、R2……），可能为空，不会是 null。 */
+    private final List<String> requirements;
 
     private PlanStatus status = PlanStatus.CREATED;
     private long startTime;
@@ -42,6 +55,10 @@ public final class Plan {
     private final List<String> recoveryIds = new ArrayList<>();
 
     public Plan(String goal, TaskGraph graph) {
+        this(goal, graph, null, List.of());
+    }
+
+    public Plan(String goal, TaskGraph graph, String request, List<String> requirements) {
         if (goal == null || goal.isBlank()) {
             throw new IllegalArgumentException("计划缺少目标描述");
         }
@@ -50,15 +67,18 @@ public final class Plan {
         }
         this.goal = goal;
         this.graph = graph;
+        this.request = request == null || request.isBlank() ? null : request.strip();
+        this.requirements = requirements == null ? List.of() : List.copyOf(requirements);
     }
 
     /**
      * 从存档里把一份跑到一半的计划立起来。包私有，只给 {@link PlanCheckpoint} 用，
      * 理由同 {@link Task#restore}。
      */
-    static Plan restore(String goal, TaskGraph graph, PlanStatus status,
-                        long startTime, long endTime, int replans, List<String> recoveryIds) {
-        Plan plan = new Plan(goal, graph);
+    static Plan restore(String goal, TaskGraph graph, String request, List<String> requirements,
+                        PlanStatus status, long startTime, long endTime, int replans,
+                        List<String> recoveryIds) {
+        Plan plan = new Plan(goal, graph, request, requirements);
         plan.status = status == null ? PlanStatus.CREATED : status;
         plan.startTime = startTime;
         plan.endTime = endTime;
@@ -75,6 +95,15 @@ public final class Plan {
 
     public TaskGraph graph() {
         return graph;
+    }
+
+    /** 用户原话，没有就是 null。 */
+    public String request() {
+        return request;
+    }
+
+    public List<String> requirements() {
+        return requirements;
     }
 
     public PlanStatus status() {

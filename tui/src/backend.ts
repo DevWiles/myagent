@@ -339,6 +339,8 @@ export function startBackend(
       const event = parseEvent(String(message.data))
       if (!event) return
       if (event.t === 'ready') {
+        // 连上了，超时那根弦撤掉——不撤的话它会在 10 秒后把好好的连接掐断，然后重连
+        clearTimeout(timer)
         onReady(event)
         return
       }

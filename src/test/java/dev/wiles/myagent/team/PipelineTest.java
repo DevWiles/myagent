@@ -503,4 +503,123 @@ class PipelineTest {
 
         assertEquals(java.util.Set.of("plan", "t1", "t2", "review"), java.util.Set.copyOf(finished));
     }
+
+    // ── 点名返工与保底 ────────────────────────────────────────
+
+    /** 规划拆两个任务，t2 用 t1 的产出。 */
+    private static TaskOutcome chainedPlan(Task plan) {
+        return TaskOutcome.planned("方案: 先 t1 后 t2", List.of(
+                plan.subTask("t1", "改读取", AgentRoles.CODER, List.of(), "改完"),
+                plan.subTask("t2", "按 {{t1}} 改调用方", AgentRoles.CODER, List.of("t1"), "改完")));
+    }
+
+    private static FakeRunner scripted(java.util.function.Function<Task, TaskOutcome> planner,
+                                       List<String> verdicts) {
+        FakeRunner runner = new FakeRunner();
+        List<String> left = new ArrayList<>(verdicts);
+        runner.script = (task, up) -> {
+            if (task.id().startsWith("plan")) {
+                return planner.apply(task);
+            }
+            if (task.id().startsWith("review")) {
+                return TaskOutcome.ok(left.remove(0));
+            }
+            return TaskOutcome.ok(task.id() + " 干完了");
+        };
+        return runner;
+    }
+
+    @Test
+    @DisplayName("点名返工：只重跑点到的那道，没点到的原样保留——返工不把做对的改坏")
+    void reworkOnlyTheNamedStage() {
+        FakeRunner runner = scripted(PipelineTest::plans,
+                List.of("t2 漏了调用点\n返工: t2\n重新执行", "通过"));
+
+        TeamResult result = run(runner);
+
+        assertEquals(TeamStatus.COMPLETED, result.status());
+        assertTrue(runner.ranId("r2.t2"));
+        assertFalse(runner.ranId("r2.t1"), "没点名的 t1 不该重跑");
+        assertTrue(runner.stageOf("review2").description().contains("t1 干完了"),
+                "第二轮验收看的仍是整份活：t1 上一轮的产出也在材料里");
+    }
+
+    @Test
+    @DisplayName("上游被点名，下游跟着重跑；下游被点名，上游作锚点把产出递给它")
+    void reworkFollowsDependencies() {
+        FakeRunner upstream = scripted(PipelineTest::chainedPlan, List.of("返工: t1\n重新执行", "通过"));
+        run(upstream);
+        assertTrue(upstream.ranId("r2.t1"));
+        assertTrue(upstream.ranId("r2.t2"), "t1 改了，t2 拿的是过期材料，得跟着重来");
+
+        FakeRunner downstream = scripted(PipelineTest::chainedPlan, List.of("返工: r1.t2 t2\n重新执行", "通过"));
+        run(downstream);
+        assertFalse(downstream.ranId("r2.t1"));
+        assertTrue(downstream.stageOf("r2.t2").description().contains("{{t1}}"),
+                "引用指向上一轮的 t1（执行时由 TaskPrompt 换成产出）");
+        assertTrue(downstream.upstreams.get("r2.t2").stream()
+                        .anyMatch(t -> t.id().equals("t1") && "t1 干完了".equals(t.result())),
+                "不重跑的上游作锚点，把上一轮的产出递给下游");
+    }
+
+    @Test
+    @DisplayName("没点名或点的名对不上：退回整份重跑，宁可多跑也不能一个都不修")
+    void unknownNamesFallBackToFullRework() {
+        FakeRunner runner = scripted(PipelineTest::plans, List.of("返工: t9\n重新执行", "通过"));
+
+        run(runner);
+
+        assertTrue(runner.ranId("r2.t1"));
+        assertTrue(runner.ranId("r2.t2"));
+    }
+
+    @Test
+    @DisplayName("返工把测试改少了：工作区退回成绩最好的那一轮，不再接着返工")
+    void regressionRestoresTheBestRound() throws Exception {
+        java.nio.file.Path ws = java.nio.file.Files.createTempDirectory("guard-ws");
+        java.nio.file.Files.writeString(ws.resolve("a.py"), "v0\n");
+        FakeRunner runner = new FakeRunner();
+        List<String> verdicts = new ArrayList<>(List.of(
+                "测试: 通过 5 / 共 10\n重新执行",
+                "测试: 通过 3 / 共 10\n重新执行",
+                "通过"));
+        runner.script = (task, up) -> {
+            if (task.id().startsWith("plan")) {
+                return plans(task);
+            }
+            if (task.id().startsWith("review")) {
+                return TaskOutcome.ok(verdicts.remove(0));
+            }
+            try {
+                if (task.id().equals("t1")) {
+                    java.nio.file.Files.writeString(ws.resolve("a.py"), "round1\n");
+                } else if (task.id().equals("r2.t1")) {
+                    java.nio.file.Files.writeString(ws.resolve("a.py"), "round2-worse\n");
+                    java.nio.file.Files.writeString(ws.resolve("junk.py"), "x\n");
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+            return TaskOutcome.ok(task.id() + " 干完了");
+        };
+
+        TeamResult result = new Pipeline(runner).trackChanges(ws).run("改 a.py");
+
+        assertEquals(TeamStatus.PARTIAL, result.status());
+        assertEquals("round1\n", java.nio.file.Files.readString(ws.resolve("a.py")), "退回第一轮");
+        assertFalse(java.nio.file.Files.exists(ws.resolve("junk.py")), "第二轮新建的文件一并撤掉");
+        assertFalse(runner.ranId("review3"), "退步了就收手，不再开第三轮");
+    }
+
+    @Test
+    @DisplayName("两行程序读的格式：成绩取最后一次，点名认中英文逗号和空格")
+    void parsesScoreAndReworkLines() {
+        assertArrayEquals(new int[]{133, 202},
+                Pipeline.testScoreOf("先跑了一半 测试: 通过 10 / 共 202\n全跑完\n测试：通过 133/共 202\n重新执行"));
+        assertNull(Pipeline.testScoreOf("没跑测试\n通过"));
+        assertEquals(List.of("t2", "r2.t5", "t7"), Pipeline.reworkIdsOf("返工: t2，r2.t5、t7\n重新执行"));
+        assertEquals(List.of(), Pipeline.reworkIdsOf("通过"));
+        assertEquals("t5", Pipeline.blueprintId("r3.t5"));
+        assertEquals("t1.2", Pipeline.blueprintId("t1.2"));
+    }
 }

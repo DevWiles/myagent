@@ -42,7 +42,20 @@ public record PlanCheckpoint(
         long endTime,
         int replans,
         List<String> recoveryIds,
-        List<TaskSnapshot> tasks) {
+        List<TaskSnapshot> tasks,
+        String request,
+        List<String> requirements) {
+
+    /**
+     * 不带原话和需求清单的存档。这两个字段是后加的、可缺省的（老存档读出来就是 null），
+     * 不改既有字段的含义，所以 {@link #FORMAT} 不升。
+     */
+    public PlanCheckpoint(int format, String workspace, long savedAt, String goal, String status,
+                          long startTime, long endTime, int replans, List<String> recoveryIds,
+                          List<TaskSnapshot> tasks) {
+        this(format, workspace, savedAt, goal, status, startTime, endTime, replans, recoveryIds,
+                tasks, null, null);
+    }
 
     private static final Logger log = LoggerFactory.getLogger(PlanCheckpoint.class);
 
@@ -98,7 +111,8 @@ public record PlanCheckpoint(
                 workspace == null ? null : workspace.toAbsolutePath().normalize().toString(),
                 now, plan.goal(), plan.status().name(),
                 plan.startTime(), plan.endTime(),
-                plan.replans(), plan.recoveryIds(), snapshots);
+                plan.replans(), plan.recoveryIds(), snapshots,
+                plan.request(), plan.requirements());
     }
 
     /** 这份存档还值不值得续：格式对得上、有任务、而且计划确实停在半路。 */
@@ -166,7 +180,7 @@ public record PlanCheckpoint(
 
         // 照常走 TaskGraph.of：id 重复、悬空依赖、成环一样要查。
         // 存档是自己写的没错，但磁盘上的东西可能被人改过，也可能是上个版本留下的
-        return Plan.restore(goal, TaskGraph.of(restored), planStatus(),
+        return Plan.restore(goal, TaskGraph.of(restored), request, requirements, planStatus(),
                 startTime, endTime, replans, recoveryIds);
     }
 

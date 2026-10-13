@@ -806,19 +806,22 @@ export class SessionStore {
         }
         const items = event.items ?? []
         if (items.length === 0) {
-          this.notice('info', '这段会话还没有检查点——每跑一轮才会拍一个')
+          this.notice('info', '这段会话还没有检查点——每轮开跑前、每次改文件或跑命令前才会拍')
           return
         }
         const lines = items.map((c) => {
           const t = new Date(c.time)
           const hh = String(t.getHours()).padStart(2, '0')
           const mm = String(t.getMinutes()).padStart(2, '0')
-          return `#${c.id}  ${hh}:${mm}  第 ${c.turn + 1} 句前  ${c.label}`
+          // 工具级的点缩进挂在它那一轮下面，一眼分得清「整轮」和「这一轮里的某一步」
+          return c.kind === 'tool'
+            ? `#${c.id}  ${hh}:${mm}    └ ${c.label} 之前`
+            : `#${c.id}  ${hh}:${mm}  第 ${c.turn + 1} 句前  ${c.label}`
         })
         this.notice(
           'info',
           `检查点（保留 ${event.retentionDays} 天）：\n${lines.join('\n')}\n` +
-            `用法：/rewind <编号> 回文件；/rewind <编号> conversation 回对话；/rewind <编号> both 都回`,
+            `用法：/rewind <编号> 回文件；/rewind <编号> conversation 回对话；/rewind <编号> both 都回；/undo 撤销上一轮`,
         )
         return
       }

@@ -18,6 +18,7 @@ object ToolSummary {
     private val WORDING = mapOf(
         "read_file" to ("读取" to "个文件"),
         "write_file" to ("写入" to "个文件"),
+        "edit_file" to ("修改" to "处"),
         "list_dir" to ("列出" to "个目录"),
         "bash" to ("执行" to "条命令"),
         "create_project" to ("创建" to "批文件"),

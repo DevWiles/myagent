@@ -68,6 +68,7 @@ export function StatusLine(props: StatusLineProps) {
 
   // 路径能占的列数 = 总宽 - 左右内边距 - 各段固定内容。
   // 每一项都用 width() 量，不能用 .length：模型名常含中文，一个字占两列。
+  const linkText = createMemo(() => (props.link ? `⟳ ${props.link}${SEPARATOR}` : ""))
   const workspace = createMemo(() => {
     const model = `[${props.model}]`
     const branch = props.branch ? ` git:(${props.branch})` : ""
@@ -76,8 +77,6 @@ export function StatusLine(props: StatusLineProps) {
       width(linkText()) - 2
     return truncateStart(props.workspace, budget)
   })
-
-  const linkText = createMemo(() => (props.link ? `⟳ ${props.link}${SEPARATOR}` : ""))
 
   return (
     <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>

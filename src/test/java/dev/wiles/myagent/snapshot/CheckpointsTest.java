@@ -111,4 +111,44 @@ class CheckpointsTest {
         assertThrows(java.io.IOException.class,
                 () -> cps.rewindCode(new Checkpoints.Checkpoint(1, "s", 1, "deadbeef", "x", 0)));
     }
+
+    @Test
+    @DisplayName("工具级：每次动手前一个点，能回到一轮中间的某一步；/undo 认的仍是上一轮")
+    void toolCheckpointsSplitATurn() throws Exception {
+        Path ws = ws("tool");
+        Checkpoints cps = new Checkpoints(ShadowRepo.open(ws, tmp.resolve("shadow")));
+        cps.session("s");
+        Files.writeString(ws.resolve("a"), "a0");
+        Checkpoints.Checkpoint turn = cps.mark("改两个文件", 1);
+
+        assertNull(cps.markTool("write_file a", 3), "第一步之前和轮级点内容一样，不该再记一笔");
+        Files.writeString(ws.resolve("a"), "a1");
+        Checkpoints.Checkpoint beforeB = cps.markTool("write_file b", 5);
+        Files.writeString(ws.resolve("b"), "b1");
+
+        assertNotNull(beforeB);
+        assertTrue(beforeB.beforeTool());
+        assertEquals(turn, cps.latestTurn(), "/undo 撤销的是整轮");
+
+        assertEquals(List.of("b"), cps.rewindCode(beforeB), "回到第二步之前：a 的改动留着，b 没了");
+        assertEquals("a1", Files.readString(ws.resolve("a")));
+        assertFalse(Files.exists(ws.resolve("b")));
+    }
+
+    @Test
+    @DisplayName("工具级的点和它的种类一起落盘，重启后装回来还分得清")
+    void toolKindSurvivesReload() throws Exception {
+        Path ws = ws("reload");
+        Checkpoints cps = new Checkpoints(ShadowRepo.open(ws, tmp.resolve("shadow")));
+        cps.session("s");
+        cps.mark("一轮", 1);
+        Files.writeString(ws.resolve("x"), "1");
+        cps.markTool("bash rm x", 3);
+
+        Checkpoints again = new Checkpoints(ShadowRepo.open(ws, tmp.resolve("shadow")));
+        again.session("s");
+        assertEquals(List.of(false, true),
+                again.list().stream().map(Checkpoints.Checkpoint::beforeTool).toList());
+        assertEquals("一轮", again.latestTurn().label());
+    }
 }

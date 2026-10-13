@@ -13,6 +13,7 @@ import type { ToolCall } from './store.ts'
 const WORDING: Record<string, [string, string]> = {
   read_file: ['读取', '个文件'],
   write_file: ['写入', '个文件'],
+  edit_file: ['修改', '处'],
   list_dir: ['列出', '个目录'],
   bash: ['执行', '条命令'],
   create_project: ['创建', '批文件'],

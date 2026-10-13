@@ -62,11 +62,21 @@ public final class Agent {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
 
     /**
-     * 单次 run 最多跑几轮。
-     * 模型是可能陷进死循环的（反复读同一个文件、反复试同一条命令），
-     * 没有这个上限，一次对话就能把你的额度烧光。
+     * 单次 run 最多跑几轮。{@code <= 0} 表示不限——这是默认。
+     *
+     * <h3>为什么默认不限</h3>
+     * 照 Claude Code：交互模式没有步数上限，无头模式的 {@code --max-turns} 是可选项、默认不设。
+     * 原来的 25 步是按「改一个小 bug」定的，真实仓库上一个任务读、改、跑测试、再改，
+     * 25 步根本不够；撞上限的代价不是少跑几步，是这一轮在半路被强制收尾。
+     * AsynCodeBench cookiecutter 上三次单 agent 全是跑满步数被截断的，成绩差多少
+     * 全看截断那一刻活干到哪儿（142 ~ 180/202），而不是能力。
+     *
+     * <h3>不限步数，那靠什么防失控</h3>
+     * 和 Claude Code 一样：随时能按停（连带正在跑的工具和子 agent）；上下文涨到窗口的 80%
+     * 起后台压缩；单个工具、单批并行调用、429 重试都各有时限。死循环烧钱的情况，
+     * 要防就显式传上限（{@code --max-steps}，评测框架会传它自己的预算）。
      */
-    public static final int DEFAULT_MAX_STEPS = 25;
+    public static final int DEFAULT_MAX_STEPS = 0;
 
     /**
      * 到了硬线、且后台正在算时，最多等它多久。
@@ -134,6 +144,12 @@ public final class Agent {
     private Set<String> writingTools = Set.of();
     /** 后台预压缩。默认是关掉的那一版，行为退化成「到硬线才同步压」。 */
     private Precompute precompute;
+    /** 跑循环之外送进来的话（子 agent 的结果、追加的指示）。null 表示没有这条通道。 */
+    private Mailbox mailbox;
+    /** 和子 agent 共用的步数预算。null 表示只看自己的 maxSteps。 */
+    private StepBudget budget;
+    /** 这一轮是不是因为共用预算用完才收尾的（收尾文案要说清是哪条线）。 */
+    private boolean budgetExhausted;
 
     /**
      * 估算值到实测值的换算系数。
@@ -246,6 +262,23 @@ public final class Agent {
         return this;
     }
 
+    /** 接上收件箱：每一步请求前收一次，交卷前还有人在跑就等。见 {@link Mailbox}。 */
+    public Agent withMailbox(Mailbox mailbox) {
+        this.mailbox = mailbox;
+        return this;
+    }
+
+    /** 接上和子 agent 共用的步数预算（见 {@link StepBudget}）。 */
+    public Agent withStepBudget(StepBudget budget) {
+        this.budget = budget;
+        return this;
+    }
+
+    /** 系统提示词。子 agent 原样沿用主 agent 的这一份，前缀缓存才命中得上。 */
+    public String systemPrompt() {
+        return systemPrompt;
+    }
+
     /** 告诉它哪些工具算「改了文件」，钉住块要用。 */
     public Agent withWritingTools(Set<String> writingTools) {
         this.writingTools = writingTools == null ? Set.of() : Set.copyOf(writingTools);
@@ -276,6 +309,9 @@ public final class Agent {
         Thread running = toolThread;
         if (running != null) {
             running.interrupt();   // 正在跑的工具：bash 会当场杀掉子进程，见 runInterruptibly
+        }
+        if (mailbox != null) {
+            mailbox.interruptAll();  // 它派出去的子 agent 一起停
         }
     }
 
@@ -309,6 +345,9 @@ public final class Agent {
         measured = false;
         if (precompute != null) {
             precompute.discard();
+        }
+        if (mailbox != null) {
+            mailbox.shutdown();      // 上一段对话派出去的子 agent，这一段不认识它们
         }
     }
 
@@ -425,6 +464,7 @@ public final class Agent {
      */
     public String run(String userInput) {
         cancelled = false;
+        budgetExhausted = false;
         // 断点之后的第一句话：前面拼上中断说明，告诉模型现场怎么读（见 Interruption.resumeNote）。
         // 「继续」也好、换了个说法也好，都走这一条——不认关键词。
         // 只拼一次：这一轮说完，unfinished 就清了
@@ -435,9 +475,14 @@ public final class Agent {
         int step = 0;
 
         try {
-            for (step = 1; step <= maxSteps; step++) {
+            for (step = 1; maxSteps <= 0 || step <= maxSteps; step++) {
                 if (shouldStop()) {
                     return abort(userInput, step);
+                }
+                deliverMail();
+                if (budget != null && !budget.take()) {
+                    budgetExhausted = true;
+                    break;               // 共用预算用完了：和撞上自己的步数上限一样收尾
                 }
                 emit(new AgentEvent.Thinking(step));
 
@@ -460,6 +505,15 @@ public final class Agent {
                 history.add(assistant);
 
                 if (!assistant.hasToolCalls()) {
+                    if (awaitMail()) {
+                        continue;        // 子 agent 交了结果（或者有人追加了话）：读完接着干，不收口
+                    }
+                    String unfinishedWork = mailbox == null ? null : mailbox.beforeFinish();
+                    if (unfinishedWork != null) {
+                        history.add(ChatMessage.user(unfinishedWork));
+                        emit(new AgentEvent.Thought("子 agent 改过的文件还没验证，先验证再收尾"));
+                        continue;
+                    }
                     String text = response.text();
                     unfinished = null;   // 这一轮走完了，「上一轮没做完」不再成立
                     emit(new AgentEvent.Done(text, step));
@@ -499,7 +553,7 @@ public final class Agent {
 
             // 跑满了还没收敛。再给最后一次机会，但**不带工具**——
             // 模型没得选，只能用文字交代目前进展，循环就此收口。
-            log.warn("达到最大步数 {}，强制收敛", maxSteps);
+            log.warn("{}，强制收敛", limitLabel());
             return forceConclusion(userInput);
 
         } catch (LlmException e) {
@@ -515,6 +569,50 @@ public final class Agent {
             emit(new AgentEvent.Failed(e.getMessage(), unfinished));
             return "调用模型失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 收件箱里的话作为 user 消息追加。只在步与步之间调：此刻上一步的工具结果都已回填，
+     * 插一条 user 消息不会把 tool_calls 和它的结果拆开。
+     */
+    private void deliverMail() {
+        if (mailbox == null) {
+            return;
+        }
+        for (String message : mailbox.drain()) {
+            history.add(ChatMessage.user(message));
+        }
+    }
+
+    /**
+     * 模型要交卷了：收件箱里有话，或者还有子 agent 在跑，就先别收口。
+     *
+     * @return true 表示接着循环（有话要读，或者被叫停了要回到循环顶上走 abort）
+     */
+    private boolean awaitMail() {
+        if (mailbox == null) {
+            return false;
+        }
+        boolean announced = false;
+        while (!mailbox.hasMail()) {
+            if (!mailbox.busy()) {
+                return false;
+            }
+            if (shouldStop()) {
+                return true;
+            }
+            if (!announced) {
+                emit(new AgentEvent.Thought("还有子 agent 在跑，等它们交了结果再收尾"));
+                announced = true;
+            }
+            try {
+                mailbox.awaitChange(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true;
+            }
+        }
+        return true;
     }
 
     /** 串行执行一次工具调用：发事件、执行、回填历史。 */
@@ -1093,6 +1191,9 @@ public final class Agent {
      * 所以拿到回答就把它摘掉，只留模型那条结论。
      */
     private String forceConclusion(String userInput) {
+        if (mailbox != null) {
+            mailbox.interruptAll();      // 主 agent 要收口了，派出去的别再接着改文件
+        }
         history.add(ChatMessage.user(
                 "已达到本轮最大工具调用次数，请不要再调用工具，直接用文字说明当前进展和还差什么。"));
         try {
@@ -1110,15 +1211,21 @@ public final class Agent {
             history.add(conclusion);
             // 极少数情况下模型即使没有工具可用也不给文字，兜一句免得返回空答复
             String text = response.text().isBlank() ? "(模型未给出文字结论)" : response.text();
-            unfinished = new Interruption("达到最大步数 " + maxSteps, userInput, maxSteps,
+            unfinished = new Interruption(limitLabel(), userInput, maxSteps,
                     clock.getAsLong(), conversation().size());
-            emit(new AgentEvent.Failed("达到最大步数 " + maxSteps + "，已强制收尾", unfinished));
-            return text + "\n\n(已达到最大步数 " + maxSteps + " 限制，任务可能未完成)";
+            emit(new AgentEvent.Failed(limitLabel() + "，已强制收尾", unfinished));
+            return text + "\n\n(已" + limitLabel() + " 限制，任务可能未完成)";
         } catch (LlmException e) {
             history.remove(history.size() - 1);      // 脚手架也得摘，它现在是最后一条
-            seal("达到最大步数 " + maxSteps + "，收尾请求也失败了", userInput, maxSteps);
+            seal(limitLabel() + "，收尾请求也失败了", userInput, maxSteps);
             emit(new AgentEvent.Failed(e.getMessage(), unfinished));
-            return "达到最大步数 " + maxSteps + "，且收尾请求失败: " + e.getMessage();
+            return limitLabel() + "，且收尾请求失败: " + e.getMessage();
         }
+    }
+
+    /** 撞上的是哪条线。自己的步数上限沿用原来的说法（评测脚本按它认「跑满步数」）。 */
+    private String limitLabel() {
+        return budgetExhausted ? "达到总步数预算 " + budget.total() + "（主 agent 和子 agent 共用）"
+                : "达到最大步数 " + maxSteps;
     }
 }

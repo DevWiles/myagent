@@ -256,4 +256,34 @@ class PlanPromptTest {
         assertTrue(PlanPrompt.system(true).contains("只读模式"));
         assertFalse(PlanPrompt.system(false).contains("只读模式"));
     }
+
+    @Test
+    @DisplayName("根计划的示例带着需求清单——规则要求先列清单，示例必须做到")
+    void rootExampleListsRequirements() {
+        PlanParser.ParsedPlan parsed = PlanParser.parse(firstJsonBlock(PlanPrompt.system()));
+
+        assertFalse(parsed.requirements().isEmpty(), "示例不列清单，模型就不会列");
+        assertTrue(PlanPrompt.system().contains("不许以「现有测试没覆盖」为由"));
+    }
+
+    @Test
+    @DisplayName("重规划和子规划都看得到用户原话")
+    void replanAndSubPlanCarryTheRequest() {
+        Task t1 = new Task("t1", "改日期解析", AgentRoles.CODER, List.of(), "改完");
+        Plan plan = new Plan("修日期解析", TaskGraph.of(List.of(t1)),
+                "parse_date 的两位年要报错", List.of("R1 两位年报错"));
+        t1.start();
+        t1.fail("测试挂了");
+
+        assertTrue(PlanPrompt.replanUser(plan, t1, "测试挂了").contains("parse_date 的两位年要报错"));
+        assertTrue(PlanPrompt.subPlanUser(t1, "看了一圈", TaskBrief.of(plan)).contains("R1 两位年报错"));
+    }
+
+    @Test
+    @DisplayName("三份规划提示词都只把探针派给 verifier，不派 coder 往测试目录里加文件")
+    void probesGoToVerifierOnly() {
+        assertTrue(PlanPrompt.system().contains("探针只派给 verifier"));
+        assertTrue(PlanPrompt.subPlanSystem().contains("探针只派给 verifier"));
+        assertTrue(PlanPrompt.replanSystem().contains("不要派 coder 写探针测试"));
+    }
 }

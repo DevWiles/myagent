@@ -416,4 +416,28 @@ class PlanParserTest {
         assertTrue(assertThrows(IllegalArgumentException.class,
                 () -> PlanParser.parseReplan(json)).getMessage().contains("acceptance"));
     }
+
+    // ── 需求清单 ──────────────────────────────────────────────
+
+    @Test
+    @DisplayName("requirements 原样解析出来；没写就是空，老格式照样能用")
+    void parsesRequirements() {
+        String json = validJson().replace("\"tasks\":",
+                "\"requirements\": [\"R1 非法输入抛 ValueError\", \"  \", \"R2 两位年要报错\"],\n  \"tasks\":");
+
+        assertEquals(List.of("R1 非法输入抛 ValueError", "R2 两位年要报错"),
+                PlanParser.parse(json).requirements());
+        assertEquals(List.of(), PlanParser.parse(validJson()).requirements());
+    }
+
+    @Test
+    @DisplayName("requirements 写成字符串或对象：报错回灌，别静默吞掉")
+    void rejectsMalformedRequirements() {
+        String asString = validJson().replace("\"tasks\":", "\"requirements\": \"R1 要报错\",\n  \"tasks\":");
+        String asObjects = validJson().replace("\"tasks\":",
+                "\"requirements\": [{\"id\": \"R1\", \"text\": \"要报错\"}],\n  \"tasks\":");
+
+        assertTrue(parseError(asString).getMessage().contains("requirements"));
+        assertTrue(parseError(asObjects).getMessage().contains("requirements"));
+    }
 }

@@ -168,6 +168,8 @@ public final class PlanExecuteAgent {
         // 工厂整个交下去，不是 get() 一次：并行的任务各要各的客户端，理由见 AgentTaskRunner
         AgentTaskRunner taskRunner = new AgentTaskRunner(clients, tools, workspaceRoot)
                 .withPlanner(planner)
+                // 原话和需求清单跟着计划走（存档里也有），续跑的计划同样带得上
+                .withBrief(TaskBrief.of(plan))
                 .onEvent(listener::onAgentEvent);
         PlanExecutor planExecutor = new PlanExecutor(taskRunner)
                 .onTaskStarted(listener::onTaskStarted)

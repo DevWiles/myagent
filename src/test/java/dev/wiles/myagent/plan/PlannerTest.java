@@ -398,4 +398,14 @@ class PlannerTest {
         assertTrue(llm.received.get(1).stream().anyMatch(m -> m.content().contains("只读模式")),
                 "写任务被打回时，理由要回灌给模型");
     }
+
+    @Test
+    @DisplayName("计划里存着用户原话，一字不改——goal 是转述，执行时要靠原话兜底")
+    void planKeepsTheRawRequest() {
+        ScriptedLlm llm = new ScriptedLlm(validPlan());
+
+        Plan plan = new Planner(llm).plan("  把 Task 加上重试，别动 TaskGraph  ");
+
+        assertEquals("把 Task 加上重试，别动 TaskGraph", plan.request());
+    }
 }

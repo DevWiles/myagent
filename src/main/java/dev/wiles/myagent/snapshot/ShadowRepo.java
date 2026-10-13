@@ -46,11 +46,22 @@ public final class ShadowRepo {
             ".venv/", "venv/", "__pycache__/", ".pytest_cache/", ".mypy_cache/",
             ".idea/", ".gradle/", ".tox/", ".myagent/");
 
+    /** 一轮开跑前拍的。老记录没有 kind 字段，一律当它。 */
+    public static final String KIND_TURN = "turn";
+    /** 一次会动手的工具调用前拍的。 */
+    public static final String KIND_TOOL = "tool";
+
     /**
      * 一次快照。{@code sessionId} 和 {@code historySize} 是检查点语义（属于哪段会话、
      * 拍的时候对话记录有几条），老记录里没有，读出来是 null / -1。
+     * {@code kind} 是 {@link #KIND_TURN} 或 {@link #KIND_TOOL}。
      */
-    public record Snapshot(String tree, String label, long time, String sessionId, int historySize) {
+    public record Snapshot(String tree, String label, long time, String sessionId, int historySize,
+                           String kind) {
+
+        public Snapshot(String tree, String label, long time, String sessionId, int historySize) {
+            this(tree, label, time, sessionId, historySize, KIND_TURN);
+        }
     }
 
     private final Path workspace;
@@ -101,21 +112,45 @@ public final class ShadowRepo {
 
     /** 拍一张并记下它属于哪段会话、当时对话有几条——这就是一个检查点。 */
     public Snapshot capture(String label, String sessionId, int historySize) throws IOException {
+        return record(writeTree(), label, sessionId, historySize, KIND_TURN);
+    }
+
+    /**
+     * 只把工作区写成一个 tree，不记账。
+     *
+     * <p>和 {@link #record} 拆开，是为了让调用方先比一比：工具级检查点在内容和上一张
+     * 一模一样时不该再记一笔（跑了一次测试、文件一个没变），否则 /rewind 的清单
+     * 会被一串回过去也毫无变化的点淹掉。
+     */
+    public String writeTree() throws IOException {
         git(List.of("add", "-A", "--", "."), true);
-        String tree = git(List.of("write-tree"), true).strip();
+        return git(List.of("write-tree"), true).strip();
+    }
+
+    /** 把一个已经写好的 tree 记进 history.jsonl，成为一个检查点。 */
+    public Snapshot record(String tree, String label, String sessionId, int historySize,
+                           String kind) throws IOException {
         Snapshot snap = new Snapshot(tree, label == null ? "" : label, System.currentTimeMillis(),
-                sessionId, historySize);
-        StringBuilder line = new StringBuilder("{\"tree\":\"").append(tree)
-                .append("\",\"label\":").append(quote(snap.label()))
-                .append(",\"time\":").append(snap.time());
-        if (sessionId != null) {
-            line.append(",\"session\":").append(quote(sessionId))
-                    .append(",\"history\":").append(historySize);
-        }
-        Files.writeString(dir.resolve("history.jsonl"), line.append("}\n").toString(),
+                sessionId, historySize, kind == null ? KIND_TURN : kind);
+        Files.writeString(dir.resolve("history.jsonl"), line(snap) + "\n",
                 StandardCharsets.UTF_8,
                 java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         return snap;
+    }
+
+    /** history.jsonl 的一行。轮级的不写 kind，和老记录一字不差。 */
+    private static String line(Snapshot snap) {
+        StringBuilder line = new StringBuilder("{\"tree\":\"").append(snap.tree())
+                .append("\",\"label\":").append(quote(snap.label()))
+                .append(",\"time\":").append(snap.time());
+        if (snap.sessionId() != null) {
+            line.append(",\"session\":").append(quote(snap.sessionId()))
+                    .append(",\"history\":").append(snap.historySize());
+        }
+        if (!KIND_TURN.equals(snap.kind())) {
+            line.append(",\"kind\":").append(quote(snap.kind()));
+        }
+        return line.append("}").toString();
     }
 
     /** 某张快照的对象还在不在（gc 会回收过期的）。 */
@@ -185,7 +220,7 @@ public final class ShadowRepo {
             com.fasterxml.jackson.databind.JsonNode n = m.readTree(line);
             out.add(new Snapshot(n.get("tree").asText(), n.path("label").asText(""), n.path("time").asLong(),
                     n.hasNonNull("session") ? n.get("session").asText() : null,
-                    n.path("history").asInt(-1)));
+                    n.path("history").asInt(-1), n.path("kind").asText(KIND_TURN)));
         }
         return out;
     }
@@ -203,14 +238,7 @@ public final class ShadowRepo {
                 List<String> keep = new ArrayList<>();
                 for (Snapshot snap : history()) {
                     if (snap.time() >= cutoff) {
-                        StringBuilder line = new StringBuilder("{\"tree\":\"").append(snap.tree())
-                                .append("\",\"label\":").append(quote(snap.label()))
-                                .append(",\"time\":").append(snap.time());
-                        if (snap.sessionId() != null) {
-                            line.append(",\"session\":").append(quote(snap.sessionId()))
-                                    .append(",\"history\":").append(snap.historySize());
-                        }
-                        keep.add(line.append("}").toString());
+                        keep.add(line(snap));
                     }
                 }
                 Files.writeString(file, keep.isEmpty() ? "" : String.join("\n", keep) + "\n", StandardCharsets.UTF_8);

@@ -51,6 +51,12 @@ cd 你要让它干活的目录
 两件事都带新鲜度判断，没改动就直接跳过，启动和裸跑界面一样快。
 敲命令时所在的目录就是 agent 的工作区。
 
+想在任何目录直接敲 `myagent`，把它软链进 PATH 里的某个目录就行（脚本会解开软链找回仓库）：
+
+```bash
+ln -s "$PWD/myagent-tui" ~/.local/bin/myagent    # 在仓库根目录执行
+```
+
 ### 用手机连
 
 装 [`android/`](android/) 那个 app（`cd android && ./gradlew installDebug`），
@@ -79,7 +85,8 @@ cd 你要让它干活的目录
 java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终结
 ```
 
-配置的读取优先级是 **环境变量 > `~/.myagent/config.json` > 内置默认值**：
+配置的读取优先级是 **`MYAGENT_*` 环境变量 > `~/.myagent/config.json` > `DEEPSEEK_*` 环境变量 > 内置默认值**。
+`DEEPSEEK_API_KEY` 这类名字常被别的工具占着，所以只在配置文件没写时兜底，盖不掉配置文件：
 
 ```json
 { "apiKey": "sk-xxx", "baseUrl": "https://api.deepseek.com",
@@ -88,9 +95,9 @@ java -jar myagent.jar --relay-serve --port 8791    # 前面用 nginx 做 wss 终
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
-| `apiKey` | `DEEPSEEK_API_KEY` | 无 | 没有它只能裸跑界面 |
-| `baseUrl` | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
-| `model` | `DEEPSEEK_MODEL` | `deepseek-flash` | `deepseek-v4-pro` 是更强的那个 |
+| `apiKey` | `MYAGENT_API_KEY`（`DEEPSEEK_API_KEY` 只在文件没写时兜底） | 无 | 没有它只能裸跑界面 |
+| `baseUrl` | `MYAGENT_BASE_URL`（`DEEPSEEK_BASE_URL` 兜底） | `https://api.deepseek.com` | 任何 OpenAI 兼容服务都行 |
+| `model` | `MYAGENT_MODEL`（`DEEPSEEK_MODEL` 兜底） | `deepseek-flash` | `deepseek-v4-pro` 是更强的那个 |
 | `contextTokens` | `MYAGENT_CONTEXT_TOKENS` | `1000000` | 上下文窗口。换模型时要改——API 不返回这个数 |
 
 `contextTokens` 除了换模型时要改，还有个用处是**把压缩逼出来**：默认 1M 的窗口下
@@ -249,6 +256,33 @@ chrome-devtools 一家 29 个工具就把基线窗口从 3.3k 顶到 9.9k token�
 
 （不写 `--browserUrl` 的话一切照旧：chrome-devtools-mcp 自己管浏览器，
 myagent 一步都不插手。`--isolated` 每次开临时 profile，进程一死浏览器跟着死。）
+
+### 子 agent（照 Codex）
+
+主 agent 有五个工具：`spawn_agent` / `send_input` / `wait_agent` / `close_agent` / `resume_agent`。
+
+- `spawn_agent` **立刻返回**，子 agent 在后台和主 agent 同时干活；做完时结果以
+  `<subagent_notification>` 自动送进主对话，主 agent 只在关键路径卡住时才 `wait_agent`。
+- 三种类型：`default`（和主 agent 同样的工具）、`explorer`（没有写文件的工具，问代码库的具体问题）、
+  `worker`（直接改工作区，派活时要划清各自负责的文件——大家共用一个目录）。
+- 子 agent 不能再派（深度 1）。主 agent 交卷前会等还在跑的子 agent；按停时它们一起停。
+- 派 worker 必须写明 `owns`（它负责的文件或目录）：它跑着时别人写不了这些路径，它也只能写这些路径。
+- 子 agent 交回的通知里带 `observed`——框架记录的实际写了哪些文件、跑了哪些命令和退出码，不靠它自述。
+  子 agent 改过的文件主 agent 没跑过测试就想交卷，会被提醒一次。
+- 什么时候派由 `MYAGENT_SUBAGENTS` 决定：`explicit`（默认，和 Codex 一样——你说了「用子 agent」「并行做」
+  才派）、`proactive`（能并行就派）、`auto`（开工前由委派决策器判断，不委派就不给派遣工具；
+  目前只在 `--once` 里生效）、`off`（不给这几个工具）。
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `MYAGENT_SUBAGENT_MAX` | `3` | 同时开着的子 agent 上限（做完没关的也算） |
+| `MYAGENT_SUBAGENT_ROLES` | 全部 | 允许派的类型，逗号分隔，如 `explorer` |
+| `MYAGENT_SUBAGENT_STEPS` | 同主 agent | 子 agent 每一轮的步数上限 |
+| `MYAGENT_SUBAGENT_TIMEOUT` | `1800` | 子 agent 每一轮的时限（秒），超时按出错交回 |
+| `MYAGENT_TOTAL_STEPS` | 不设 | 主 agent 和子 agent 共用的步数预算（算力对齐的对照用） |
+
+本机评测：`bench/asyncodebench/run_matrix.sh A,D cookiecutter 3` 按组交替跑，
+`bench/asyncodebench/summarize.py <清单>` 汇总成表（组的定义见脚本开头）。
 
 ### 技能（标准 SKILL.md）
 
@@ -430,7 +464,7 @@ cd tui && bun run cover        # 重新生成上面那张封面图
   界面侧的「同时画几个跑着的席位」还没做——事件里信息已经够了，等界面来认领
 
 每层都有**止损时限**（并发之后才真正要紧：串行时一个东西卡住只卡它自己，
-并发时卡的是整个调度循环）：整批工具调用 60 秒、单个任务 10 分钟、单席 15 分钟。
+并发时卡的是整个调度循环）：整批工具调用 60 秒、单个任务 1 小时、单席 1 小时。
 超时按「这一步失败」落账——下游照常跳过、重规划照常有机会、存档照常推进，
 不另起一套收场方式。
 

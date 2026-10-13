@@ -242,6 +242,25 @@ class AgentTest {
     }
 
     @Test
+    @DisplayName("默认不限步数（照 Claude Code）：调 30 轮工具照样跑完，不会在第 25 步被截断")
+    void defaultHasNoStepLimit() {
+        FakeLlm llm = new FakeLlm();
+        for (int i = 0; i < 30; i++) {
+            llm.calls(null, ToolCall.of("call_" + i, "t", "{}"));
+        }
+        llm.says("做完了");
+        ToolRegistry tools = new ToolRegistry().register(tool("t", a -> ToolResult.ok("ok")));
+
+        Agent agent = new Agent(llm, tools, "sys");    // 不传上限
+        String answer = agent.run("一个要读很多文件的活");
+
+        assertEquals(0, Agent.DEFAULT_MAX_STEPS, "0 = 不限");
+        assertEquals("做完了", answer);
+        assertEquals(31, llm.received.size(), "30 轮工具 + 1 轮答复，没有强制收尾那一次");
+        assertTrue(agent.unfinished().isEmpty(), "正常收口，不是被截断的");
+    }
+
+    @Test
     @DisplayName("断网：不回滚，把现场封口留在历史里——一句「继续」就能接着干")
     void sealsTheSceneOnLlmFailure() {
         FakeLlm llm = new FakeLlm()
