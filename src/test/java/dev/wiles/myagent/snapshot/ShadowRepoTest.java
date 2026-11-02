@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -137,6 +138,65 @@ class ShadowRepoTest {
         assertEquals("# 方案\n第一版\n", Files.readString(ws.resolve("资料/方案.md")));
         assertEquals("a,b\n1,2\n", Files.readString(ws.resolve("data.csv")));
         assertEquals(3, touched.size(), touched.toString());
+    }
+
+    @Test
+    @DisplayName("covers：会进快照的才算能回滚——被忽略的、默认排除的、工作区外的都不算")
+    void coversOnlyWhatSnapshotsKeep() throws Exception {
+        Path ws = tmp.resolve("ws3");
+        ShadowRepo repo = open(ws);
+        Files.writeString(ws.resolve(".gitignore"), "*.log\n.env\n");
+        Files.createDirectories(ws.resolve("src/deep"));
+        Files.writeString(ws.resolve("src/deep/A.java"), "class A {}");
+        Files.writeString(ws.resolve(".env"), "KEY=1");
+        Files.writeString(ws.resolve("app.log"), "x");
+        Files.createDirectories(ws.resolve("node_modules/x"));
+        Files.writeString(ws.resolve("node_modules/x/i.js"), "1");
+
+        assertTrue(repo.covers(ws.resolve("src/deep/A.java")), "普通源码，还没拍过也算——改之前会拍");
+        assertFalse(repo.covers(ws.resolve(".env")), ".gitignore 里的不进快照");
+        assertFalse(repo.covers(ws.resolve("app.log")));
+        assertFalse(repo.covers(ws.resolve("node_modules/x/i.js")), "默认排除的不进快照");
+        assertFalse(repo.covers(tmp.resolve("outside.txt")), "工作区外的");
+        assertFalse(repo.covers(ws), "工作区本身不是一个文件");
+    }
+
+    @Test
+    @DisplayName("covers 说能回滚的，拍完、改坏、恢复，真的回得去")
+    void coveredFileReallyRewinds() throws Exception {
+        Path ws = tmp.resolve("ws4");
+        ShadowRepo repo = open(ws);
+        Path f = ws.resolve("Main.java");
+        Files.writeString(f, "原样\n");
+        assertTrue(repo.covers(f));
+
+        ShadowRepo.Snapshot snap = repo.capture("改之前");
+        Files.writeString(f, "改坏了\n");
+        repo.restore(snap.tree());
+
+        assertEquals("原样\n", Files.readString(f));
+    }
+
+    @Test
+    @DisplayName("行尾原样回来：LF 不变 CRLF、CRLF 不变 LF，工作区 .gitattributes 要求转换也不转")
+    void restoreKeepsLineEndingsByteForByte() throws Exception {
+        Path ws = tmp.resolve("ws5");
+        ShadowRepo repo = open(ws);
+        Files.writeString(ws.resolve(".gitattributes"), "* text eol=crlf\n");
+        Path lf = ws.resolve("lf.txt");
+        Path crlf = ws.resolve("crlf.txt");
+        byte[] lfBytes = "a\nb\n".getBytes(StandardCharsets.UTF_8);
+        byte[] crlfBytes = "a\r\nb\r\n".getBytes(StandardCharsets.UTF_8);
+        Files.write(lf, lfBytes);
+        Files.write(crlf, crlfBytes);
+
+        ShadowRepo.Snapshot snap = repo.capture("x");
+        Files.writeString(lf, "改了");
+        Files.writeString(crlf, "改了");
+        repo.restore(snap.tree());
+
+        assertArrayEquals(lfBytes, Files.readAllBytes(lf));
+        assertArrayEquals(crlfBytes, Files.readAllBytes(crlf));
     }
 
     private static String run(Path dir, String... cmd) throws Exception {

@@ -36,6 +36,13 @@ import java.util.concurrent.TimeUnit;
  * <h3>忽略</h3>
  * git 会照常读工作区里的 {@code .gitignore}；另外影子的 {@code info/exclude} 里写死了
  * {@code .git/}、构建产物、虚拟环境这些——它们不该进快照，也绝不会被恢复动到。
+ *
+ * <h3>逐字节，不转行尾</h3>
+ * Windows 上的 Git 常带系统级 {@code core.autocrlf=true}：拍的时候 CRLF 转 LF，
+ * 恢复时 LF 再转 CRLF——原本是 LF 的文件回滚后整个变成 CRLF，{@code git diff} 一片红。
+ * 快照是后悔药，得原样吐回来。所以影子的 {@code info/attributes} 写 {@code * -text}
+ * （它的优先级高过工作区自己的 {@code .gitattributes}），每条命令再带
+ * {@code core.autocrlf=false} 兜底。
  */
 public final class ShadowRepo {
 
@@ -94,6 +101,7 @@ public final class ShadowRepo {
             Path exclude = dir.resolve("info").resolve("exclude");
             Files.createDirectories(exclude.getParent());
             Files.writeString(exclude, String.join("\n", DEFAULT_EXCLUDES) + "\n");
+            Files.writeString(dir.resolve("info").resolve("attributes"), "* -text\n");
             return repo;
         } catch (IOException | RuntimeException e) {
             log.warn("影子仓库不可用，本次不拍快照: {}", e.getMessage());
@@ -103,6 +111,40 @@ public final class ShadowRepo {
 
     public Path dir() {
         return dir;
+    }
+
+    /**
+     * 这个文件会不会进快照——也就是改坏了能不能靠 {@code /rewind} 救回来。
+     *
+     * <p>被工作区 {@code .gitignore} 或 {@link #DEFAULT_EXCLUDES} 排除的不进快照，
+     * 恢复时也一个字节都不会碰它：改了就是改了。拿不准（git 出错）一律答「不会」——
+     * 调用方会因此照常去问，宁可多问一次。
+     *
+     * @param file 工作区内的绝对路径
+     */
+    public boolean covers(Path file) {
+        Path rel;
+        try {
+            rel = workspace.relativize(file.toAbsolutePath().normalize());
+        } catch (IllegalArgumentException e) {
+            return false;                       // 不同盘符之类，肯定不在工作区里
+        }
+        if (rel.toString().isEmpty() || rel.startsWith("..")) {
+            return false;
+        }
+        try {
+            // 退出码 0 = 被忽略，1 = 没被忽略（会进快照），其余是 git 自己出错
+            int code = exec(List.of("check-ignore", "-q", "--",
+                    rel.toString().replace('\\', '/')), true).code();
+            if (code == 0 || code == 1) {
+                return code == 1;
+            }
+            log.debug("判断 {} 在不在快照里时 git check-ignore 退出码 {}，按不在处理", rel, code);
+            return false;
+        } catch (IOException e) {
+            log.debug("判断 {} 在不在快照里失败，按不在处理: {}", rel, e.getMessage());
+            return false;
+        }
     }
 
     /** 拍一张。同样内容第二次拍得到同一个 sha。 */
@@ -251,8 +293,22 @@ public final class ShadowRepo {
     // ── git ─────────────────────────────────────────────────────
 
     private String git(List<String> args, boolean withWorkTree) throws IOException {
+        Exec r = exec(args, withWorkTree);
+        if (r.code() != 0) {
+            throw new IOException("git " + String.join(" ", args) + " 失败: " + r.output().strip());
+        }
+        return r.output();
+    }
+
+    private record Exec(int code, String output) {
+    }
+
+    /** 跑一条 git，退出码原样交回。有的命令（check-ignore）拿非零退出码说正事。 */
+    private Exec exec(List<String> args, boolean withWorkTree) throws IOException {
         List<String> cmd = new ArrayList<>(args.size() + 1);
         cmd.add("git");
+        cmd.add("-c");
+        cmd.add("core.autocrlf=false");     // 见类注释「逐字节」
         cmd.addAll(args);
         ProcessBuilder pb = new ProcessBuilder(cmd)
                 .directory(workspace.toFile())
@@ -282,11 +338,7 @@ public final class ShadowRepo {
             p.destroyForcibly();
             throw new IOException("git " + args.get(0) + " 超过 120 秒");
         }
-        String text = new String(out, StandardCharsets.UTF_8);
-        if (p.exitValue() != 0) {
-            throw new IOException("git " + String.join(" ", args) + " 失败: " + text.strip());
-        }
-        return text;
+        return new Exec(p.exitValue(), new String(out, StandardCharsets.UTF_8));
     }
 
     private static String hash(String s) {
