@@ -38,8 +38,10 @@ import java.util.Objects;
  *                       默认对所有角色不可见，得显式想清楚该给谁。
  *                       写全名精确匹配；<b>只有 {@code mcp__} 开头的条目</b>许用尾部
  *                       {@code *} 通配，见 {@link #matches(String)}
- * @param maxSteps       这个角色的 ReAct 步数上限。分析型的给三步足够，
- *                       编码型的要留出「读—改—再读」的来回
+ * @param maxSteps       这个角色的 ReAct 步数上限，{@code 0} 表示不限。
+ *                       照 Claude Code 和 Codex：子 agent 默认都不设步数上限——
+ *                       撞上限的代价是这道工序整个判失败、下游跟着跳过，
+ *                       比多跑几步贵得多。要防失控靠取消和调用方显式传的上限
  * @param mutates        会不会改变世界。只读模式靠它过滤掉一半角色，
  *                       将来并发调度也要靠它分流
  * @param requiresVerdict 收尾必须给出结论行（见 {@link TaskPrompt#VERDICT_PASS}）。
@@ -66,8 +68,8 @@ public record AgentRole(
         Objects.requireNonNull(title, "title");
         Objects.requireNonNull(summary, "summary");
         Objects.requireNonNull(taskType, "taskType");
-        if (maxSteps < 1) {
-            throw new IllegalArgumentException("角色 " + id + " 的步数上限必须大于 0");
+        if (maxSteps < 0) {
+            throw new IllegalArgumentException("角色 " + id + " 的步数上限不能是负数（0 表示不限）");
         }
         tools = List.copyOf(tools == null ? List.of() : tools);
         for (String entry : tools) {

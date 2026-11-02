@@ -48,18 +48,18 @@ public final class AgentRoles {
     public static final AgentRole SCOUT = new AgentRole(
             "scout", "探路",
             "这块现在看不清，得先摸一摸才能拆。它跑完会再拆出一层子任务",
-            TaskType.PLANNING, READ_ONLY, 8, false, false);
+            TaskType.PLANNING, READ_ONLY, 0, false, false);
 
     public static final AgentRole EXPLORER = new AgentRole(
             "explorer", "调研",
             "查清某件事：读文件、列目录，用事实回答「现在是什么样」",
-            TaskType.FILE_READ, READ_ONLY, 8, false, false);
+            TaskType.FILE_READ, READ_ONLY, 0, false, false);
 
     public static final AgentRole REVIEWER = new AgentRole(
             "reviewer", "审查",
             "对着已经存在的代码挑毛病：边界情况、和既有约定不一致的地方、漏掉的错误处理。"
                     + "它不改任何东西，产出是一份问题清单",
-            TaskType.FILE_READ, READ_ONLY, 10, false, false);
+            TaskType.FILE_READ, READ_ONLY, 0, false, false);
 
     public static final AgentRole CODER = new AgentRole(
             "coder", "编码",
@@ -68,13 +68,13 @@ public final class AgentRoles {
             // run_tests 不是 bash：只能跑白名单里的测试运行器，删不了任何文件，
             // 所以 coder 改完能自己验，又不失去按文件集合并行的资格
             List.of("read_file", "list_dir", "grep", "glob", "write_file", "edit_file", "create_project", "run_tests"),
-            12, true, false);
+            0, true, false);
 
     public static final AgentRole OPERATOR = new AgentRole(
             "operator", "执行",
             "跑命令：构建、装依赖、执行脚本",
             TaskType.COMMAND, List.of("read_file", "list_dir", "grep", "glob", "bash"),
-            12, true, false);
+            0, true, false);
 
     /**
      * 浏览器角色。
@@ -100,7 +100,7 @@ public final class AgentRoles {
             "browser", "浏览",
             "在真实浏览器里打开页面、点按钮、填表单、读 JS 动态生成的内容。"
                     + "页面是活的、curl 和读源码看不到的东西，只有它能拿到",
-            TaskType.COMMAND, List.of("mcp__chrome*"), 15, true, false);
+            TaskType.COMMAND, List.of("mcp__chrome*"), 0, true, false);
 
     public static final AgentRole ANALYST = new AgentRole(
             "analyst", "分析",
@@ -114,7 +114,7 @@ public final class AgentRoles {
             "verifier", "验证",
             "跑测试或构建，确认前面做的事真的成了",
             TaskType.VERIFICATION, List.of("read_file", "list_dir", "grep", "glob", "bash"),
-            12, true, true);
+            0, true, true);
 
     /**
      * 名册。顺序就是它出现在规划提示词里的顺序，所以<b>按「从看不清到收尾」排</b>，
@@ -136,7 +136,7 @@ public final class AgentRoles {
             "acceptor", "验收",
             "收尾审查：对着目标原话和改动 diff 逐条核对，能跑的都跑一遍，给出通过 / 重新执行",
             TaskType.VERIFICATION, List.of("read_file", "list_dir", "grep", "glob", "bash"),
-            16, true, false);
+            0, true, false);
 
     /**
      * 每种类型的默认角色。
