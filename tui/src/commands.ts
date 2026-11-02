@@ -40,6 +40,7 @@ export type CommandId =
   | "memory"
   | "clear"
   | "qr"
+  | "status"
 
 type CommandSpec = {
   id: CommandId
@@ -155,7 +156,36 @@ const SPECS: CommandSpec[] = [
     description: "手机配对二维码（后端要以 --relay 或 --lan 启动才有）",
     anyFeature: [],
   },
+  {
+    id: "status",
+    name: "/status",
+    // 纯本地：三样东西都在首帧里。老后端没发 baseUrl / key 的话敲了再说，理由同 /qr
+    description: "看现在用的模型、baseUrl 和 API key（key 只露 sk- 和后四位）",
+    anyFeature: [],
+  },
 ]
+
+/**
+ * `/status` 打出来的那几行。
+ *
+ * 老后端首帧里没有 baseUrl / apiKeyMasked，那就照实说「后端没告诉我」，
+ * 不拿默认值冒充——用户来看这个，往往就是在怀疑配置没生效。
+ */
+export function statusLines(ready: {
+  model: string
+  hasApiKey: boolean
+  baseUrl?: string
+  apiKeyMasked?: string | null
+}): string[] {
+  const unknown = "（后端没发，升级后端后再看）"
+  const key = !ready.hasApiKey ? "未配置" : (ready.apiKeyMasked ?? unknown)
+  return [
+    `模型      ${ready.model}`,
+    `baseUrl   ${ready.baseUrl ?? unknown}`,
+    `API key   ${key}`,
+    "改这些见 ~/.myagent/config.json 或 MYAGENT_* 环境变量",
+  ]
+}
 
 export type CommandEntry = {
   id: CommandId

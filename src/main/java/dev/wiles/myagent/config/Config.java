@@ -164,12 +164,27 @@ public record Config(String apiKey, String baseUrl, String model, int contextTok
         return null;
     }
 
+    /**
+     * 给人看的 key：只留 {@code sk-} 前缀和后四位，比如 {@code sk-****abcd}。
+     *
+     * 够用户认出「用的是哪一把」，又不够拿去用。太短的 key 后四位就占了一大半，
+     * 那就一位都不露。没配是 null，由调用方决定怎么说。
+     */
+    public String maskedApiKey() {
+        if (!hasApiKey()) {
+            return null;
+        }
+        if (apiKey.length() <= 8) {
+            return "***";
+        }
+        String prefix = apiKey.startsWith("sk-") ? "sk-" : "";
+        return prefix + "****" + apiKey.substring(apiKey.length() - 4);
+    }
+
     /** toString 脱敏，避免密钥被日志打出去。 */
     @Override
     public String toString() {
-        String masked = !hasApiKey() ? "<未配置>"
-                : apiKey.length() <= 8 ? "***"
-                : apiKey.substring(0, 6) + "..." + apiKey.substring(apiKey.length() - 4);
+        String masked = hasApiKey() ? maskedApiKey() : "<未配置>";
         return "Config[apiKey=" + masked + ", baseUrl=" + baseUrl + ", model=" + model
                 + ", contextTokens=" + contextTokens
                 + (thinking == null ? "" : ", thinking=" + thinking) + "]";

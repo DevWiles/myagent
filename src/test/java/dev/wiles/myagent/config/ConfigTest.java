@@ -88,4 +88,18 @@ class ConfigTest {
         assertFalse(s.contains("abcdef1234567890"), "密钥漏进日志了: " + s);
         assertTrue(s.contains("8000"), "新字段要能看见，排查配置问题全靠它: " + s);
     }
+
+    @Test
+    @DisplayName("给人看的 key 只留 sk- 和后四位")
+    void maskedApiKeyKeepsPrefixAndLastFour() {
+        assertEquals("sk-****7890", withKey("sk-abcdef1234567890").maskedApiKey());
+        assertEquals("****7890", withKey("abcdef1234567890").maskedApiKey());
+        assertEquals("***", withKey("sk-12345").maskedApiKey());
+        assertNull(withKey("  ").maskedApiKey());
+        assertNull(withKey(null).maskedApiKey());
+    }
+
+    private static Config withKey(String key) {
+        return new Config(key, Config.DEFAULT_BASE_URL, Config.DEFAULT_MODEL, 8_000);
+    }
 }

@@ -8,6 +8,7 @@ import {
   looksLikeCommand,
   matchCommand,
   resolve,
+  statusLines,
   type CommandContext,
 } from "./commands.ts"
 
@@ -53,6 +54,7 @@ describe("边打边筛", () => {
       "/memory",
       "/clear",
       "/qr",
+      "/status",
     ])
   })
 
@@ -168,7 +170,7 @@ describe("按回车怎么处置", () => {
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(10)
+    expect(entries).toHaveLength(11)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -176,7 +178,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(10)
+    expect(lines).toHaveLength(11)
     expect(lines.some((l) => l.includes("/compact"))).toBe(true)
     expect(lines.every((l) => !l.includes("/plan ") && !l.includes("/team")),
     ).toBe(true)
@@ -237,3 +239,27 @@ describe("菜单开着时按回车", () => {
   })
 })
 
+
+describe("/status", () => {
+  test("模型、baseUrl、打过码的 key 都列出来", () => {
+    const lines = statusLines({
+      model: "deepseek-flash",
+      hasApiKey: true,
+      baseUrl: "https://api.deepseek.com",
+      apiKeyMasked: "sk-****abcd",
+    })
+    expect(lines[0]).toContain("deepseek-flash")
+    expect(lines[1]).toContain("https://api.deepseek.com")
+    expect(lines[2]).toContain("sk-****abcd")
+  })
+
+  test("没配 key 就说没配", () => {
+    expect(statusLines({ model: "m", hasApiKey: false, baseUrl: "u", apiKeyMasked: null })[2]).toContain("未配置")
+  })
+
+  test("老后端没发的字段照实说，不拿默认值冒充", () => {
+    const lines = statusLines({ model: "m", hasApiKey: true })
+    expect(lines[1]).toContain("后端没发")
+    expect(lines[2]).toContain("后端没发")
+  })
+})

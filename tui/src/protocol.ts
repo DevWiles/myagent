@@ -87,6 +87,13 @@ export type ServerEvent =
       model: string
       planMode: boolean
       hasApiKey: boolean
+      /** 模型服务的地址。`/status` 显示它。老后端没有这个字段。 */
+      baseUrl?: string
+      /**
+       * 打过码的 key，只留 `sk-` 和后四位（`sk-****abcd`）；没配是 null。
+       * 后端打好码再发：首帧会经过中继发到手机上，完整的 key 不出后端。
+       */
+      apiKeyMasked?: string | null
       busy: boolean
       /** 后端支持的可选能力。老后端没有这个字段——界面据此决定画不画对应入口。 */
       features?: string[]

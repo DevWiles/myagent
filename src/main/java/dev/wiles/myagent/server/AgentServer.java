@@ -1452,6 +1452,10 @@ public final class AgentServer extends WebSocketServer {
         n.put("branch", GitBranch.of(workspace.root()));
         n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
         n.put("hasApiKey", config.hasApiKey());
+        // /status 用。key 在这边打好码再发：首帧也会发给扫码连进来的手机、经过中继，
+        // 完整的 key 不该离开这个进程
+        n.put("baseUrl", config.baseUrl());
+        n.put("apiKeyMasked", config.maskedApiKey());
         // 界面退出时会把这个路径显示给用户，好让人知道去哪儿查这趟做了什么。
         // 新增字段不升协议版本——界面本来就该忽略不认识的字段（见 docs/protocol.md 第 2 节）
         n.put("auditLog", audit.file().toString());

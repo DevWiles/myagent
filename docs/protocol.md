@@ -261,6 +261,8 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "model": "deepseek-chat",
   "planMode": false,
   "hasApiKey": true,
+  "baseUrl": "https://api.deepseek.com",
+  "apiKeyMasked": "sk-****abcd",
   "busy": false,
   "tokens": 1234,
   "sentTokens": 156800,
@@ -297,6 +299,11 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 `auditLog` 是本次运行的审计轨迹落在哪。界面退出时会把它显示给用户——
 界面活在备用屏里，退出后整段对话随屏幕消失，这个路径是唯一一条还能继续查的线索。
 **新增字段不升协议版本**（见第 2 节），老界面忽略它即可。
+
+`baseUrl` 和 `apiKeyMasked` 给界面的 `/status` 用：让用户确认眼下连的是哪个服务、
+用的是哪一把 key。**key 在服务端打好码再发**，只留 `sk-` 和后四位（`sk-****abcd`；
+不以 `sk-` 开头的就只有 `****abcd`，8 位及以下一律 `***`），没配是 `null`——
+首帧会经过中继发到手机上，完整的 key 不离开后端进程。
 
 ### 3.2 ReAct 过程事件
 

@@ -23,6 +23,7 @@ import {
   acceptSelected,
   filterCommands,
   helpLines,
+  statusLines,
   matchCommand,
   resolve,
   type CommandContext,
@@ -364,6 +365,15 @@ export function App(props: AppProps) {
       case "help":
         session.notice("info", ["可以用的命令：", ...helpLines(commandContext())].join("\n"))
         return
+      case "status": {
+        const ready = state().ready
+        if (!ready) {
+          session.notice("warn", "还没连上后端，等连上再看")
+          return
+        }
+        session.notice("info", statusLines(ready).join("\n"))
+        return
+      }
       case "continue":
         session.continueSession()
         return

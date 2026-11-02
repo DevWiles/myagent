@@ -192,6 +192,10 @@ export type ReadyInfo = {
   model: string
   planMode: boolean
   hasApiKey: boolean
+  /** 模型服务的地址。老后端不发。 */
+  baseUrl?: string
+  /** 打过码的 key（`sk-****abcd`），没配是 null，老后端不发是 undefined。 */
+  apiKeyMasked?: string | null
   tools: ToolInfo[]
   /** 后端的角色名册。老后端不发，那就是空数组。 */
   roles: RoleInfo[]
@@ -694,6 +698,8 @@ export class SessionStore {
             model: event.model,
             planMode: event.planMode,
             hasApiKey: event.hasApiKey,
+            baseUrl: event.baseUrl,
+            apiKeyMasked: event.apiKeyMasked,
             tools: event.tools,
             roles: event.roles ?? [],
             features: event.features ?? [],
