@@ -41,6 +41,7 @@ export type CommandId =
   | "clear"
   | "qr"
   | "status"
+  | "scroll-speed"
 
 type CommandSpec = {
   id: CommandId
@@ -161,6 +162,13 @@ const SPECS: CommandSpec[] = [
     name: "/status",
     // 纯本地：三样东西都在首帧里。老后端没发 baseUrl / key 的话敲了再说，理由同 /qr
     description: "看现在用的模型、baseUrl 和 API key（key 只露 sk- 和后四位）",
+    anyFeature: [],
+  },
+  {
+    id: "scroll-speed",
+    name: "/scroll-speed",
+    // 纯本地，照 Claude Code 的同名命令
+    description: "调滚轮速度：开着时滚一下就是新手感，←→ 调，Enter 存",
     anyFeature: [],
   },
 ]

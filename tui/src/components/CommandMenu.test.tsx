@@ -22,7 +22,7 @@ async function frameOf(selected: number, columns = 80): Promise<string> {
   const entries = listCommands(ctx)
   const { renderOnce, captureCharFrame } = await testRender(
     () => <CommandMenu entries={entries} selected={selected} columns={columns} />,
-    { width: columns, height: 14 },
+    { width: columns, height: 15 },
   )
   await renderOnce()
   return captureCharFrame()
@@ -78,8 +78,8 @@ describe("命令菜单", () => {
     for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/memory", "/clear"]) {
       expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
-    // 十一条命令 + 一行键位提示 = 十二行，多出来的行就是折行折出来的
-    expect(rows).toHaveLength(12)
+    // 十二条命令 + 一行键位提示 = 十三行，多出来的行就是折行折出来的
+    expect(rows).toHaveLength(13)
     expect(frame).toContain("…")
   })
 

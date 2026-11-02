@@ -17,6 +17,16 @@ import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
 import { continueHint } from "../store.ts"
 import { tildify } from "../path.ts"
+import {
+  DEFAULT_SCROLL_SPEED,
+  formatSpeed,
+  loadScrollSettings,
+  resolveScrollSpeed,
+  saveScrollSpeed,
+  stepSpeed,
+  WheelScroll,
+} from "../scroll.ts"
+import { ScrollSpeedDialog } from "./ScrollSpeedDialog.tsx"
 import { createSession } from "../session.ts"
 import { dark, ThemeProvider } from "../theme.ts"
 import {
@@ -210,6 +220,18 @@ export function App(props: AppProps) {
   /** 对话区的滚动容器。展开/收起工具明细时要按住它的滚动位置（见 toggleToolEntry）。 */
   let transcriptScroll: ScrollBoxRenderable | undefined
 
+  // 滚轮速度（见 scroll.ts）。一个实例从头用到尾：/scroll-speed 改的就是它，滚一下当场生效
+  const scrollSettings = loadScrollSettings()
+  const startSpeed = resolveScrollSpeed(process.env["MYAGENT_SCROLL_SPEED"], scrollSettings)
+  const wheel = new WheelScroll(startSpeed.speed, scrollSettings.wheelAcceleration !== false)
+
+  /** `/scroll-speed` 开着时的状态。`before` 是打开前的速度，Esc 撤回到它。null = 没开。 */
+  const [speedDialog, setSpeedDialog] = createSignal<{ before: number; speed: number } | null>(null)
+  const previewSpeed = (speed: number): void => {
+    wheel.speed = speed
+    setSpeedDialog((d) => d && { ...d, speed })
+  }
+
   /**
    * 展开/收起一组工具明细，**不让屏幕跳**。
    *
@@ -259,7 +281,7 @@ export function App(props: AppProps) {
    * 摆一列命令只会让人以为可以敲。
    */
   const candidates = () =>
-    state().busy || pending() || picker() !== null
+    state().busy || pending() || picker() !== null || speedDialog() !== null
       ? []
       : filterCommands(draft(), commandContext())
 
@@ -413,6 +435,9 @@ export function App(props: AppProps) {
       }
       case "clear":
         session.reset()
+        return
+      case "scroll-speed":
+        setSpeedDialog({ before: wheel.speed, speed: wheel.speed })
         return
       case "qr": {
         const url = session.pairingUrl()
@@ -641,6 +666,29 @@ export function App(props: AppProps) {
       return
     }
 
+    // 滚轮速度弹窗开着时，键全归它：输入框这会儿不该收字
+    const speed = speedDialog()
+    if (speed) {
+      consume()
+      if (key.name === "left") return previewSpeed(stepSpeed(speed.speed, -1))
+      if (key.name === "right") return previewSpeed(stepSpeed(speed.speed, 1))
+      if (key.name === "r") return previewSpeed(DEFAULT_SCROLL_SPEED)
+      if (key.name === "escape") {
+        wheel.speed = speed.before
+        setSpeedDialog(null)
+        return
+      }
+      if (key.name === "return") {
+        setSpeedDialog(null)
+        if (saveScrollSpeed(speed.speed)) {
+          session.notice("info", `滚轮速度改成 ${formatSpeed(speed.speed)}，已存进 ~/.myagent/tui.json`)
+        } else {
+          session.notice("warn", `滚轮速度这次用 ${formatSpeed(speed.speed)}，但没存进 ~/.myagent/tui.json，下次启动会回去`)
+        }
+      }
+      return
+    }
+
     // 会话选择器开着时，它先接键。输入框照常收字符——那就是搜索框
     if (picker()) {
       const rows = pickerRows()
@@ -740,8 +788,12 @@ export function App(props: AppProps) {
           <scrollbox
             stickyScroll
             stickyStart="bottom"
+            scrollAcceleration={wheel}
             ref={(r: ScrollBoxRenderable) => {
               transcriptScroll = r
+              // 不要右边那条滚动条：滚轮和 PgUp/PgDn 照样滚，它只是占一列、晃眼。
+              // 手动设过 visible 之后 OpenTUI 就不再按内容多少自动把它打开
+              r.verticalScrollBar.visible = false
             }}
           >
             {/* 欢迎框在**滚动容器里面**，是对话流的第一项而不是固定页头。
@@ -864,6 +916,14 @@ export function App(props: AppProps) {
           />
         </Show>
 
+        <Show when={speedDialog()}>
+          {(d) => (
+            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <ScrollSpeedDialog speed={d().speed} envOverride={startSpeed.source === "env"} />
+            </box>
+          )}
+        </Show>
+
         {/* 命令菜单钉在输入框**上方**：往下长会把输入框挤下去，
             而输入框的位置是打字时眼睛的锚点，不能动 */}
         <CommandMenu entries={candidates()} selected={picked()} columns={dimensions().width - 2} />
@@ -872,6 +932,8 @@ export function App(props: AppProps) {
           placeholder={
             pending()
               ? "上面等你回答…"
+              : speedDialog()
+                ? "滚一下试试手感 · ←→ 调 · Enter 保存 · Esc 取消"
               : picker()
                 ? "输入即搜索（标题或分支）· ↑↓ 选 · Enter 接着聊 · Esc 取消"
                 : state().busy
