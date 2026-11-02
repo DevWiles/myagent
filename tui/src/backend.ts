@@ -149,9 +149,18 @@ async function ensureJar(
  *                    -Dorg.slf4j.simpleLogger.defaultLogLevel=debug" ./myagent-tui
  * ```
  * 不设就是空数组，命令行和以前一字不差。
+ *
+ * Windows 上另外固定带一组编码参数：那边的 JVM 按系统代码页（中文系统是 GBK）
+ * 往 stdout/stderr 写，这边按 UTF-8 读，启动失败时露出来的日志全是乱码。
+ * `sun.*` 是 JDK 17 认的名字，不带前缀的是 19 起的正式名字，两套都给。
+ * 放在用户的参数前面，同名 -D 后写的赢，想改还能从 MYAGENT_JAVA_OPTS 盖掉。
  */
 function javaOptions(): string[] {
-  return (process.env.MYAGENT_JAVA_OPTS ?? '').split(' ').filter((s) => s.length > 0)
+  const encoding =
+    process.platform === 'win32'
+      ? ['stdout', 'stderr'].flatMap((s) => [`-D${s}.encoding=UTF-8`, `-Dsun.${s}.encoding=UTF-8`])
+      : []
+  return [...encoding, ...(process.env.MYAGENT_JAVA_OPTS ?? '').split(' ').filter((s) => s.length > 0)]
 }
 
 /** 连接一次最多等多久。超了就当这次失败，走退避重试。 */
