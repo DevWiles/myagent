@@ -112,16 +112,25 @@ public final class BuiltinTools {
      */
     public static ToolRegistry createDefault(Workspace workspace, ApprovalPolicy approval,
                                              MemoryStore memory) {
+        return createDefault(workspace, approval, memory, new FileWriteGuard());
+    }
+
+    /**
+     * @param writeGuard 三个写工具共用的写入判定。带检查点的入口（{@code AgentServer}）
+     *                   传一个认得快照范围的，能回滚的覆盖就不再问
+     */
+    public static ToolRegistry createDefault(Workspace workspace, ApprovalPolicy approval,
+                                             MemoryStore memory, FileWriteGuard writeGuard) {
         ToolRegistry registry = new ToolRegistry()
                 .register(new ReadFileTool(workspace))
-                .register(new WriteFileTool(workspace, new FileWriteGuard(), approval))
-                .register(new EditFileTool(workspace, new FileWriteGuard(), approval))
+                .register(new WriteFileTool(workspace, writeGuard, approval))
+                .register(new EditFileTool(workspace, writeGuard, approval))
                 .register(new ListDirTool(workspace))
                 .register(new GrepTool(workspace))
                 .register(new GlobTool(workspace))
                 .register(new BashTool(workspace, new CommandGuard(), approval))
                 .register(new RunTestsTool(workspace))
-                .register(new CreateProjectTool(workspace, new FileWriteGuard(), approval))
+                .register(new CreateProjectTool(workspace, writeGuard, approval))
                 .register(new WebSearchTool(Web.CLIENT))
                 .register(new WebFetchTool(Web.CLIENT));
         if (memory != null) {

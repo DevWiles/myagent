@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.Predicate;
 
 /**
  * 文件写入的风险评估，和 {@link CommandGuard} 对称。
@@ -14,7 +15,9 @@ import java.util.List;
  * 那这道防线等于没有。所以按「会不会毁掉已有东西」来分档：
  * <ul>
  *   <li>新建文件 —— 放行。写错了删掉就是，没有损失</li>
- *   <li>覆盖已有文件 —— 确认。这是唯一会造成数据丢失的情形</li>
+ *   <li>覆盖已有文件 —— 确认。这是唯一会造成数据丢失的情形。
+ *       <b>例外：改之前拍得进检查点的</b>（{@link #FileWriteGuard(Predicate)}）放行——
+ *       改坏了 {@code /rewind} 就回去了，并没有真的丢东西</li>
  *   <li>动版本库内部 —— 拒绝。改坏 .git 连 git 都救不回来，
  *       而那正是用户最后的后悔药</li>
  * </ul>
@@ -23,6 +26,22 @@ public final class FileWriteGuard {
 
     /** 这些目录是工具自己的数据库，被改写会导致不可恢复的损坏。 */
     private static final List<String> PROTECTED_DIRS = List.of(".git", ".svn", ".hg");
+
+    /** 这个文件改坏了能不能回滚。默认一律不能，覆盖就问。 */
+    private final Predicate<Path> rewindable;
+
+    public FileWriteGuard() {
+        this(file -> false);
+    }
+
+    /**
+     * @param rewindable 文件在不在检查点的覆盖范围里（见 {@code ShadowRepo#covers}）。
+     *                   照 Claude Code 的 acceptEdits：代码改动能撤销，就不必每次都问——
+     *                   问多了用户只会条件反射按 y，真正该看的那次反而看不见
+     */
+    public FileWriteGuard(Predicate<Path> rewindable) {
+        this.rewindable = rewindable;
+    }
 
     /**
      * @param displayPath 给人看的相对路径
@@ -39,6 +58,9 @@ public final class FileWriteGuard {
         }
         if (!Files.exists(resolved)) {
             return CommandRisk.safe();       // 新建文件没有损失，不打扰用户
+        }
+        if (rewindable.test(resolved)) {
+            return CommandRisk.safe();       // 改之前会拍检查点，改坏了 /rewind 回去
         }
         return CommandRisk.approval("将覆盖已有文件 " + displayPath + describeChange(resolved, newContent));
     }

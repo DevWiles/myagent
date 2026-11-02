@@ -201,4 +201,47 @@ class FileWriteApprovalTest {
         assertTrue(r.content().contains("A.java"));
         assertTrue(r.content().contains("拒绝"));
     }
+
+    @Test
+    @DisplayName("能回滚的文件覆盖时不问——改坏了 /rewind 回去，问了只会被条件反射按 y")
+    void rewindableOverwriteNeedsNoApproval() throws Exception {
+        Files.writeString(tmp.resolve("Main.java"), "原有代码\n");
+        WriteFileTool tool = new WriteFileTool(new Workspace(tmp), new FileWriteGuard(file -> true),
+                recording(false));
+
+        ToolResult r = write(tool, "Main.java", "新代码\n");
+
+        assertTrue(asked.isEmpty(), "不该弹框: " + asked);
+        assertTrue(r.ok(), r.content());
+        assertEquals("新代码\n", Files.readString(tmp.resolve("Main.java")));
+    }
+
+    @Test
+    @DisplayName("回不去的照样问：判定只对说「能」的那个文件放行")
+    void nonRewindableStillAsks() throws Exception {
+        Files.writeString(tmp.resolve(".env"), "KEY=1\n");
+        Files.writeString(tmp.resolve("Main.java"), "原有代码\n");
+        WriteFileTool tool = new WriteFileTool(new Workspace(tmp),
+                new FileWriteGuard(file -> !file.getFileName().toString().equals(".env")), recording(true));
+
+        write(tool, "Main.java", "新\n");
+        write(tool, ".env", "KEY=2\n");
+
+        assertEquals(1, asked.size(), asked.toString());
+        assertTrue(asked.get(0).contains(".env"));
+    }
+
+    @Test
+    @DisplayName("能回滚也不许碰 .git——那是回滚本身的后路")
+    void rewindableNeverUnlocksGitDir() throws Exception {
+        Files.createDirectories(tmp.resolve(".git"));
+        Files.writeString(tmp.resolve(".git/config"), "[core]\n");
+        WriteFileTool tool = new WriteFileTool(new Workspace(tmp), new FileWriteGuard(file -> true),
+                recording(true));
+
+        ToolResult r = write(tool, ".git/config", "坏了");
+
+        assertFalse(r.ok());
+        assertEquals("[core]\n", Files.readString(tmp.resolve(".git/config")));
+    }
 }
