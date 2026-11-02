@@ -34,6 +34,11 @@ export type Theme = {
 
   /** 用户输入的回显 */
   user: string
+  /**
+   * 用户发言整行的底色（对齐 Claude Code）。回头翻长对话时，
+   * 靠它一眼找到「我当时问了什么」——光靠一个 `›` 和字色在满屏输出里太不显眼。
+   */
+  userBg: string
   /** 模型在调用工具前说的话（ReAct 的 Thought） */
   thought: string
 
@@ -97,6 +102,7 @@ export const dark: Theme = {
   brand: "#5b9dfb",
   brandDim: "#2f5d9e",
   user: "#7f9fd8",
+  userBg: "#373737",
   thought: "#9b82c8",
   success: "#5cb85c",
   error: "#e06c75",
@@ -127,6 +133,7 @@ export const light: Theme = {
   brand: "#1d4ed8",
   brandDim: "#93b4ec",
   user: "#2563eb",
+  userBg: "#e6e6e6",
   thought: "#7c3aed",
   success: "#15803d",
   error: "#b91c1c",

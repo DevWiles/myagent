@@ -99,9 +99,10 @@ export function EntryView(props: EntryViewProps) {
 function UserEntry(props: { text: string }) {
   const theme = useTheme()
   return (
-    <box flexDirection="row" paddingTop={1}>
-      <text fg={theme.brand}>{"› "}</text>
-      <text fg={theme.user}>{props.text}</text>
+    // 上面的空行用 margin 不用 padding：padding 在底色里面，会多铺一行灰
+    <box flexDirection="row" marginTop={1} backgroundColor={theme.userBg}>
+      <text fg={theme.subtle}>{"› "}</text>
+      <text fg={theme.text}>{props.text}</text>
     </box>
   )
 }
