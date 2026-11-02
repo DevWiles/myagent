@@ -223,7 +223,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 ```json
 "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
-             "compact", "memory", "roles", "team", "undo", "rewind"]
+             "compact", "memory", "roles", "undo", "rewind"]
 ```
 
 理由是——新增能力如果靠升版本宣告，老界面会因为版本对不上直接拒连，
@@ -358,7 +358,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   （断在第几步、「没有执行」怎么读、执行到一半的先检查、隔久了先核对文件）。
   界面上显示的、`user_message` 广播的仍是用户原话——那段说明是写给模型的，不是给人看的。
 
-计划/流水线执行期间，子任务发出的 `text_delta` / `thought` / `tool_started` /
+计划执行期间，子任务发出的 `text_delta` / `thought` / `tool_started` /
 `tool_finished` 会多带一个 **`task`** 字段（任务或工序的 id，如 `"t3"`、`"work"`）。
 并行的任务各自在发事件，界面靠它把动静归到正确的那条线上；不认识这个字段的老界面
 忽略即可，所以协议版本不升。主对话自己的事件没有这个字段；但主对话用 `spawn_agent` 派出的
@@ -399,7 +399,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `detail` | 命令原文、工作区相对路径，或站点主机名（`browse`） |
 | `reason` | 为什么要问。同时给用户和模型看 |
 | `preview` | 写文件时是 unified diff 正文，没有就是空串 |
-| `origin` | 计划/流水线里是「编码者 · t3」，单轮对话里是空串 |
+| `origin` | 计划里是「编码者 · t3」，单轮对话里是空串 |
 | `suggestions` | 「以后都同意」可以存成哪几条规则，**从紧到松**。空数组表示这次记不成规则 |
 | `preferred` | 默认选中第几档 |
 
@@ -859,83 +859,20 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ---
 
-### 3.14 流水线（feature: `team`）
+### 3.14 流水线（已撤销）
 
-三种**固定分工**加一条反馈回路：
+2026-11-02 起服务端不再提供流水线（拟方案 → 并行施工 → 验收）：评测上它没比单 agent
+做得更好（AsynCodeBench cookiecutter 单 agent 180/202、流水线 143/202）。
+`features` 里不再有 `team`；`team` 命令按未知命令回 `error`；`team_*` 事件不会再发。
 
-```
-plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(reviewer 验收)
-        ↑___________重新规划___________|________重新执行________↑
-```
-
-规划工序拆出**几个 worker 任务**（角色、依赖都由它定），互不依赖的并行跑
-（只读并行、会动手的独占，规矩和计划执行器同一条）；验收对着方案和全部施工结果查
-真实文件，最后一行给三选一的结论：**「通过」「重新执行」（方案没错，按原方案重做）
-「重新规划」（方案本身有问题，重拟）**。打回会被执行——最多 **3 轮验收**，
-用完还过不了就如实报 `PARTIAL`。
-
-> 2026-09-22 之前这里是「圆桌」。帧名里的 `seat` 是那个时期留下的，
-> **名字和字段形状原样保留**（换名就是破坏性改动），语义是一道**工序**。
-
-| `t` | 字段 | 说明 |
-|---|---|---|
-| `team_started` | `goal` `reason` `seats[]` | 开场。此刻只有规划那一道工序——worker 有几个、派谁，要等规划跑完才知道 |
-| `team_seats_added` | `seats[]` | **座位表长大了**：规划拆出的 workers、每轮的验收工序、返工/重拟长出的新工序，全走这帧。按执行顺序追加到已有座位表末尾即可 |
-| `team_seat_started` | `seatId` `role` `roleTitle` | 轮到这道工序。**几个只读 worker 会同时在跑**，靠 `seatId` 分线 |
-| `team_seat_finished` | `seatId` `role` `status` `durationMs` `opinion` `error` | 倒了的、被跳过的也发 |
-| `team_synthesis_started` | — | **不再发送**（圆桌时期的合议帧）。老界面收不到它没有影响：它只驱动一行「合议中…」 |
-| `team_finished` | `status` `spoke` `silent` `verdict` `rounds` | 收工。`rounds` 是验收跑了几轮 |
-
-```json
-{"t":"team_started","goal":"给配置模块加环境变量覆盖",
- "reason":"拟方案 → 并行施工 → 验收；打回可重新执行或重新规划",
- "seats":[{"id":"plan","role":"scout","roleTitle":"探路","summary":"…","status":"PENDING"}]}
-
-{"t":"team_seats_added",
- "seats":[{"id":"t1","role":"coder","roleTitle":"编码","summary":"…","status":"PENDING"},
-          {"id":"t2","role":"verifier","roleTitle":"验证","summary":"…","status":"PENDING"}]}
-```
-
-工序 id 的规律（界面不用解析它，但日志里认得出）：规划是 `plan`、`plan2`…（每重拟一次加一）；
-验收是 `review`、`review2`…（每轮一个）；worker 第一轮用规划给的原始 id，
-之后每轮带 `r<轮次>.` 前缀（如 `r2.t1`），**全场唯一**。
-
-`team_finished.status` 四种，界面要按**验收结论**而不是「跑没跑完」来画：
-
-- `COMPLETED`——验收放行。`verdict` 是最后一轮审查正文。
-- `PARTIAL`——活干了但**没有担保**：轮次用完仍被打回（`verdict` 是问题清单，
-  最值钱的一份产出）、验收那道工序自己没跑成、或重拟方案没成（后两种 `verdict`
-  可能是 `null` 或上一轮的打回意见）。都意味着**工作区里已经有改动，但没人担保它对**。
-- `FAILED`——第一轮方案就没拟成，什么都没干。`verdict` 是 `null`。
-- `CANCELLED`——用户叫停。已经落定的工序原样留着，`verdict` 是 `null`。
-
-给界面实现者的四条：
-
-1. **座位表是长大的，不是一次给齐的。** `team_started` 只有规划一席；
-   后续每一批都是 `team_seats_added`。收到不认识的 `seatId` 的 started/finished 帧
-   说明有一帧丢了，别崩，忽略即可。
-2. **`opinion` 和流式文本是两份东西。** 执行期间各道工序的话混在一条 `text_delta` 流里
-   （带 `task` 字段分线）；`team_seat_finished.opinion` 是归到这道工序名下的**定稿**。
-3. **倒了的、被跳过的工序也有终态帧**，`status` 是 `FAILED`／`SKIPPED`。
-   注意 worker 失败**不结束流水线**——验收会看到失败并决定重新执行还是重新规划，
-   所以一个红了的 worker 后面还会有新工序长出来，这是正常剧情不是错乱。
-4. **`PARTIAL` 一定要画出来，并且分清两种。** `verdict` 非空是「打回没修完」；
-   `verdict` 为空是「没审成」。混成一种，用户会把「审查发现了问题」误读成「审查没跑」。
-
-界面 → 服务端：
-
-```json
-{"t":"team","goal":"给配置模块加环境变量覆盖"}
-```
-
-`roles` 字段**已废弃**：分工由规划工序决定（它给每个任务派角色），不再点名。
-老界面传了会被忽略，不报错。
+老界面不受影响：它们看 `features` 决定画不画入口，没有 `team` 就切不进那个模式。
+节号保留，免得别处引用的 3.15、3.16 错位。
 
 ---
 
 ### 3.15 检查点与回退（feature: `rewind`，兼容 `undo`）
 
-形状照 Claude Code：**每条会动手的命令（`prompt` / `plan` / `team` / `continue`）开跑前**拍一个检查点，
+形状照 Claude Code：**每条会动手的命令（`prompt` / `plan` / `continue`）开跑前**拍一个检查点，
 绑在会话和那一刻的对话长度上；`/rewind` 可以只回代码、只回对话、或者都回。
 
 快照存在影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，只产生 tree 对象，
@@ -960,7 +897,7 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 ```
 
 - `kind`：`turn` 是一轮开跑前拍的；`tool` 是一次**会动手**的工具调用（写文件、bash、MCP 等，
-  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和计划、流水线的子任务都拍。
+  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和计划的子任务都拍。
   工具级的点如果和清单里上一个点的文件内容完全相同（比如中间只跑了测试），不进清单。
   老界面不认这个字段也无妨：清单照样能用，只是长了。`undo` 和 `id` 为 0 的 `rewind` 撤销的是**上一轮整轮**，不是上一步。
 - 回对话到工具级的点：记录截在「模型点了这个工具、结果还没回来」处，后端把没有结果的调用补成
@@ -980,7 +917,7 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 两个界面各自把「我刚说的那句」写进自己的转录，然后发一条 `prompt` 给后端——
 于是手机上说的话，终端里只会凭空冒出一段回答；反过来也一样。
 
-所以后端在接受 `prompt` / `plan` / `team` 时**广播一条 `user_message`**：
+所以后端在接受 `prompt` / `plan` 时**广播一条 `user_message`**：
 
 ```json
 {"t":"user_message","seq":42,"text":"把 README 补全","mode":"plan","cid":"a3f9"}
@@ -989,7 +926,7 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 | 字段 | 说明 |
 |---|---|
 | `text` | 用户原话 |
-| `mode` | `normal` / `plan` / `team`，这句话是按哪种方式跑的 |
+| `mode` | `normal` / `plan`，这句话是按哪种方式跑的 |
 | `cid` | **发起方的连接 id**（客户端连上时自己生成的随机串） |
 
 #### `cid` 是干什么的
@@ -1003,7 +940,7 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 持久化的话，客户端重启后会把自己以前说过的每一句话都当成「本地已经有了」而跳过，
 转录就缺一半，而且缺得毫无征兆。
 
-客户端发 `prompt` / `plan` / `team` 时带上自己的 `cid`；不带也能用，
+客户端发 `prompt` / `plan` 时带上自己的 `cid`；不带也能用，
 只是发起方会看到自己那句话显示两遍（一次本地、一次回显）。
 
 ---
@@ -1014,7 +951,6 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 |---|---|---|
 | `prompt` | `text` `cid?` | 普通一轮对话。`cid` 见 3.15 |
 | `plan` | `goal` `cid?` | 先规划后执行 |
-| `team` | `goal` | 开一条流水线（feature: `team`），见 3.14。`roles` 字段已废弃，传了会被忽略 |
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always`，`rules[]`（可选），`feedback`（可选） | 回应 `approval_request`。见 3.3 |
 | `cancel` | — | 中断当前这一轮 |
@@ -1080,7 +1016,6 @@ plan(scout 摸清现场、拆出任务) → workers 并行施工 → review(revi
 | 没有任何连接时需要确认 | 直接否决，不执行 | — |
 | `cancel` | 调度器不再开新任务、掐断正在跑的子循环和规划请求 | 正在跑的那个任务会变 `FAILED`，其余 `SKIPPED` |
 | 某个任务超时（默认 1 小时） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
-| 某道工序超时（默认 1 小时） | 按这道工序失败处理。worker 超时不结束流水线（验收会看到并决定怎么办）；第一轮拟方案超时→`FAILED`；验收超时→`PARTIAL` | 和失败一样显示 |
 | 并行工具调用整批超时（默认 60 秒） | 超时那个发 `tool_finished`（`ok:false`），其余照常收 | 那一行标失败，别继续转圈 |
 | 规划失败（模型连 3 次给不出可用计划） | 发 `failed`，带原因 | 照常显示错误 |
 | 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |

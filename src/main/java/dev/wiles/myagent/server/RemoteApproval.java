@@ -69,7 +69,7 @@ public final class RemoteApproval implements ApprovalPolicy {
      */
     private volatile Set<String> offered = Set.of();
 
-    /** 当前跑着的是谁。计划和流水线里由服务端在任务起止时更新。 */
+    /** 当前跑着的是谁。计划里由服务端在任务起止时更新。 */
     private volatile ApprovalOrigin origin = null;
 
     public RemoteApproval(Consumer<ObjectNode> publish, BooleanSupplier hasClients) {

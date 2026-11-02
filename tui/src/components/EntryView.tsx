@@ -92,16 +92,6 @@ export function EntryView(props: EntryViewProps) {
       <Match when={props.entry.kind === "plan" ? props.entry : null}>
         {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
       </Match>
-      <Match when={props.entry.kind === "team" ? props.entry : null}>
-        {(entry) => (
-          <TeamEntry
-            goal={entry().team.goal}
-            status={entry().team.status}
-            seats={entry().team.seats.length}
-            silent={entry().team.silent ?? 0}
-          />
-        )}
-      </Match>
     </Switch>
   )
 }
@@ -714,29 +704,6 @@ function CompactedEntry(props: { before: number; after: number; summarized: bool
     <box paddingTop={1}>
       <text fg={theme.subtle}>
         — {what()} {props.before} → {props.after} tokens（原文都在存档里） —
-      </text>
-    </box>
-  )
-}
-
-/**
- * 转录里的流水线痕迹。
- *
- * <p>和面板是分工：面板是当下那条线的活状态，这条是往回滚还能找到的历史。
- * <b>PARTIAL 要在这儿也标出来</b>——往回翻的时候，这行是判断那批改动
- * 有没有人担保过的唯一线索。
- */
-function TeamEntry(props: { goal: string; status: string; seats: number; silent: number }) {
-  const theme = useTheme()
-  const unvouched = () => props.status === "PARTIAL"
-  return (
-    <box flexDirection="column" paddingTop={1} border={["left"]} borderColor={theme.border} paddingLeft={1}>
-      <text fg={theme.heading} attributes={TextAttributes.BOLD}>
-        流水线：{props.goal}
-      </text>
-      <text fg={unvouched() ? theme.warning : theme.subtle}>
-        状态 {props.status} · {props.seats} 道工序
-        {unvouched() ? "（没过验收——改动还在，但没人担保）" : ""}
       </text>
     </box>
   )

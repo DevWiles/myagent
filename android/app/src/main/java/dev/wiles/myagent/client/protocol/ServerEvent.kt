@@ -42,14 +42,6 @@ data class PlanTaskWire(
     val dependsOn: List<String>,
 )
 
-data class TeamSeatWire(
-    val id: String,
-    val role: String,
-    val roleTitle: String,
-    val summary: String,
-    val status: String,
-)
-
 data class MemoryRow(
     val name: String,
     val description: String,
@@ -213,22 +205,6 @@ sealed interface ServerEvent {
 
     data class ModeSwitched(override val seq: Long?, val reason: String) : ServerEvent
 
-    data class TeamStarted(
-        override val seq: Long?, val goal: String, val reason: String, val seats: List<TeamSeatWire>,
-    ) : ServerEvent
-
-    data class TeamSeatsAdded(override val seq: Long?, val seats: List<TeamSeatWire>) : ServerEvent
-    data class TeamSeatStarted(override val seq: Long?, val seatId: String) : ServerEvent
-    data class TeamSeatFinished(
-        override val seq: Long?, val seatId: String, val status: String,
-        val durationMs: Long, val opinion: String?, val error: String?,
-    ) : ServerEvent
-
-    data class TeamFinished(
-        override val seq: Long?, val status: String, val spoke: Int,
-        val silent: Int, val verdict: String?,
-    ) : ServerEvent
-
     /** 断线重连时留底装不下，这一段永远补不回来了（协议 1.2）。 */
     data class ReplayGap(override val seq: Long?, val from: Long, val to: Long) : ServerEvent
 }
@@ -273,14 +249,6 @@ private fun planTask(o: JsonObject) = PlanTaskWire(
     status = o.str("status", "PENDING"),
     parentId = o.strOrNull("parentId"),
     dependsOn = o.strings("dependsOn"),
-)
-
-private fun teamSeat(o: JsonObject) = TeamSeatWire(
-    id = o.str("id"),
-    role = o.str("role"),
-    roleTitle = o.str("roleTitle"),
-    summary = o.str("summary"),
-    status = o.str("status", "PENDING"),
 )
 
 /**
@@ -431,21 +399,6 @@ fun parseServerEvent(raw: String): ServerEvent? {
         )
 
         "mode_switched" -> ServerEvent.ModeSwitched(seq, o.str("reason"))
-
-        "team_started" -> ServerEvent.TeamStarted(
-            seq, o.str("goal"), o.str("reason"), o.objects("seats").map { teamSeat(it) },
-        )
-
-        "team_seats_added" -> ServerEvent.TeamSeatsAdded(seq, o.objects("seats").map { teamSeat(it) })
-        "team_seat_started" -> ServerEvent.TeamSeatStarted(seq, o.str("seatId"))
-        "team_seat_finished" -> ServerEvent.TeamSeatFinished(
-            seq, o.str("seatId"), o.str("status"), o.long("durationMs"),
-            o.strOrNull("opinion"), o.strOrNull("error"),
-        )
-
-        "team_finished" -> ServerEvent.TeamFinished(
-            seq, o.str("status"), o.int("spoke"), o.int("silent"), o.strOrNull("verdict"),
-        )
 
         "replay_gap" -> ServerEvent.ReplayGap(seq, o.long("from"), o.long("to"))
 

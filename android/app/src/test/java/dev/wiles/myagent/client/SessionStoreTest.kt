@@ -111,21 +111,6 @@ class SessionStoreTest {
     }
 
     @Test
-    fun `流水线座位表长大而不是重建`() {
-        val s = store()
-        s.feed(
-            """{"t":"team_started","goal":"g","reason":"分工","seats":[
-                 {"id":"s1","role":"scout","roleTitle":"侦察","summary":"拟方案","status":"PENDING"}]}""",
-            """{"t":"team_seats_added","seats":[
-                 {"id":"s2","role":"coder","roleTitle":"编码","summary":"施工","status":"PENDING"}]}""",
-            """{"t":"team_seat_finished","seatId":"s1","role":"scout","status":"SUCCEEDED","durationMs":5,"opinion":"方案","error":null}""",
-        )
-        val team = (s.state.value.entries.single() as Entry.Team).team
-        assertEquals(listOf("s1", "s2"), team.seats.map { it.id })
-        assertEquals("方案", team.seats[0].opinion)
-    }
-
-    @Test
     fun `reset_done 清空转录并收掉 continue 入口`() {
         val s = store()
         s.feed(

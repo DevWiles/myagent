@@ -165,7 +165,6 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
             when (state.mode) {
                 Mode.NORMAL -> ClientCommand.prompt(text, cid)
                 Mode.PLAN -> ClientCommand.plan(text, cid)
-                Mode.TEAM -> ClientCommand.team(text, cid)
             },
         )
         draft = ""
@@ -415,7 +414,6 @@ private fun Composer(
                                     else -> when (state.mode) {
                                     Mode.NORMAL -> "说点什么…"
                                     Mode.PLAN -> "要规划的目标…"
-                                    Mode.TEAM -> "交给流水线的目标…"
                                     }
                                 },
                                 style = textStyle,
@@ -493,14 +491,12 @@ private fun SendButton(busy: Boolean, enabled: Boolean, onSubmit: () -> Unit, on
 private fun modeLabel(mode: Mode) = when (mode) {
     Mode.NORMAL -> "对话"
     Mode.PLAN -> "计划"
-    Mode.TEAM -> "流水线"
 }
 
 @Composable
 private fun modeColor(mode: Mode): Color = when (mode) {
     Mode.NORMAL -> AgentColors.skipped
     Mode.PLAN -> AgentColors.ok
-    Mode.TEAM -> MaterialTheme.colorScheme.tertiary
 }
 
 /** 模式胶囊：带色点，点开挑。没宣告的模式不进菜单（同 TUI：进得去一用就报错比切不进去更困惑） */
@@ -510,7 +506,6 @@ private fun ModePill(state: SessionState, onMode: (Mode) -> Unit) {
     val modes = buildList {
         add(Mode.NORMAL)
         if ("plan" in features) add(Mode.PLAN)
-        if ("team" in features) add(Mode.TEAM)
     }
     var open by remember { mutableStateOf(false) }
     val color = modeColor(state.mode)

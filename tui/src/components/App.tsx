@@ -38,7 +38,6 @@ import { CommandMenu } from "./CommandMenu.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
 import { PlanPanel } from "./PlanPanel.tsx"
-import { TeamPanel } from "./TeamPanel.tsx"
 import { ModeLine } from "./ModeLine.tsx"
 import { isNewlineKey, PromptInput } from "./PromptInput.tsx"
 import { SessionPicker } from "./SessionPicker.tsx"
@@ -110,14 +109,6 @@ export function App(props: AppProps) {
     if (!key) return null
     const entry = state().entries.find(item => item.key === key)
     return entry && entry.kind === "plan" ? entry.plan : null
-  }
-
-  /** 当前那条流水线。和计划面板一样从 transcript 里按 key 取，不另存一份。 */
-  const activeTeam = () => {
-    const key = state().activeTeamKey
-    if (!key) return null
-    const entry = state().entries.find(item => item.key === key)
-    return entry && entry.kind === "team" ? entry.team : null
   }
 
   /**
@@ -298,11 +289,6 @@ export function App(props: AppProps) {
     switch (state().mode) {
       case "plan":
         session.plan(text)
-        return
-      case "team":
-        // 不再从输入里拆角色点名：分工由规划工序决定（协议里 roles 已废弃），
-        // 整句话原样就是目标——开头的「operator」现在是目标的一部分，不是指令
-        session.team(text, [])
         return
       default:
         session.prompt(text)
@@ -930,15 +916,6 @@ export function App(props: AppProps) {
                 columns={dimensions().width - 2}
                 maxRows={planRows()}
               />
-            </box>
-          )}
-        </Show>
-
-        {/* 流水线面板，和计划面板同一个位置——两者不会同时出现（后端一次只跑一件事） */}
-        <Show when={activeTeam()}>
-          {(team) => (
-            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <TeamPanel team={team()} columns={dimensions().width - 2} />
             </box>
           )}
         </Show>

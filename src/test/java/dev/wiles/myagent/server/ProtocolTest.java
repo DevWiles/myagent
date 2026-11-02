@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.plan.AgentRoles;
-import dev.wiles.myagent.team.TeamResult;
-import dev.wiles.myagent.team.TeamStatus;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.plan.TaskGraph;
@@ -276,9 +274,9 @@ class ProtocolTest {
         assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("auto_mode"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("team"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("events_resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
+        assertFalse(Protocol.FEATURES.contains("team"), "流水线已经撤了，再宣告界面会画出一个点了没反应的模式");
     }
 
     @Test
@@ -304,119 +302,6 @@ class ProtocolTest {
         assertEquals("verifier", started.get("role").asText());
         assertEquals("验证", started.get("roleTitle").asText());
         assertEquals("VERIFICATION", started.get("taskType").asText());
-    }
-
-    // ── 流水线 ──────────────────────────────────────────────────
-
-    @Test
-    @DisplayName("开场那帧带三道工序和分工理由——这是花钱之前用户唯一一眼")
-    void teamStartedCarriesTheStages() {
-        Task plan = new Task("plan", "拟定施工方案: 修配置", AgentRoles.SCOUT, List.of(), "有序步骤");
-        Task work = new Task("work", "按方案施工: 修配置", AgentRoles.CODER, List.of("plan"), "施工报告");
-        Task review = new Task("review", "验收这次施工: 修配置", AgentRoles.REVIEWER,
-                List.of("plan", "work"), "末行通过或打回");
-
-        ObjectNode n = Protocol.encodeTeamStarted("修配置", "探路拟方案 → 编码施工 → 审查验收",
-                List.of(plan, work, review));
-
-        assertEquals("team_started", n.get("t").asText());
-        assertEquals("修配置", n.get("goal").asText());
-        assertEquals("探路拟方案 → 编码施工 → 审查验收", n.get("reason").asText());
-        assertEquals(3, n.get("seats").size());
-        // id 取任务自己的，后续 team_seat_started 报的是同一批——界面按它对行
-        assertEquals("plan", n.get("seats").get(0).get("id").asText());
-        assertEquals("scout", n.get("seats").get(0).get("role").asText());
-        assertEquals("work", n.get("seats").get(1).get("id").asText());
-        assertEquals("review", n.get("seats").get(2).get("id").asText());
-    }
-
-    @Test
-    @DisplayName("一道工序落定带上正文和状态，界面才能折叠、回看")
-    void stageFinishedCarriesTheOutput() {
-        Task stage = new Task("review", "验收这次施工", AgentRoles.REVIEWER, List.of(), "末行结论");
-        stage.start();
-        stage.succeed("发现 3 处问题\n打回");
-
-        ObjectNode n = Protocol.encodeStageFinished(stage);
-
-        assertEquals("team_seat_finished", n.get("t").asText());
-        assertEquals("review", n.get("seatId").asText());
-        assertEquals("SUCCEEDED", n.get("status").asText());
-        assertEquals("发现 3 处问题\n打回", n.get("opinion").asText());
-        assertTrue(n.get("error").isNull());
-    }
-
-    @Test
-    @DisplayName("倒了的工序也发结束帧，带上原因——不然界面上它永远转圈")
-    void failedStageStillReportsWhy() {
-        Task stage = new Task("work", "按方案施工", AgentRoles.CODER, List.of(), "施工报告");
-        stage.start();
-        stage.fail("写文件被拒绝");
-
-        ObjectNode n = Protocol.encodeStageFinished(stage);
-
-        assertEquals("FAILED", n.get("status").asText());
-        assertEquals("写文件被拒绝", n.get("error").asText());
-        assertTrue(n.get("opinion").isNull());
-    }
-
-    @Test
-    @DisplayName("座位表长大的那帧和开场帧长一个样，界面追加即可")
-    void seatsAddedSharesTheSeatShape() {
-        Task worker = new Task("t1", "改配置读取", AgentRoles.CODER, List.of(), "读到环境变量");
-
-        ObjectNode n = Protocol.encodeStagesAdded(List.of(worker));
-
-        assertEquals("team_seats_added", n.get("t").asText());
-        assertEquals(1, n.get("seats").size());
-        assertEquals("t1", n.get("seats").get(0).get("id").asText());
-        assertEquals("coder", n.get("seats").get(0).get("role").asText());
-        assertEquals("PENDING", n.get("seats").get(0).get("status").asText());
-    }
-
-    @Test
-    @DisplayName("收工帧：打回是 PARTIAL 且问题清单在 verdict 里——那是最值钱的一份产出")
-    void teamFinishedCarriesTheRejectionList() {
-        Task plan = new Task("plan", "拟定施工方案", AgentRoles.SCOUT, List.of(), "步骤");
-        plan.start();
-        plan.succeed("方案");
-        Task work = new Task("t1", "改配置读取", AgentRoles.CODER, List.of("plan"), "报告");
-        work.start();
-        work.succeed("改了两处");
-        Task review = new Task("review", "验收第 1 轮施工", AgentRoles.REVIEWER,
-                List.of(), "末行结论");
-        review.start();
-        review.succeed("漏了空值判断\n重新执行");
-
-        ObjectNode n = Protocol.encodeTeamFinished(new TeamResult("修配置", "拟方案→施工→验收",
-                List.of(plan, work, review), review, 3, TeamStatus.PARTIAL));
-
-        assertEquals("PARTIAL", n.get("status").asText());
-        assertEquals(3, n.get("spoke").asInt());
-        assertEquals(0, n.get("silent").asInt());
-        assertEquals(3, n.get("rounds").asInt());
-        assertEquals("漏了空值判断\n重新执行", n.get("verdict").asText());
-    }
-
-    @Test
-    @DisplayName("验收自己没跑成的 PARTIAL：verdict 是 null——没有结论就别发一句假结论")
-    void unreviewedPartialHasNoVerdict() {
-        Task plan = new Task("plan", "拟定施工方案", AgentRoles.SCOUT, List.of(), "步骤");
-        plan.start();
-        plan.succeed("方案");
-        Task work = new Task("t1", "改配置读取", AgentRoles.CODER, List.of("plan"), "报告");
-        work.start();
-        work.succeed("改了两处");
-        Task review = new Task("review", "验收第 1 轮施工", AgentRoles.REVIEWER,
-                List.of(), "末行结论");
-        review.start();
-        review.fail("超时");
-
-        ObjectNode n = Protocol.encodeTeamFinished(new TeamResult("修配置", "拟方案→施工→验收",
-                List.of(plan, work, review), review, 1, TeamStatus.PARTIAL));
-
-        assertEquals("PARTIAL", n.get("status").asText());
-        assertTrue(n.get("verdict").isNull());
     }
 
     @Test

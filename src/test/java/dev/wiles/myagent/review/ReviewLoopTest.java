@@ -1,4 +1,4 @@
-package dev.wiles.myagent.team;
+package dev.wiles.myagent.review;
 
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Task;
@@ -227,5 +227,22 @@ class ReviewLoopTest {
         holder[0].run(main, "修 a.py");
 
         assertEquals(1, main.inputs.size(), "按停之后不再开新的一轮修改");
+    }
+
+    @Test
+    @DisplayName("结论只看最后一行：过程里提过「重新执行」不算，老用词也认")
+    void verdictReadsOnlyTheLastLine() {
+        assertTrue(ReviewLoop.passed("我一度想要求重新执行，但细看没问题\n通过"));
+        assertFalse(ReviewLoop.passed("a.py 第 3 行漏了边界\n重新执行"));
+        assertFalse(ReviewLoop.passed("打回"), "上一版提示词的用词也认");
+        assertTrue(ReviewLoop.passed(""), "没给结论不该把做完的活判成失败");
+    }
+
+    @Test
+    @DisplayName("测试成绩取最后一次出现的那行，没报就是 null")
+    void parsesTestScore() {
+        assertArrayEquals(new int[]{133, 202},
+                ReviewLoop.testScoreOf("先跑了一半 测试: 通过 10 / 共 202\n全跑完\n测试：通过 133/共 202\n重新执行"));
+        assertNull(ReviewLoop.testScoreOf("没跑测试\n通过"));
     }
 }

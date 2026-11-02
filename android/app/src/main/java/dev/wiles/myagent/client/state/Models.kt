@@ -51,31 +51,6 @@ data class PlanData(
     val summary: PlanSummary? = null,
 )
 
-data class TeamSeat(
-    val id: String,
-    val role: String,
-    val roleTitle: String,
-    val summary: String,
-    val status: String,
-    /** 这道工序的定稿。流式那份混在一起，这份归到它名下 */
-    val opinion: String? = null,
-    val error: String? = null,
-    val durationMs: Long? = null,
-)
-
-data class TeamData(
-    val goal: String,
-    /** 分工说明。花钱之前用户唯一一眼，要显眼 */
-    val reason: String,
-    val seats: List<TeamSeat>,
-    /** CREATED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED */
-    val status: String,
-    /** PARTIAL 时非空是打回没修完（问题清单在里面），为空是验收没跑成——必须分开画 */
-    val verdict: String? = null,
-    val spoke: Int? = null,
-    val silent: Int? = null,
-)
-
 sealed interface Entry {
     val key: String
 
@@ -97,7 +72,6 @@ sealed interface Entry {
 
     data class Memory(override val key: String, val rows: List<MemoryRow>) : Entry
     data class Plan(override val key: String, val plan: PlanData) : Entry
-    data class Team(override val key: String, val team: TeamData) : Entry
 }
 
 data class Approval(
@@ -131,7 +105,7 @@ data class ReadyInfo(
 )
 
 /** 下一句话按什么方式跑。跨轮保持——模式是用户表过的态（同 TUI）。 */
-enum class Mode { NORMAL, PLAN, TEAM }
+enum class Mode { NORMAL, PLAN }
 
 /** 连接生命周期。手机和终端不同：断了不等于结束，automatic 重连是常态。 */
 enum class Link { CONNECTING, CONNECTED, RECONNECTING, CLOSED }

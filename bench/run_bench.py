@@ -5,7 +5,7 @@
   python3 bench/run_bench.py --agent myagent --mode react [--tasks a,b] [--label L] [--timeout 3600]
   python3 bench/run_bench.py --agent claude                 # Claude Code 无头模式，接同一个 DeepSeek 模型
 agent：myagent（WebSocket 协议驱动）/ claude（`claude -p` + stream-json）
-mode（仅 myagent）：react / react+review（单写者 + 收尾独立审查）/ prompt / plan / team
+mode（仅 myagent）：react / react+review（单写者 + 收尾独立审查）/ prompt / plan
 结果：bench/results/<label>/<task>.json + summary.json；沙盒镜像 myagent-sandbox:v2（非 root 用户 bench）。
 """
 import argparse
@@ -105,7 +105,7 @@ def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
     if not ready.get("hasApiKey"):
         raise RuntimeError("no api key in sandbox")
     ws.send(json.dumps({"t": "prompt", "text": prompt} if mode in ("prompt", "react", "react+review") else
-                       {"t": "plan", "goal": prompt} if mode == "plan" else {"t": "team", "goal": prompt}))
+                       {"t": "plan", "goal": prompt}))
     t0 = time.time()
     deadline = t0 + timeout
     approvals = tools_n = writes = steps = 0
@@ -156,7 +156,7 @@ def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
             text.append(ev.get("text", ""))
         elif t == "plan_created":
             rec["plan_tasks"] = len(ev.get("tasks") or [])
-        elif t in ("done", "failed", "plan_finished", "team_finished", "mode_switched"):
+        elif t in ("done", "failed", "plan_finished", "mode_switched"):
             rec.setdefault("terminal_events", []).append({k: v for k, v in ev.items() if k in ("t", "status", "reason", "steps", "succeeded", "failed", "skipped", "replans", "rounds", "mode")})
         elif t == "busy" and ev.get("busy") is False:
             final = ev
@@ -304,7 +304,7 @@ def run_task(task, meta, agent, mode, label, timeout, results_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", choices=["myagent", "claude"], default="myagent")
-    ap.add_argument("--mode", choices=["react", "react+review", "prompt", "plan", "team"], default="react")
+    ap.add_argument("--mode", choices=["react", "react+review", "prompt", "plan"], default="react")
     ap.add_argument("--label", default=None)
     ap.add_argument("--tasks", default="")
     ap.add_argument("--only-source", default="", help="hand / exercism")

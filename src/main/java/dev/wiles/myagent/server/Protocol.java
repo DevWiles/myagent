@@ -9,7 +9,6 @@ import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
-import dev.wiles.myagent.team.TeamResult;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -69,7 +68,7 @@ public final class Protocol {
      */
     public static final List<String> FEATURES =
             List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
-                    "session", "sessions", "compact", "memory", "roles", "team",
+                    "session", "sessions", "compact", "memory", "roles",
                     "events_resume", "user_echo", "undo", "rewind");
 
     /**
@@ -130,7 +129,7 @@ public final class Protocol {
     /**
      * 把一个 agent 事件翻成线上报文，标上这是哪个任务的动静。
      *
-     * <p>{@code taskId} 是计划/流水线里发这个事件的任务（工序）号，主对话传 null。
+     * <p>{@code taskId} 是计划里发这个事件的任务号，主对话传 null。
      * 并行的任务各自在发事件，不标出处的话，界面上「正在读 pom.xml」和
      * 「正在读 README」会被当成同一条线上的先后两步。老界面不认识这个字段，
      * 忽略即可（见 docs/protocol.md 第 2 节），所以不升协议版本。
@@ -322,89 +321,6 @@ public final class Protocol {
         n.put("failedTaskId", failed.id());
         ArrayNode tasks = n.putArray("tasks");
         recovery.forEach(task -> tasks.add(encodeTask(task)));
-        return n;
-    }
-
-    // ── 流水线 ────────────────────────────────────────────────────
-
-    /**
-     * 流水线开场。<b>这一帧要在第一次子循环开跑之前发出去</b>——每道工序都是一次
-     * 完整的子循环，用户得先看见这笔钱怎么花。此刻座位表上只有规划那一道工序——
-     * worker 有几个、派谁，要等规划跑完才知道，届时走 {@link #encodeStagesAdded}。
-     *
-     * <p>帧名和字段沿用圆桌时期的 {@code seats}——换名就是破坏性改动，语义变了名字不动
-     * （见 docs/protocol.md 3.14）。id 直接取任务自己的（plan/t1/review…），
-     * 后续 {@code team_seat_started} 报的必须是同一批 id，界面按它对行。
-     */
-    public static ObjectNode encodeTeamStarted(String goal, String reason, List<Task> stages) {
-        ObjectNode n = event("team_started");
-        n.put("goal", goal);
-        n.put("reason", reason);
-        encodeSeats(n.putArray("seats"), stages);
-        return n;
-    }
-
-    /**
-     * 座位表长大了：规划拆出的 workers、每轮的验收、返工/重拟长出的新工序。
-     * 界面按执行顺序追加到已有座位表末尾即可。
-     */
-    public static ObjectNode encodeStagesAdded(List<Task> stages) {
-        ObjectNode n = event("team_seats_added");
-        encodeSeats(n.putArray("seats"), stages);
-        return n;
-    }
-
-    private static void encodeSeats(ArrayNode seats, List<Task> stages) {
-        for (Task stage : stages) {
-            seats.addObject()
-                    .put("id", stage.id())
-                    .put("role", stage.role().id())
-                    .put("roleTitle", stage.role().title())
-                    .put("summary", stage.role().summary())
-                    .put("status", "PENDING");
-        }
-    }
-
-    public static ObjectNode encodeStageStarted(Task stage) {
-        return event("team_seat_started")
-                .put("seatId", stage.id())
-                .put("role", stage.role().id())
-                .put("roleTitle", stage.role().title());
-    }
-
-    /**
-     * 一道工序落定。<b>倒了的、被跳过的也走这条</b>——界面上那一道要是没有终态，
-     * 它会一直转圈。
-     *
-     * <p>{@code opinion} 是这道工序的正文。界面其实已经通过流式文本收到过一遍了，
-     * 但那是<b>混在一起的流</b>；这里给的是归到这道工序名下的定稿，
-     * 界面要折叠、要回看，靠的都是它。
-     */
-    public static ObjectNode encodeStageFinished(Task stage) {
-        return event("team_seat_finished")
-                .put("seatId", stage.id())
-                .put("role", stage.role().id())
-                .put("status", stage.status().name())
-                .put("durationMs", stage.durationMillis())
-                .put("opinion", stage.result())
-                .put("error", stage.error());
-    }
-
-    /**
-     * 收工。
-     *
-     * <p>{@code status} 里 {@code PARTIAL} 那一档界面<b>必须画出来</b>，而且要分清两种：
-     * {@code verdict} 非空是验收打回（问题清单就在里面），为空是验收没跑成——
-     * 两种都意味着工作区里有一批没人担保的改动。
-     */
-    public static ObjectNode encodeTeamFinished(TeamResult result) {
-        ObjectNode n = event("team_finished");
-        n.put("status", result.status().name());
-        n.put("spoke", result.spoke());
-        n.put("silent", result.silent());
-        n.put("verdict", result.verdict());
-        // 新增字段不升协议版本：老界面照约定忽略不认识的字段
-        n.put("rounds", result.rounds());
         return n;
     }
 

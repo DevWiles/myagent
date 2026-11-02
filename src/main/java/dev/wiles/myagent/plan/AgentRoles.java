@@ -124,7 +124,7 @@ public final class AgentRoles {
             List.of(SCOUT, EXPLORER, REVIEWER, CODER, OPERATOR, BROWSER, ANALYST, VERIFIER);
 
     /**
-     * 流水线末端的验收席。<b>不在 {@link #ALL} 里</b>：它是流水线自己的工序，
+     * 收尾审查的审查方（{@code ReviewLoop}）。<b>不在 {@link #ALL} 里</b>：它是审查回路自己的工序，
      * 规划器不该把它派成一个子任务（那等于让工人自己给自己验收）。
      * 但 {@link #find}/{@link #require} 认它——存档里带着 acceptor 的任务要能恢复。
      *
@@ -134,7 +134,7 @@ public final class AgentRoles {
      */
     public static final AgentRole ACCEPTOR = new AgentRole(
             "acceptor", "验收",
-            "流水线末端：对着目标原话和改动清单逐条核对，能跑的都跑一遍，给出通过 / 重新执行 / 重新规划",
+            "收尾审查：对着目标原话和改动 diff 逐条核对，能跑的都跑一遍，给出通过 / 重新执行",
             TaskType.VERIFICATION, List.of("read_file", "list_dir", "grep", "glob", "bash"),
             16, true, false);
 

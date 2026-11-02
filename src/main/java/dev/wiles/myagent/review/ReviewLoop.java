@@ -1,4 +1,4 @@
-package dev.wiles.myagent.team;
+package dev.wiles.myagent.review;
 
 import dev.wiles.myagent.agent.AgentEvent;
 import dev.wiles.myagent.llm.LlmClient;
@@ -50,8 +50,8 @@ public final class ReviewLoop {
     /** 最多审几轮。2 = 审、修、再审：修过的东西一定再被审一次，不留没人看过的改动。 */
     public static final int MAX_REVIEWS = 2;
 
-    /** 审查方的步数。和流水线验收席同一个数：跑全量测试 + 每条要求写探针 + 读 diff，给少了撞上限就白审。 */
-    public static final int REVIEW_STEPS = Pipeline.REVIEW_STEPS;
+    /** 审查方的步数：跑全量测试 + 每条要求写探针 + 读 diff，给少了撞上限就白审。 */
+    public static final int REVIEW_STEPS = 28;
 
     /** diff 太长就截断：审查方要的是看到改了什么，不是逐字读一个几万行的生成文件。 */
     static final int MAX_DIFF_CHARS = 40_000;
@@ -142,8 +142,8 @@ public final class ReviewLoop {
                     break;              // 没改文件：问答、只读调研，没有可审的
                 }
                 Task task = new Task(round == 1 ? "final-review" : "final-review" + round,
-                        TeamPrompt.finalReviewBrief(round, diff, text), AgentRoles.ACCEPTOR,
-                        List.of(), TeamPrompt.finalReviewAcceptance(REVIEW_STEPS));
+                        ReviewPrompt.finalReviewBrief(round, diff, text), AgentRoles.ACCEPTOR,
+                        List.of(), ReviewPrompt.finalReviewAcceptance(REVIEW_STEPS));
                 task.start();
                 TaskOutcome outcome = runReviewer(task, userInput);
                 if (!outcome.ok()) {
@@ -153,9 +153,9 @@ public final class ReviewLoop {
                     break;
                 }
                 String review = outcome.output();
-                int[] score = Pipeline.testScoreOf(review);
-                Pipeline.Verdict verdict = Pipeline.verdictOf(review);
-                verdicts.add(verdict == Pipeline.Verdict.PASS ? "通过" : "重新执行");
+                int[] score = testScoreOf(review);
+                boolean passed = passed(review);
+                verdicts.add(passed ? "通过" : "重新执行");
                 scores.add(score == null ? "-" : score[0] + "/" + score[1]);
 
                 if (guard != null && guard.regressed(round, score)) {
@@ -163,7 +163,7 @@ public final class ReviewLoop {
                     text = text + "\n\n（按审查意见修改后测试通过数变少了，工作区已退回修改之前的状态。）";
                     break;
                 }
-                if (cancelled || verdict == Pipeline.Verdict.PASS || round == MAX_REVIEWS) {
+                if (cancelled || passed || round == MAX_REVIEWS) {
                     break;              // 按了停；通过了；或者轮次用完——最后这次修改已经被审过了
                 }
                 text = main.run(feedback(review));
@@ -222,5 +222,36 @@ public final class ReviewLoop {
         } catch (IOException | RuntimeException e) {
             log.debug("收尾审查的临时影子仓库没删掉: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 审查通过了没有。只看最后一行非空文本：模型很爱在过程里写「上一版该重新执行」这种话，
+     * 整段搜必然误判。「打回」「重新规划」是早先提示词的用词，模型语感里还留着，一并算没过；
+     * 三个词都没有按通过算——审查没给结论，不该把做完的活判成失败。
+     */
+    static boolean passed(String review) {
+        if (review == null || review.isBlank()) {
+            return true;
+        }
+        String[] lines = review.strip().split("\\R");
+        String last = lines[lines.length - 1];
+        return !(last.contains("重新执行") || last.contains("打回") || last.contains("重新规划"));
+    }
+
+    /**
+     * 审查报的测试成绩：{@code 测试: 通过 133 / 共 202}。取最后一次出现的那行；
+     * 没报（项目没有测试、或者模型漏写）返回 null，那一轮就不参与保底比较。
+     */
+    static int[] testScoreOf(String text) {
+        if (text == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("测试\\s*[:：]\\s*通过\\s*(\\d+)\\s*/\\s*共\\s*(\\d+)").matcher(text);
+        int[] score = null;
+        while (m.find()) {
+            score = new int[]{Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2))};
+        }
+        return score;
     }
 }

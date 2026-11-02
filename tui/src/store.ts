@@ -53,40 +53,6 @@ export type PlanTask = {
   error?: string
 }
 
-/** 流水线上的一道工序 + 它的进度（类型名 seat 是圆桌时期留下的，跟着协议走）。 */
-export type TeamSeat = {
-  id: string
-  role: string
-  roleTitle: string
-  summary: string
-  /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
-  status: string
-  /** 这道工序的定稿。流式那份是混在一起的，这份是归到它名下的 */
-  opinion?: string
-  error?: string
-  durationMs?: number
-}
-
-/**
- * 一条流水线的完整状态，和计划一样作为一条 entry 活在 transcript 里。
- *
- * <p>`status` 里 **PARTIAL 必须画出来，而且分两种**：`verdict` 非空是验收打回
- * （问题清单就在里面），为空是验收没跑成——两种都意味着工作区里有一批
- * 没人担保的改动，混成一种用户会把「发现了问题」误读成「审查没跑」。
- */
-export type TeamData = {
-  goal: string
-  /** 分工是什么样。花钱之前用户唯一一眼，要显眼 */
-  reason: string
-  seats: TeamSeat[]
-  /** CREATED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED */
-  status: string
-  /** 验收结论正文。取消、失败、验收没跑成时没有——没有结论就别画一个出来 */
-  verdict?: string
-  spoke?: number
-  silent?: number
-}
-
 export type PlanSummary = {
   succeeded: number
   failed: number
@@ -122,7 +88,6 @@ export type Entry =
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
   | { kind: 'memory'; key: string; rows: MemoryRow[] }
   | { kind: 'plan'; key: string; plan: PlanData }
-  | { kind: 'team'; key: string; team: TeamData }
 
 export type Approval = {
   id: number
@@ -144,15 +109,15 @@ export type Approval = {
 /**
  * 下一句话按什么方式跑。
  *
- * <p>这是 `/plan`、`/team` 两条斜杠命令的替代品：**同一句话，模式决定它怎么被处理**，
+ * <p>这是原来 `/plan` 这类斜杠命令的替代品：**同一句话，模式决定它怎么被处理**，
  * 而不是让用户在每句话前面手打一个命令名。好处不只是少敲几个字——
  * 模式是**看得见的状态**（左下角常驻一行），敲命令是转瞬即逝的动作，
  * 用户不必记住「我刚才有没有加 /plan」。
  */
-export type Mode = 'normal' | 'plan' | 'team'
+export type Mode = 'normal' | 'plan'
 
 /** 切换顺序。normal 打头：最常用的排第一，Shift+Tab 一圈回到它。 */
-export const MODE_CYCLE: readonly Mode[] = ['normal', 'plan', 'team']
+export const MODE_CYCLE: readonly Mode[] = ['normal', 'plan']
 
 /**
  * 这个模式要后端宣告哪个能力。normal 谁都能跑，所以是 null。
@@ -163,7 +128,6 @@ export const MODE_CYCLE: readonly Mode[] = ['normal', 'plan', 'team']
 const MODE_FEATURE: Record<Mode, string | null> = {
   normal: null,
   plan: 'plan',
-  team: 'team',
 }
 
 export function modeIsAvailable(mode: Mode, features: readonly string[]): boolean {
@@ -274,8 +238,6 @@ export type SessionState = {
    */
   mode: Mode
   activePlanKey: string | null
-  /** 当前流水线面板的 key。和计划一样，用户说下一句话时让位 */
-  activeTeamKey: string | null
   tokens: number
   /** 累计真正发出去的提示词。只增不减，压缩不会让它变小。 */
   sentTokens: number
@@ -333,8 +295,7 @@ const EMPTY_STATE: SessionState = {
   planConfirm: null,
   mode: 'normal',
   activePlanKey: null,
-  activeTeamKey: null,
-  tokens: 0,
+    tokens: 0,
   sentTokens: 0,
   contextLimit: 0,
   lastDurationMs: null,
@@ -455,28 +416,6 @@ export class SessionStore {
     })
   }
 
-  /** 当前流水线面板的 key。和 planKey 一个道理：面板多半不在队尾。 */
-  private teamKey: string | null = null
-
-  private updateTeam(update: (team: TeamData) => TeamData): void {
-    const key = this.teamKey
-    if (!key) return
-    this.set({
-      entries: this.state.entries.map(entry =>
-        entry.kind === 'team' && entry.key === key
-          ? { ...entry, team: update(entry.team) }
-          : entry,
-      ),
-    })
-  }
-
-  private patchSeat(seatId: string, patch: Partial<TeamSeat>): void {
-    this.updateTeam(team => ({
-      ...team,
-      seats: team.seats.map(seat => (seat.id === seatId ? { ...seat, ...patch } : seat)),
-    }))
-  }
-
   private patchTask(taskId: string, patch: Partial<PlanTask>): void {
     this.updatePlan(plan => ({
       ...plan,
@@ -503,8 +442,7 @@ export class SessionStore {
       startedAt: Date.now(),
       // 说下一句了，底部那块面板该让位——上一份的痕迹在 transcript 里还留着
       activePlanKey: null,
-      activeTeamKey: null,
-    })
+          })
   }
 
   /** 去掉「上次有计划没跑完」那条，其余 ready 信息原样保留。 */
@@ -1050,71 +988,6 @@ export class SessionStore {
         })
         return
       }
-
-      case 'team_started': {
-        const key = this.nextKey('team')
-        this.teamKey = key
-        this.set({ activeTeamKey: key })
-        this.append({
-          kind: 'team',
-          key,
-          team: {
-            goal: event.goal,
-            reason: event.reason,
-            seats: event.seats.map(seat => ({
-              id: seat.id,
-              role: seat.role,
-              roleTitle: seat.roleTitle,
-              summary: seat.summary,
-              status: seat.status,
-            })),
-            status: 'CREATED',
-          },
-        })
-        return
-      }
-
-      case 'team_seats_added':
-        // 座位表长大了（规划拆出 workers、返工/重拟长出新工序）。
-        // 后端按执行顺序发，追加就是正确的顺序
-        this.updateTeam(team => ({
-          ...team,
-          seats: [
-            ...team.seats,
-            ...event.seats.map(seat => ({
-              id: seat.id,
-              role: seat.role,
-              roleTitle: seat.roleTitle,
-              summary: seat.summary,
-              status: seat.status,
-            })),
-          ],
-        }))
-        return
-
-      case 'team_seat_started':
-        this.updateTeam(team => ({ ...team, status: 'RUNNING' }))
-        this.patchSeat(event.seatId, { status: 'RUNNING' })
-        return
-
-      case 'team_seat_finished':
-        this.patchSeat(event.seatId, {
-          status: event.status,
-          opinion: event.opinion ?? undefined,
-          error: event.error ?? undefined,
-          durationMs: event.durationMs,
-        })
-        return
-
-      case 'team_finished':
-        this.updateTeam(team => ({
-          ...team,
-          status: event.status,
-          verdict: event.verdict ?? undefined,
-          spoke: event.spoke,
-          silent: event.silent,
-        }))
-        return
 
       case 'plan_confirm_request':
         this.set({ planConfirm: { id: event.id, choice: 0 } })

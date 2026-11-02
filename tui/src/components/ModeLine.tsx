@@ -5,9 +5,9 @@ import type { Mode } from "../store.ts"
  * 状态栏底下那一行：<b>下一句话会怎么跑</b>。
  *
  * <h3>为什么它必须常驻，哪怕在 normal 下</h3>
- * 这一行是 `/plan`、`/team` 两条命令删掉之后<b>唯一</b>还能告诉用户
+ * 这一行是 `/plan` 命令删掉之后<b>唯一</b>还能告诉用户
  * 「还有别的模式」的地方。只在非 normal 时才显示的话，新用户永远不会知道
- * Shift+Tab 能干什么——而那两条命令已经不在菜单里了，他也无从发现。
+ * Shift+Tab 能干什么——而那条命令已经不在菜单里了，他也无从发现。
  *
  * <p>所以 normal 那行画得很淡（`inactive`），存在感低到不碍事，但一直在。
  *
@@ -22,7 +22,6 @@ type Descriptor = { label: string; hint: string; marker: string }
 const MODES: Record<Mode, Descriptor> = {
   normal: { label: "normal", hint: "直接对话", marker: "·" },
   plan: { label: "plan", hint: "先拆计划，确认后逐个跑", marker: "⏵⏵" },
-  team: { label: "team", hint: "拟方案 → 施工 → 验收", marker: "⏵⏵" },
 }
 
 export function ModeLine(props: { mode: Mode; columns: number }) {
@@ -32,8 +31,6 @@ export function ModeLine(props: { mode: Mode; columns: number }) {
     switch (props.mode) {
       case "plan":
         return theme.brand
-      case "team":
-        return theme.thought
       default:
         return theme.inactive
     }

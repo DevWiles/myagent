@@ -23,11 +23,6 @@ export type Session = {
   prompt: (text: string) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string) => void
-  /**
-   * 开一条流水线：拟方案 → 并行施工 → 验收，打回可重新执行或重新规划。
-   * 后端没宣告 team 能力时不要调。`roles` 已废弃，一律传空数组。
-   */
-  team: (goal: string, roles: string[]) => void
   /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */
   cycleMode: () => void
   /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
@@ -256,10 +251,6 @@ export function createSession(options: BackendOptions): Session {
       // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
       store.submitPrompt(goal)
       send({ t: "plan", goal, cid: store.clientId })
-    },
-    team(goal, roles) {
-      store.submitPrompt(roles.length === 0 ? goal : `${roles.join(" ")} ${goal}`)
-      send({ t: "team", goal, cid: store.clientId, ...(roles.length > 0 ? { roles } : {}) })
     },
     cycleMode() {
       store.cycleMode()

@@ -20,13 +20,14 @@ class TaskPromptTest {
     }
 
     @Test
-    @DisplayName("验收席的收尾契约是三选一，措辞和 Pipeline.verdictOf 认的词一致")
-    void acceptorContractIsThreeWay() {
+    @DisplayName("审查方的收尾契约是二选一，措辞和 ReviewLoop.passed 认的词一致")
+    void acceptorContractIsTwoWay() {
         Task review = new Task("review", "验收", AgentRoles.ACCEPTOR, List.of(), "查完");
 
         String system = TaskPrompt.system(review, java.nio.file.Path.of("."));
 
-        assertTrue(system.contains("通过") && system.contains("重新执行") && system.contains("重新规划"), system);
+        assertTrue(system.contains("通过") && system.contains("重新执行"), system);
+        assertFalse(system.contains("重新规划"), "重新规划没人接了，不能再让模型写");
         assertFalse(system.contains(TaskPrompt.DONE_YES), "不能同时要求「完成: 是」，两套收尾会打架");
     }
 
@@ -217,7 +218,7 @@ class TaskPromptTest {
     }
 
     @Test
-    @DisplayName("没有交底时一个字都不多：老调用方、流水线行为不变")
+    @DisplayName("没有交底时一个字都不多：老调用方行为不变")
     void emptyBriefAddsNothing() {
         Task task = new Task("n1", "读一下 pom.xml", TaskType.FILE_READ, List.of());
 

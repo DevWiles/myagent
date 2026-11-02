@@ -44,7 +44,7 @@ public record CliOptions(
         boolean relayServe,
         /** 无头单次运行：提示词文件路径（"-" 读 stdin）。null 表示不是这个模式。 */
         String once,
-        /** 单次运行用哪种方式：react（默认）或 team。 */
+        /** 单次运行用哪种方式：react（默认）或 react+review。 */
         String onceMode,
         /** 单次运行的结果摘要（JSON）写到哪；null 就打到 stderr。 */
         String onceOut,

@@ -52,18 +52,20 @@ class CliTest {
     }
 
     @Test
-    @DisplayName("--once 一族：提示词文件、方式、摘要文件、步数；方式只认 react/team")
+    @DisplayName("--once 一族：提示词文件、方式、摘要文件、步数；方式只认 react/react+review")
     void onceFlags() {
-        CliOptions o = Cli.parse(new String[]{"--once", "p.txt", "--once-mode", "team",
+        CliOptions o = Cli.parse(new String[]{"--once", "p.txt", "--once-mode", "react+review",
                 "--once-out", "s.json", "--max-steps", "40", "-d", "/w"});
         assertEquals("p.txt", o.once());
-        assertEquals("team", o.onceMode());
+        assertEquals("react+review", o.onceMode());
         assertEquals("s.json", o.onceOut());
         assertEquals(40, o.maxSteps());
         assertNull(Cli.parse(new String[]{"--serve"}).once(), "不带 --once 就不是单次模式");
         assertEquals("react", Cli.parse(new String[]{"--once", "-"}).onceMode());
         assertThrows(IllegalArgumentException.class,
                 () -> Cli.parse(new String[]{"--once", "p", "--once-mode", "swarm"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cli.parse(new String[]{"--once", "p", "--once-mode", "team"}), "流水线已经撤了");
         assertEquals(0, Cli.parse(new String[]{"--once", "p", "--max-steps", "0"}).maxSteps(),
                 "0 表示不限，和不传一样");
         assertThrows(IllegalArgumentException.class,

@@ -1103,135 +1103,6 @@ describe("长期记忆清单", () => {
   })
 })
 
-// ------------------------------------------------------------ 流水线
-
-function teamOf(store: SessionStore) {
-  const entry = store.getSnapshot().entries.find(e => e.kind === 'team')
-  if (!entry || entry.kind !== 'team') throw new Error('没有流水线面板')
-  return entry.team
-}
-
-function teamStarted(): ServerEvent {
-  return {
-    t: 'team_started',
-    goal: '给配置模块加环境变量覆盖',
-    reason: '探路拟方案 → 编码施工 → 审查验收',
-    seats: [
-      { id: 'plan', role: 'scout', roleTitle: '探路', summary: '拟方案', status: 'PENDING' },
-      { id: 'work', role: 'coder', roleTitle: '编码', summary: '施工', status: 'PENDING' },
-      { id: 'review', role: 'reviewer', roleTitle: '审查', summary: '验收', status: 'PENDING' },
-    ],
-  }
-}
-
-describe('流水线面板', () => {
-  test('开场帧落成一条 team entry，三道工序和分工理由都留着', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-
-    const team = teamOf(store)
-    expect(team.goal).toBe('给配置模块加环境变量覆盖')
-    expect(team.reason).toBe('探路拟方案 → 编码施工 → 审查验收')
-    expect(team.seats.map(s => s.roleTitle)).toEqual(['探路', '编码', '审查'])
-    expect(team.status).toBe('CREATED')
-  })
-
-  test('座位表是长大的：seats_added 按执行顺序追加，随后照常被 started 点亮', () => {
-    const store = new SessionStore()
-    feed(store, {
-      t: 'team_started', goal: '目标', reason: '拟方案 → 并行施工 → 验收',
-      seats: [{ id: 'plan', role: 'scout', roleTitle: '探路', summary: '拟方案', status: 'PENDING' }],
-    })
-    feed(store, {
-      t: 'team_seats_added',
-      seats: [
-        { id: 't1', role: 'coder', roleTitle: '编码', summary: '施工', status: 'PENDING' },
-        { id: 't2', role: 'explorer', roleTitle: '调研', summary: '查', status: 'PENDING' },
-      ],
-    })
-    feed(store, { t: 'team_seat_started', seatId: 't2', role: 'explorer', roleTitle: '调研' })
-
-    const team = teamOf(store)
-    expect(team.seats.map(s => s.id)).toEqual(['plan', 't1', 't2'])
-    expect(team.seats[2].status).toBe('RUNNING')
-  })
-
-  test('工序状态就地更新，不会互相串', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, { t: 'team_seat_started', seatId: 'plan', role: 'scout', roleTitle: '探路' })
-
-    expect(teamOf(store).seats[0].status).toBe('RUNNING')
-    expect(teamOf(store).seats[1].status).toBe('PENDING')
-    expect(teamOf(store).status).toBe('RUNNING')
-  })
-
-  test('一道工序的定稿归到它名下——流式那份是混在一起的，回看要靠这个', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, {
-      t: 'team_seat_finished', seatId: 'plan', role: 'scout', status: 'SUCCEEDED',
-      durationMs: 28000, opinion: '分三步改', error: null,
-    })
-
-    expect(teamOf(store).seats[0].opinion).toBe('分三步改')
-    expect(teamOf(store).seats[0].durationMs).toBe(28000)
-    expect(teamOf(store).seats[0].error).toBeUndefined()
-  })
-
-  test('倒了的工序记下原因，不能留在转圈状态', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, {
-      t: 'team_seat_finished', seatId: 'work', role: 'coder', status: 'FAILED',
-      durationMs: 3000, opinion: null, error: '写文件被拒绝',
-    })
-
-    expect(teamOf(store).seats[1].status).toBe('FAILED')
-    expect(teamOf(store).seats[1].error).toBe('写文件被拒绝')
-  })
-
-  test('打回的 PARTIAL 把问题清单留在面板上——那是最值钱的一份产出', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, {
-      t: 'team_finished', status: 'PARTIAL', spoke: 3, silent: 0, verdict: '漏了空值判断\n打回',
-    })
-
-    const team = teamOf(store)
-    expect(team.status).toBe('PARTIAL')
-    expect(team.verdict).toBe('漏了空值判断\n打回')
-  })
-
-  test('验收没跑成的 PARTIAL 没有 verdict——没有结论就别画一份出来', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, { t: 'team_finished', status: 'PARTIAL', spoke: 2, silent: 1, verdict: null })
-
-    expect(teamOf(store).status).toBe('PARTIAL')
-    expect(teamOf(store).verdict).toBeUndefined()
-  })
-
-  test('取消之后没有验收结论，别画一份出来', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    feed(store, { t: 'team_finished', status: 'CANCELLED', spoke: 1, silent: 2, verdict: null })
-
-    expect(teamOf(store).verdict).toBeUndefined()
-  })
-
-  test('流水线面板也在用户说下一句时让位', () => {
-    const store = new SessionStore()
-    feed(store, teamStarted())
-    expect(store.getSnapshot().activeTeamKey).not.toBeNull()
-
-    store.submitPrompt('再说点别的')
-
-    expect(store.getSnapshot().activeTeamKey).toBeNull()
-    expect(teamOf(store).goal).toBe('给配置模块加环境变量覆盖')  // 痕迹还在转录里
-  })
-})
-
 // ------------------------------------------------------------ 模式（Shift+Tab）
 
 describe('模式切换', () => {
@@ -1248,18 +1119,7 @@ describe('模式切换', () => {
     expect(new SessionStore().getSnapshot().mode).toBe('normal')
   })
 
-  test('normal → plan → team → normal，转一圈回到原地', () => {
-    const store = withFeatures(['plan', 'team'])
-
-    store.cycleMode()
-    expect(store.getSnapshot().mode).toBe('plan')
-    store.cycleMode()
-    expect(store.getSnapshot().mode).toBe('team')
-    store.cycleMode()
-    expect(store.getSnapshot().mode).toBe('normal')
-  })
-
-  test('后端没宣告的模式直接跳过——进得去又用不了，比切不进去更让人困惑', () => {
+  test('normal → plan → normal，转一圈回到原地', () => {
     const store = withFeatures(['plan'])
 
     store.cycleMode()
@@ -1268,7 +1128,16 @@ describe('模式切换', () => {
     expect(store.getSnapshot().mode).toBe('normal')
   })
 
-  test('两个都没宣告时，按了等于没按，不会卡在跑不了的模式上', () => {
+  test('老后端还宣告 team 也切不进去——界面已经没有这个模式了', () => {
+    const store = withFeatures(['plan', 'team'])
+
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('plan')
+    store.cycleMode()
+    expect(store.getSnapshot().mode).toBe('normal')
+  })
+
+  test('没宣告 plan 时，按了等于没按，不会卡在跑不了的模式上', () => {
     const store = withFeatures([])
 
     store.cycleMode()
@@ -1277,7 +1146,7 @@ describe('模式切换', () => {
   })
 
   test('模式跨轮保持——它是用户表过的态，不该跑完一轮就弹回去', () => {
-    const store = withFeatures(['plan', 'team'])
+    const store = withFeatures(['plan'])
     store.cycleMode()
 
     store.submitPrompt('干点活')
@@ -1300,14 +1169,14 @@ describe('模式可用性（纯函数）', () => {
     expect(modeIsAvailable('normal', [])).toBe(true)
   })
 
-  test('plan / team 各自看自己的 feature', () => {
+  test('plan 看自己的 feature', () => {
     expect(modeIsAvailable('plan', ['team'])).toBe(false)
-    expect(modeIsAvailable('team', ['team'])).toBe(true)
+    expect(modeIsAvailable('plan', ['plan'])).toBe(true)
   })
 
   test('nextMode 是纯的，不碰 store', () => {
-    expect(nextMode('normal', ['plan', 'team'])).toBe('plan')
-    expect(nextMode('team', ['plan', 'team'])).toBe('normal')
+    expect(nextMode('normal', ['plan'])).toBe('plan')
+    expect(nextMode('plan', ['plan'])).toBe('normal')
     expect(nextMode('plan', [])).toBe('normal')
   })
 })

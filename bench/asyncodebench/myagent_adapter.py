@@ -6,8 +6,8 @@ is uploaded into the container once, and every assignment is executed with
 ``java -jar myagent.jar --once`` (headless single run, auto-approve).
 
 Config keys (``--agent-config-json``):
-  mode        "react" (default), "react+review" (single writer + final independent review)
-              or "team"                         -> myagent --once-mode
+  mode        "react" (default) or "react+review" (single writer + final independent review)
+                                                -> myagent --once-mode
   jar         host path of myagent.jar          (default ~/myagent.jar)
   jre         host path of a linux-x64 JRE tgz  (default ~/jre/jre17.tar.gz)
   max_steps   override the per-assignment step cap; 0 = unlimited (default: request.max_iterations,

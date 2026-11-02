@@ -18,15 +18,6 @@ export type ToolInfo = { name: string; description: string }
  * `mutates` 是「它会不会动手改东西」——界面拿它分色比按 id 硬编码可靠：
  * 名册是会长的，硬编码的那张表只会停在写它的那天。
  */
-/** 流水线上的一道工序，线上形态（字段名 seat 是圆桌时期留下的）。开场那帧里 status 一律是 PENDING。 */
-export type TeamSeatWire = {
-  id: string
-  role: string
-  roleTitle: string
-  summary: string
-  status: string
-}
-
 export type RoleInfo = {
   id: string
   title: string
@@ -248,7 +239,7 @@ export type ServerEvent =
       reason: string
       /** 写文件时是 diff 正文。没有就是空串 */
       preview?: string
-      /** 计划/流水线里是「编码者 · t3」。单轮对话里是空串 */
+      /** 计划里是「编码者 · t3」。单轮对话里是空串 */
       origin?: string
       /**
        * 「以后都同意」可以存成哪几条规则，从紧到松。空数组表示这次不能记规则。
@@ -277,7 +268,7 @@ export type ServerEvent =
    * `cid` 是发起方的连接 id：自己那条要跳过，因为本地已经即时回显过了。
    * 没有这条的话，另一块屏上会凭空冒出一段回答。
    */
-  | { t: 'user_message'; text: string; mode: 'normal' | 'plan' | 'team'; cid?: string }
+  | { t: 'user_message'; text: string; mode: 'normal' | 'plan'; cid?: string }
   /**
    * 这个工作区的会话历史，只回给问的那个连接。
    *
@@ -332,45 +323,6 @@ export type ServerEvent =
    */
   | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
   /**
-   * 流水线开场。此刻座位表上**只有规划那一道工序**——worker 有几个、派谁，
-   * 要等规划跑完才知道，届时走 `team_seats_added`。
-   *
-   * 帧名和 `seats` 这个字段名是圆桌时期留下的，形状不动、语义换了：
-   * 一「席」是一道**工序**。`reason` 那句分工说明要显眼地画出来。
-   */
-  | { t: 'team_started'; goal: string; reason: string; seats: TeamSeatWire[] }
-  /**
-   * 座位表长大了：规划拆出的 workers、每轮的验收、返工/重拟长出的新工序。
-   * 按执行顺序追加到已有座位表末尾即可，id 全场唯一。
-   */
-  | { t: 'team_seats_added'; seats: TeamSeatWire[] }
-  | { t: 'team_seat_started'; seatId: string; role: string; roleTitle: string }
-  | {
-      t: 'team_seat_finished'
-      seatId: string
-      role: string
-      /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
-      status: string
-      durationMs: number
-      /** 这道工序的定稿。倒了时是 null——流式那份是混在一起的，这份是归到它名下的 */
-      opinion: string | null
-      error: string | null
-    }
-  | {
-      t: 'team_finished'
-      /** COMPLETED | PARTIAL | FAILED | CANCELLED */
-      status: string
-      spoke: number
-      silent: number
-      /**
-       * 最后一轮验收的结论正文。PARTIAL 时要看它分两种：非空是打回没修完
-       * （问题清单就在里面），为空是验收没跑成。取消和失败时一律是 null。
-       */
-      verdict: string | null
-      /** 验收跑了几轮。老后端不发，可能是 undefined */
-      rounds?: number
-    }
-  /**
    * 一条 prompt 被自动改走规划了，reason 是后端给的判断依据。
    *
    * 不显示它的话，用户发的是普通一句话、屏幕上却冒出个计划面板——
@@ -397,14 +349,6 @@ export type ClientCommand =
   /** `cid` 是本连接的 id，用来在收到回显时认出「这是我自己刚说的」（协议 3.15）。 */
   | { t: 'prompt'; text: string; cid?: string }
   | { t: 'plan'; goal: string; cid?: string }
-  /**
-   * 开一条流水线（feature: `team`）：拟方案 → 并行施工 → 验收，
-   * 打回可重新执行或重新规划。
-   *
-   * `roles` 字段**已废弃**：分工由规划工序决定（它给每个任务派角色）。
-   * 服务端收到会忽略，界面一律传空数组。
-   */
-  | { t: 'team'; goal: string; roles?: string[]; cid?: string }
   /**
    * 接着跑上次没跑完的计划。没有存档时后端回 error。
    *

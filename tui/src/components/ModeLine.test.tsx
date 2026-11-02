@@ -28,18 +28,17 @@ describe("模式行", () => {
 
   test("每个模式都写清自己是干什么的，不只是一个名字", async () => {
     expect(await frameOf("plan")).toContain("先拆计划")
-    expect(await frameOf("team")).toContain("施工")
   })
 
   test("只占一行——它贴在状态栏下面，折行会把输入框顶上去", async () => {
-    for (const mode of ["normal", "plan", "team"] as const) {
+    for (const mode of ["normal", "plan"] as const) {
       const rows = (await frameOf(mode, 60)).split("\n").filter((l) => l.trim())
       expect(rows).toHaveLength(1)
     }
   })
 
   test("切换提示在每个模式下都在，不是只在 normal 下教一次", async () => {
-    for (const mode of ["normal", "plan", "team"] as const) {
+    for (const mode of ["normal", "plan"] as const) {
       expect(await frameOf(mode)).toContain("shift+tab")
     }
   })

@@ -37,7 +37,7 @@ final class EventLog {
 
     /**
      * 一条留底。{@code deltaText} 非 null 表示这是条 text_delta，补发时可以合并；
-     * {@code task} 是它属于哪条并行线（计划/流水线的子任务），不同线的不能合并。
+     * {@code task} 是它属于哪条并行线（计划的子任务），不同线的不能合并。
      */
     private record Entry(long seq, String json, String deltaText, String task) {
     }

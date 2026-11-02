@@ -14,7 +14,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Error
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material3.CircularProgressIndicator
@@ -36,7 +35,7 @@ import kotlinx.coroutines.launch
 /** 界面里反复用的小零件：状态图标、状态圆点、复制按钮。 */
 
 /**
- * 计划/流水线/工具共用的状态图标。取代原来的 ● ✓ ✗ 字符——
+ * 计划/工具共用的状态图标。取代原来的 ● ✓ ✗ 字符——
  * 跑着的是一个真在转的圈，而不是一个静止的点。
  */
 @Composable
@@ -54,7 +53,6 @@ fun StatusIcon(status: String, size: Dp = 16.dp) {
         "SKIPPED", "CANCELLED" ->
             Icon(Icons.Rounded.RemoveCircleOutline, null, Modifier.size(size), tint = AgentColors.skipped)
 
-        "PARTIAL" -> Icon(Icons.Rounded.Error, null, Modifier.size(size), tint = AgentColors.running)
         else -> Icon(Icons.Rounded.RadioButtonUnchecked, null, Modifier.size(size), tint = AgentColors.skipped)
     }
 }

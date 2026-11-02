@@ -37,7 +37,6 @@ object ClientCommand {
 
     fun prompt(text: String, cid: String) = cmd("prompt", "text" to text, "cid" to cid)
     fun plan(goal: String, cid: String) = cmd("plan", "goal" to goal, "cid" to cid)
-    fun team(goal: String, cid: String) = cmd("team", "goal" to goal, "cid" to cid)
     fun resumePlan() = cmd("resume_plan")
     fun continueSession() = cmd("continue")
     fun planConfirmReply(id: Int, approved: Boolean) =

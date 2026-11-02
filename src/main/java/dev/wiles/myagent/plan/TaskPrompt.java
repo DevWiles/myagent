@@ -93,11 +93,10 @@ public final class TaskPrompt {
      */
     private static String contractFor(AgentRole role) {
         if (role == AgentRoles.ACCEPTOR) {
-            // 验收席的结论是三选一，由 Pipeline.verdictOf 判；措辞必须和那边指着同一组词
-            return "**回答的最后一行只写下面三个词之一，别带别的字**——这一行是程序读的：\n"
+            // 审查方的结论是二选一，由 ReviewLoop.passed 判；措辞必须和那边、和 final-review.md 指着同一组词
+            return "**回答的最后一行只写下面两个词之一，别带别的字**——这一行是程序读的：\n"
                     + "- 通过——没有必须修的问题\n"
-                    + "- 重新执行——方案没错，是施工没做对或没做完，按原方案重做能好\n"
-                    + "- 重新规划——方案本身有问题（方向拆错、漏了目标里的要求），要重拟";
+                    + "- 重新执行——有必须修的问题，上面已经列清楚";
         }
         if (role.requiresVerdict()) {
             return "**回答的最后一行必须是** `" + VERDICT_PASS + "` 或 `" + VERDICT_FAIL

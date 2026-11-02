@@ -14,7 +14,7 @@ import {
 
 /** 后端啥都支持、存档也都有的情况。 */
 const full: CommandContext = {
-  features: ["plan", "team", "replan", "resume", "resume_plan", "auto_mode", "session",
+  features: ["plan", "replan", "resume", "resume_plan", "auto_mode", "session",
     "sessions", "compact", "memory", "undo", "rewind"],
   hasContinuable: true,
   hasResumablePlan: true,

@@ -288,7 +288,7 @@ public final class Agent {
     /**
      * 该收手了吗：用户按了 Ctrl-C，<b>或者跑着这个循环的线程被中断了</b>。
      *
-     * <p>后一半是给上层的超时用的。计划和流水线超时时会 {@code Future.cancel(true)}，
+     * <p>后一半是给上层的超时用的。计划超时时会 {@code Future.cancel(true)}，
      * 那只是给工作线程设一个中断标志——不认它的话，一个已经被判超时、
      * 下游都已跳过的任务还会接着发模型调用、接着写文件，纯属烧钱加添乱。
      * 认了之后，它最多再走完手上这一步就收口。
@@ -640,7 +640,7 @@ public final class Agent {
      * 叫停后再给它 {@link #toolStopGraceMillis}，还不回来就<b>不等了</b>，回填「结果未知」——
      * 不能写「没有执行」，它确实跑了，而且可能还在后台跑（Codex 的提示里也特意写了这一句）。
      *
-     * <p>上层超时（计划、流水线 {@code Future.cancel(true)}）打断的是跑循环的线程，
+     * <p>上层超时（计划 {@code Future.cancel(true)}）打断的是跑循环的线程，
      * 这里接住、照样叫停工具，最后把中断标志还回去，让 {@link #shouldStop()} 看得见。
      */
     private ToolResult runInterruptibly(ToolCall call) {

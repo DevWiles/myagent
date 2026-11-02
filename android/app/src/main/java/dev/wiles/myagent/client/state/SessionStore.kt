@@ -3,7 +3,6 @@ package dev.wiles.myagent.client.state
 import dev.wiles.myagent.client.protocol.Interrupted
 import dev.wiles.myagent.client.protocol.PlanTaskWire
 import dev.wiles.myagent.client.protocol.ServerEvent
-import dev.wiles.myagent.client.protocol.TeamSeatWire
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,10 +33,9 @@ class SessionStore {
      */
     val clientId: String = (1..8).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("")
 
-    /** 当前那根压缩进度条 / 计划面板 / 流水线面板的 key。语义同 TUI（多半不在队尾）。 */
+    /** 当前那根压缩进度条 / 计划面板的 key。语义同 TUI（多半不在队尾）。 */
     private var compactingKey: String? = null
     private var planKey: String? = null
-    private var teamKey: String? = null
 
     // ------------------------------------------------------------ 用户动作
 
@@ -350,48 +348,6 @@ class SessionStore {
                 _state.update { it.copy(planConfirm = null) }
             }
 
-            is ServerEvent.TeamStarted -> {
-                val key = nextKey("team")
-                teamKey = key
-                _state.update {
-                    it.copy(entries = it.entries + Entry.Team(key, TeamData(
-                        goal = event.goal,
-                        reason = event.reason,
-                        seats = event.seats.map { s -> fromWire(s) },
-                        status = "CREATED",
-                    )))
-                }
-            }
-
-            is ServerEvent.TeamSeatsAdded -> updateTeam { team ->
-                team.copy(seats = team.seats + event.seats.map { fromWire(it) })
-            }
-
-            is ServerEvent.TeamSeatStarted -> updateTeam { team ->
-                team.copy(
-                    status = "RUNNING",
-                    seats = team.seats.map { s ->
-                        if (s.id == event.seatId) s.copy(status = "RUNNING") else s
-                    },
-                )
-            }
-
-            is ServerEvent.TeamSeatFinished -> updateTeam { team ->
-                team.copy(seats = team.seats.map { s ->
-                    if (s.id == event.seatId) s.copy(
-                        status = event.status, opinion = event.opinion,
-                        error = event.error, durationMs = event.durationMs,
-                    ) else s
-                })
-            }
-
-            is ServerEvent.TeamFinished -> updateTeam { team ->
-                team.copy(
-                    status = event.status, verdict = event.verdict,
-                    spoke = event.spoke, silent = event.silent,
-                )
-            }
-
             is ServerEvent.ReplayGap -> notice(
                 Entry.Notice.Level.WARN,
                 "断线期间有 ${event.to - event.from + 1} 条事件补不回来了（${event.from}〜${event.to}）。" +
@@ -409,16 +365,6 @@ class SessionStore {
         _state.update { st ->
             st.copy(entries = st.entries.map { entry ->
                 if (entry is Entry.Plan && entry.key == key) entry.copy(plan = update(entry.plan))
-                else entry
-            })
-        }
-    }
-
-    private fun updateTeam(update: (TeamData) -> TeamData) {
-        val key = teamKey ?: return
-        _state.update { st ->
-            st.copy(entries = st.entries.map { entry ->
-                if (entry is Entry.Team && entry.key == key) entry.copy(team = update(entry.team))
                 else entry
             })
         }
@@ -461,14 +407,6 @@ class SessionStore {
         recovery = recovery,
         status = task.status,
         parentId = task.parentId,
-    )
-
-    private fun fromWire(seat: TeamSeatWire) = TeamSeat(
-        id = seat.id,
-        role = seat.role,
-        roleTitle = seat.roleTitle,
-        summary = seat.summary,
-        status = seat.status,
     )
 }
 
