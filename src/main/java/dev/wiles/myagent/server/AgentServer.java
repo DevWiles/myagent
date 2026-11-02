@@ -944,6 +944,9 @@ public final class AgentServer extends WebSocketServer {
         done.put("sentTokens", meter.snapshot().promptTokens());
         done.put("completionTokens", meter.snapshot().completionTokens());
         done.put("contextLimit", agent.contextLimit());
+        // 对话原样摊回屏幕。取存档而不是 agent.history()：restore 可能补过封口消息，
+        // 那是给模型看的脚手架，不是这段对话里发生过的事
+        Protocol.encodeTranscript(done.putArray("transcript"), snapshot.restorable());
         agent.unfinished().ifPresent(
                 cut -> Protocol.encodeInterruption(done.putObject("interrupted"), cut));
         publish(done);

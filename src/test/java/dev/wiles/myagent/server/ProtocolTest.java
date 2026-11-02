@@ -3,6 +3,9 @@ package dev.wiles.myagent.server;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.AgentEvent;
+import dev.wiles.myagent.agent.SubAgents;
+import dev.wiles.myagent.llm.ChatMessage;
+import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.plan.AgentRoles;
 import dev.wiles.myagent.plan.Plan;
@@ -329,5 +332,47 @@ class ProtocolTest {
         }
         // 界面要靠 mutates 之类的字段做区分，不能全靠 id 硬编码
         assertTrue(roles.findValuesAsText("id").contains("reviewer"), roles.toString());
+    }
+
+    @Test
+    @DisplayName("接回来的对话摊成条目：人话、回答、工具配上结果；系统塞的话不算，断点说明剥掉")
+    void transcriptForRestoredSession() {
+        var messages = List.of(
+                ChatMessage.user("看下 README"),
+                ChatMessage.assistant("我先读一下", List.of(
+                        ToolCall.of("c1", "read_file", "{\"path\":\"README.md\"}"),
+                        ToolCall.of("c2", "grep", "{}"))),
+                ChatMessage.toolResult("c1", "# 标题"),
+                ChatMessage.toolResult("c2", "错误: 坏了"),
+                ChatMessage.user(SubAgents.NOTICE_TAG + "子 agent 交了结果</subagent_notification>"),
+                ChatMessage.assistant("写得挺全"),
+                ChatMessage.user("<turn_interrupted>\n上一轮断了\n</turn_interrupted>\n\n继续"),
+                ChatMessage.assistant(null, List.of(ToolCall.of("c3", "bash", "{}"))));
+
+        var out = new com.fasterxml.jackson.databind.ObjectMapper().createArrayNode();
+        Protocol.encodeTranscript(out, messages);
+
+        assertEquals(List.of("user", "assistant", "tool", "tool", "assistant", "user", "tool"),
+                out.findValuesAsText("kind"));
+        assertEquals("看下 README", out.get(0).path("text").asText());
+        assertTrue(out.get(2).path("ok").asBoolean());
+        assertEquals("# 标题", out.get(2).path("output").asText());
+        assertFalse(out.get(3).path("ok").asBoolean(), "错误: 开头的按失败算");
+        assertEquals("继续", out.get(5).path("text").asText(), "断点说明是给模型的，界面只要原话");
+        assertFalse(out.get(6).has("ok"), "没等到结果的调用不带 ok");
+    }
+
+    @Test
+    @DisplayName("工具输出太长就截，说清完整的在存档里")
+    void transcriptTruncatesLongOutput() {
+        String big = "x".repeat(Protocol.TRANSCRIPT_OUTPUT_LIMIT + 100);
+        var out = new com.fasterxml.jackson.databind.ObjectMapper().createArrayNode();
+        Protocol.encodeTranscript(out, List.of(
+                ChatMessage.assistant(null, List.of(ToolCall.of("c1", "read_file", "{}"))),
+                ChatMessage.toolResult("c1", big)));
+
+        String shown = out.get(0).path("output").asText();
+        assertTrue(shown.length() < big.length());
+        assertTrue(shown.endsWith("完整结果在存档里）"));
     }
 }

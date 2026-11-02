@@ -68,6 +68,15 @@ export type MemoryRow = {
   turnId: string | null
 }
 
+/**
+ * 接回来的对话里的一条。`tool` 的 `ok`/`output` 缺省表示那次调用没等到结果（断在半路）；
+ * `output` 过长时后端已经截过。
+ */
+export type TranscriptItem =
+  | { kind: 'user'; text: string }
+  | { kind: 'assistant'; text: string }
+  | { kind: 'tool'; tool: string; arguments: string; ok?: boolean; output?: string }
+
 export type ServerEvent =
   /** 首帧。画第一屏要的静态信息一次给全，省掉一轮往返。 */
   | {
@@ -171,6 +180,8 @@ export type ServerEvent =
       contextLimit?: number
       /** 接回来的那段断在了半路（协议 3.9）。 */
       interrupted?: Interrupted
+      /** 那段对话本身，按顺序摊平（见 Protocol.encodeTranscript）。老后端不发，那就只有一行摘要。 */
+      transcript?: TranscriptItem[]
     }
   /**
    * 压缩正在进行，画进度条。

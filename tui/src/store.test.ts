@@ -844,6 +844,51 @@ describe('会话恢复', () => {
     expect((last as Extract<Entry, { kind: 'notice' }>).text).toContain('8 条')
   })
 
+  test('恢复时把对话原样摆回屏幕：说过的话、回答、工具组，摘要那行跟在最后', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, {
+      t: 'session_restored',
+      messages: 6,
+      turns: 2,
+      firstMessage: '看下 README',
+      savedAt: 1,
+      transcript: [
+        { kind: 'user', text: '看下 README' },
+        { kind: 'assistant', text: '我先读一下' },
+        { kind: 'tool', tool: 'read_file', arguments: '{"path":"README.md"}', ok: true, output: '# 标题' },
+        { kind: 'tool', tool: 'grep', arguments: '{"pattern":"x"}', ok: false, output: '错误: 坏了' },
+        { kind: 'assistant', text: '写得挺全' },
+        { kind: 'user', text: '那改一下' },
+        { kind: 'tool', tool: 'write_file', arguments: '{"path":"a"}' },
+      ],
+    })
+
+    const entries = store.getSnapshot().entries
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'assistant', 'tools', 'assistant', 'user', 'tools', 'notice'])
+    const tools = entries[2] as Extract<Entry, { kind: 'tools' }>
+    expect(tools.calls.map((c) => [c.tool, c.ok, c.running])).toEqual([
+      ['read_file', true, false],
+      ['grep', false, false],
+    ])
+    // 断在半路、没等到结果的那次：不能停在「运行中」对着旧历史转圈
+    const cut = (entries[5] as Extract<Entry, { kind: 'tools' }>).calls[0]
+    expect(cut.running).toBe(false)
+    expect(cut.ok).toBe(false)
+    expect((entries[6] as Extract<Entry, { kind: 'notice' }>).text).toContain('上面就是')
+    expect(new Set(entries.map((e) => e.key)).size).toBe(entries.length)
+  })
+
+  test('老后端不发 transcript：照旧只有一行摘要带首句', () => {
+    const store = new SessionStore()
+    feed(store, readyWithSession())
+    feed(store, { t: 'session_restored', messages: 2, turns: 1, firstMessage: '看下 README', savedAt: 1 })
+
+    const entries = store.getSnapshot().entries
+    expect(entries.filter((e) => e.kind !== 'notice')).toHaveLength(0)
+    expect((entries.at(-1) as Extract<Entry, { kind: 'notice' }>).text).toContain('上次首句：看下 README')
+  })
+
   test('恢复会把 token 占用一起更新——接回来的历史本来就占上下文', () => {
     const store = new SessionStore()
     feed(store, readyWithSession())
@@ -1344,4 +1389,15 @@ describe('断在半路之后提示「继续」', () => {
 
     expect(store.getSnapshot().interrupted).toBeNull()
   })
+})
+
+test('大段粘贴：转录记全文也记折起来的那份，画的是后者；没粘贴就不多存一份', () => {
+  const store = new SessionStore()
+  store.submitPrompt('看下 a\nb\nc', '看下 [粘贴的文本 #1 +3 行]')
+  store.submitPrompt('普通一句', '普通一句')
+
+  const [pasted, plain] = store.getSnapshot().entries as Extract<Entry, { kind: 'user' }>[]
+  expect(pasted.text).toBe('看下 a\nb\nc')
+  expect(pasted.display).toBe('看下 [粘贴的文本 #1 +3 行]')
+  expect(plain.display).toBeUndefined()
 })

@@ -231,6 +231,73 @@ public final class Protocol {
         n.put("at", cut.at());
     }
 
+    /** 接回来的对话里，一条工具输出最多带这么多字。全量还在存档里，模型那边不受影响。 */
+    static final int TRANSCRIPT_OUTPUT_LIMIT = 4000;
+
+    private static final String INTERRUPT_OPEN = "<turn_interrupted>";
+    private static final String INTERRUPT_CLOSE = "</turn_interrupted>";
+
+    /**
+     * 把一段存档摊成界面能直接画的条目，{@code session_restored} 带着它，
+     * 接回来的对话才能像 Claude Code 那样原样摆回屏幕上——光说「接上了 4 轮」，
+     * 用户看不见自己上次说到哪。
+     *
+     * <p>三种条目，顺序就是对话顺序：
+     * <ul>
+     *   <li>{@code user}：人说的话。系统塞进去的（子 agent 通知、委派计划、验证提醒，
+     *       见 {@code SubAgents.isNotice}）不算；断点后第一句前面拼着的
+     *       {@code <turn_interrupted>} 说明剥掉，只留原话</li>
+     *   <li>{@code assistant}：模型的文字。调工具前顺口说的那句也是它——实时界面上就是这么流出来的</li>
+     *   <li>{@code tool}：一次调用和它的结果按 id 配上。结果里不存成败，按
+     *       {@code ToolResult.error} 的 {@code 错误: } 前缀推；没有结果（断在半路）就不带 ok</li>
+     * </ul>
+     */
+    public static void encodeTranscript(ArrayNode out, List<dev.wiles.myagent.llm.ChatMessage> messages) {
+        java.util.Map<String, String> results = new java.util.HashMap<>();
+        for (var m : messages) {
+            if ("tool".equals(m.role()) && m.toolCallId() != null) {
+                results.put(m.toolCallId(), m.content() == null ? "" : m.content());
+            }
+        }
+        for (var m : messages) {
+            String content = m.content() == null ? "" : m.content();
+            switch (m.role()) {
+                case "user" -> {
+                    if (dev.wiles.myagent.agent.SubAgents.isNotice(content)) {
+                        continue;
+                    }
+                    if (content.startsWith(INTERRUPT_OPEN)) {
+                        int end = content.indexOf(INTERRUPT_CLOSE);
+                        content = end < 0 ? content : content.substring(end + INTERRUPT_CLOSE.length());
+                    }
+                    if (!content.isBlank()) {
+                        out.addObject().put("kind", "user").put("text", content.strip());
+                    }
+                }
+                case "assistant" -> {
+                    if (!content.isBlank()) {
+                        out.addObject().put("kind", "assistant").put("text", content.strip());
+                    }
+                    for (var call : m.toolCallsOrEmpty()) {
+                        ObjectNode tool = out.addObject().put("kind", "tool")
+                                .put("tool", call.function().name())
+                                .put("arguments", call.function().arguments());
+                        String result = results.get(call.id());
+                        if (result != null) {
+                            tool.put("ok", !result.startsWith("错误: "));
+                            tool.put("output", result.length() <= TRANSCRIPT_OUTPUT_LIMIT ? result
+                                    : result.substring(0, TRANSCRIPT_OUTPUT_LIMIT) + "\n…（界面只显示前 "
+                                            + TRANSCRIPT_OUTPUT_LIMIT + " 字，完整结果在存档里）");
+                        }
+                    }
+                }
+                default -> {
+                    // system 和 tool 不单独成条：前者不该给人看，后者已经配到调用上了
+                }
+            }
+        }
+    }
+
     /**
      * 一份新鲜出炉的计划。
      *

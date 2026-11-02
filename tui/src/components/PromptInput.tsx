@@ -18,7 +18,8 @@
  * <p>光标仍然不用自己画——那是 Zig 那层的事，和 `<input>` 时期一样。
  */
 
-import type { KeyEvent, TextareaRenderable } from "@opentui/core"
+import { decodePasteBytes, stripAnsiSequences, type KeyEvent, type PasteEvent, type TextareaRenderable } from "@opentui/core"
+import { normalizePaste, PasteStore, shouldFold } from "../paste-fold.ts"
 import { createSignal } from "solid-js"
 import { useTheme } from "../theme.ts"
 
@@ -81,12 +82,27 @@ export type PromptInputProps = {
   matched?: boolean
   /** 挂载时把「改内容」的手交出去，Tab 补全要用。 */
   controls?: (api: { setValue: (value: string) => void }) => void
-  onSubmit: (value: string) => void
+  /**
+   * @param value   发给模型的全文：粘贴折成的占位符已经换回原文
+   * @param display 给人看的那份，占位符原样留着；转录里画这个（见 paste-fold.ts）
+   */
+  onSubmit: (value: string, display: string) => void
 }
 
 export function PromptInput(props: PromptInputProps) {
   const theme = useTheme()
   let input: TextareaRenderable | undefined
+  /** 这一句里贴进来的大段文字。占位符在输入框里，原文在这儿 */
+  const pastes = new PasteStore()
+
+  /** 大段粘贴折成占位符；短的放行，让 textarea 照常插进去。 */
+  const handlePaste = (event: PasteEvent): void => {
+    if (!input) return
+    const text = normalizePaste(stripAnsiSequences(decodePasteBytes(event.bytes)))
+    if (!shouldFold(text)) return
+    event.preventDefault()
+    input.insertText(pastes.add(text))
+  }
 
   /**
    * 现在要占几行。
@@ -112,10 +128,11 @@ export function PromptInput(props: PromptInputProps) {
   }
 
   const submit = (): void => {
-    const value = (input?.plainText ?? "").trim()
-    if (!value) return
-    props.onSubmit(value)
+    const display = (input?.plainText ?? "").trim()
+    if (!display) return
+    props.onSubmit(pastes.expand(display).trim(), display)
     // 提交后立刻清空，否则下一句会接在上一句后面
+    pastes.clear()
     input?.setText("")
     setRows(1)
     props.onValueChange?.("")   // 清空是程序干的，内容事件不会叫，菜单得自己收
@@ -147,6 +164,8 @@ export function PromptInput(props: PromptInputProps) {
             input = r
             props.controls?.({
               setValue: (value: string) => {
+                // 程序改写整行（Tab 补全、清空）：原来那几段粘贴的占位符都不在了
+                pastes.clear()
                 r.setText(value)
                 syncRows()
                 props.onValueChange?.(value)
@@ -165,6 +184,7 @@ export function PromptInput(props: PromptInputProps) {
           focusedTextColor={props.matched ? theme.brand : theme.text}
           keyBindings={BINDINGS}
           onContentChange={handleChange}
+          onPaste={handlePaste}
           // 和 `<input>` 不同，这个回调**不带内容**（签名是 `(event) => void`），
           // 内容得自己从 plainText 取。照着老写法接一个 value 参数的话，
           // 拿到的是一个 event 对象，typeof 判断直接把提交静默吞掉

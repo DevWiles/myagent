@@ -307,22 +307,23 @@ export function App(props: AppProps) {
    * <p>模式在**提交这一刻**才起作用，不是打字时。所以用户可以先写完一长段，
    * 再想起来「这该走规划」，Shift+Tab 一下再回车——不用重打。
    */
-  const sendByMode = (text: string): void => {
+  const sendByMode = (text: string, display?: string): void => {
     switch (state().mode) {
       case "plan":
-        session.plan(text)
+        session.plan(text, display)
         return
       default:
-        session.prompt(text)
+        session.prompt(text, display)
     }
   }
 
-  const submit = (value: string): void => {
+  /** `display` 是输入框里看到的样子：大段粘贴还折在占位符里，转录照这个画。 */
+  const submit = (value: string, display?: string): void => {
     if (state().busy) return
     const decision = resolve(value, commandContext())
     switch (decision.kind) {
       case "prompt":
-        sendByMode(decision.text)
+        sendByMode(decision.text, display)
         return
       case "unknown":
         session.notice("warn", `没有 ${decision.typed} 这个命令。敲一个 / 看有哪些，或者 /help。`)

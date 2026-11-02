@@ -18,7 +18,7 @@
 
 import { ASK_STAGE, askChoices, editFeedback, moveSelection, PLAN_CHOICES } from './approval.ts'
 import type { ApprovalStage, ApprovalSuggestion } from './approval.ts'
-import type { Interrupted, MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo } from './protocol.ts'
+import type { Interrupted, MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo, TranscriptItem } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
@@ -79,7 +79,8 @@ export type PlanData = {
 }
 
 export type Entry =
-  | { kind: 'user'; key: string; text: string }
+  /** `display` 在时画它（大段粘贴折成占位符，见 paste-fold.ts），`text` 是真正发出去的全文 */
+  | { kind: 'user'; key: string; text: string; display?: string }
   | { kind: 'assistant'; key: string; text: string }
   | { kind: 'thought'; key: string; text: string }
   | { kind: 'tools'; key: string; calls: ToolCall[] }
@@ -88,6 +89,40 @@ export type Entry =
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
   | { kind: 'memory'; key: string; rows: MemoryRow[] }
   | { kind: 'plan'; key: string; plan: PlanData }
+
+/**
+ * 把接回来的对话摊成 entry，长得和当时实时跑出来的一样：
+ * 连着的工具调用收成一组（同 tool_started 的规矩），没等到结果的那次标成失败——
+ * 停在「运行中」的话，界面会对着一段旧历史转圈。
+ */
+export function transcriptEntries(items: TranscriptItem[], key: (prefix: string) => string): Entry[] {
+  const out: Entry[] = []
+  let callId = 0
+  for (const item of items) {
+    if (item.kind === 'user') {
+      out.push({ kind: 'user', key: key('user'), text: item.text })
+    } else if (item.kind === 'assistant') {
+      out.push({ kind: 'assistant', key: key('text'), text: item.text })
+    } else {
+      const done = item.ok !== undefined
+      const call: ToolCall = {
+        id: ++callId,
+        tool: item.tool,
+        args: item.arguments,
+        running: false,
+        ok: done ? item.ok : false,
+        output: done ? item.output : '没有执行（上次断在这一步）',
+      }
+      const last = out[out.length - 1]
+      if (last?.kind === 'tools') {
+        out[out.length - 1] = { ...last, calls: [...last.calls, call] }
+      } else {
+        out.push({ kind: 'tools', key: key('tools'), calls: [call] })
+      }
+    }
+  }
+  return out
+}
 
 export type Approval = {
   id: number
@@ -435,9 +470,10 @@ export class SessionStore {
     this.set({ mode: nextMode(this.state.mode, this.state.ready?.features ?? []) })
   }
 
-  submitPrompt(text: string): void {
+  submitPrompt(text: string, display?: string): void {
+    const shown = display !== undefined && display !== text ? { display } : {}
     this.set({
-      entries: [...this.state.entries, { kind: 'user', key: this.nextKey('user'), text }],
+      entries: [...this.state.entries, { kind: 'user', key: this.nextKey('user'), text, ...shown }],
       step: 0,
       startedAt: Date.now(),
       // 说下一句了，底部那块面板该让位——上一份的痕迹在 transcript 里还留着
@@ -952,10 +988,17 @@ export class SessionStore {
         // 面板也收：挑完了还摆在屏幕上，下一次 ↑↓ 会落在一个已经接过的列表上
         // 接回来的那段要是断在半路，断点跟着回来（协议 3.9）；没有就清掉上一段的
         this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: event.interrupted ?? null })
+        // 对话本身原样摆回来（照 Claude Code），摘要那行跟在后面，说明上面这些是接回来的
+        if (event.transcript && event.transcript.length > 0) {
+          this.set({
+            entries: [...this.state.entries, ...transcriptEntries(event.transcript, (p) => this.nextKey(p))],
+          })
+        }
+        const shown = Boolean(event.transcript && event.transcript.length > 0)
         this.notice(
           'info',
           `接上了上次的对话（${event.turns} 轮，${event.messages} 条消息）。` +
-            `上次首句：${event.firstMessage}`,
+            (shown ? '上面就是，接着说就行' : `上次首句：${event.firstMessage}`),
         )
         if (event.interrupted) this.notice('info', continueHint(event.interrupted))
         if (event.tokens !== undefined) {

@@ -52,7 +52,7 @@ export function EntryView(props: EntryViewProps) {
   return (
     <Switch>
       <Match when={props.entry.kind === "user" ? props.entry : null}>
-        {(entry) => <UserEntry text={entry().text} />}
+        {(entry) => <UserEntry text={entry().display ?? entry().text} />}
       </Match>
       <Match when={props.entry.kind === "assistant" ? props.entry : null}>
         {(entry) => <AssistantEntry text={entry().text} streaming={props.streaming ?? false} />}

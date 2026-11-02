@@ -19,10 +19,10 @@ import { SessionStore, type SessionState } from "./store.ts"
 export type Session = {
   /** 当前快照。Solid 的 signal，读它就会建立依赖。 */
   state: Accessor<SessionState>
-  /** 发一轮普通对话。 */
-  prompt: (text: string) => void
+  /** 发一轮普通对话。`display` 是转录里画的样子（大段粘贴折成占位符），不给就画 text */
+  prompt: (text: string, display?: string) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
-  plan: (goal: string) => void
+  plan: (goal: string, display?: string) => void
   /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */
   cycleMode: () => void
   /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
@@ -239,17 +239,17 @@ export function createSession(options: BackendOptions): Session {
     toggleEntry(key) {
       store.toggleEntry(key)
     },
-    prompt(text) {
+    prompt(text, display) {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了
-      store.submitPrompt(text)
+      store.submitPrompt(text, display)
       send({ t: "prompt", text, cid: store.clientId })
     },
-    plan(goal) {
+    plan(goal, display) {
       // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
       // 常驻模式标识回答，而转录里紧跟着就是计划面板。
       // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
-      store.submitPrompt(goal)
+      store.submitPrompt(goal, display)
       send({ t: "plan", goal, cid: store.clientId })
     },
     cycleMode() {
