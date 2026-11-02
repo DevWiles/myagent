@@ -68,18 +68,14 @@ public final class PlanExecutor {
     public static final int DEFAULT_PARALLELISM = 3;
 
     /**
-     * 一个任务最多跑多久，毫秒。
+     * 一个任务最多跑多久，毫秒。{@code 0} 表示不限时。
      *
-     * <p>一小时。它不是性能阈值，是止损线——防的是「某一步卡死，调度线程跟着吊住，
-     * 已经跑完的任务连存档都推不进去」。原来是十分钟（按 coder 12 步、每步读超时 5 分钟估的），
-     * 但真实仓库上一步要读大文件、写、跑一遍慢测试再改，十分钟会把一个正在推进的任务判死——
-     * 撞线的代价是这一步作废、下游全跳，比多等一会儿贵得多。真卡死的情况由
-     * 读超时、bash 超时这些更近的闸先兜住，这条线只是最后一道。
-     *
-     * <p>并发之后这条线才真正要紧：串行时一个任务卡住只卡它自己，
-     * 现在卡的是整个调度循环。
+     * <p>默认不限。照 Claude Code / Codex：计划里的一步和它们的子 agent 是同一种东西，
+     * 两家都不按墙钟掐。撞线的代价是这一步作废、下游全跳——原来的一小时在真实仓库上
+     * 掐死过正在推进的验证任务。真卡死的情况由读超时、bash 超时这些更近的闸兜住，
+     * 剩下的交给用户取消。要止损线就显式调 {@link #taskTimeout}。
      */
-    public static final long DEFAULT_TASK_TIMEOUT_MILLIS = 3_600_000;
+    public static final long DEFAULT_TASK_TIMEOUT_MILLIS = 0;
 
     /** 没人跑完时，多久回头扫一次超时。扫一遍是几个元素的遍历，这个间隔的开销可以忽略。 */
     private static final long SWEEP_INTERVAL_MILLIS = 200;
@@ -193,8 +189,7 @@ public final class PlanExecutor {
     /**
      * 单个任务的时限，从它<b>进场</b>那一刻算起。
      *
-     * <p>传 null 或非正值表示不限时，行为退回到「一直等」——只在测试里用得上。
-     * 生产环境关掉它，等于把「一个卡死的任务吊住整个调度循环」这条路重新打开。
+     * <p>传 null 或非正值表示不限时（默认），调度线程老老实实等每个任务跑完。
      */
     public PlanExecutor taskTimeout(Duration timeout) {
         this.taskTimeoutMillis = timeout == null || timeout.isZero() || timeout.isNegative()
