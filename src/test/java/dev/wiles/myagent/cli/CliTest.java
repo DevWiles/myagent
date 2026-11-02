@@ -72,6 +72,13 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("--exit-with-parent 默认关：手动起的后端不该因为 stdin 关了就退")
+    void exitWithParent() {
+        assertFalse(Cli.parse(new String[]{"--serve"}).exitWithParent());
+        assertTrue(Cli.parse(new String[]{"--serve", "--exit-with-parent"}).exitWithParent());
+    }
+
+    @Test
     @DisplayName("只影响终端渲染的老参数已经删了，敲了要当场报错")
     void terminalOnlyFlagsAreGone() {
         // 自带界面删掉之后，--no-color / --fullscreen 这些一个都不再有效果。

@@ -18,7 +18,7 @@
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,8 +32,8 @@ import {
   type ServerEvent,
 } from './protocol.ts'
 
-/** stdin 关掉、stdout/stderr 收进管道——和下面 spawn 的 stdio 配置一一对应。 */
-type BackendProcess = ChildProcessByStdio<null, Readable, Readable>
+/** 三路都接管道——和下面 spawn 的 stdio 配置一一对应。stdin 为什么要接见 spawnChild。 */
+type BackendProcess = ChildProcessByStdio<Writable, Readable, Readable>
 
 export type BackendOptions = {
   workspace: string
@@ -240,14 +240,18 @@ export function startBackend(
     const jar = await ensureJar(options, aborter.signal, onStatus)
     if (disposed) return
     onStatus?.('正在启动后端…')
-    const args = [...javaOptions(), '-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
+    const args = [...javaOptions(), '-jar', jar, '--serve', '--exit-with-parent', '--port', '0', '-d', options.workspace]
     if (options.model) args.push('-m', options.model)
     if (options.planMode) args.push('--plan')
     if (options.lan) args.push('--lan')
     if (options.relay) args.push('--relay', options.relay)
     if (options.relayReset) args.push('--relay-reset')
 
-    const proc = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    // stdin 接一根从不写的管道：界面不管怎么死（含被硬杀、崩溃），系统都会关掉它，
+    // 后端读到 EOF 就自己退（--exit-with-parent，见 ParentWatch.java）。
+    // macOS/Linux 不会连带杀子进程，不这样做后端就成了孤儿，手上那一轮没人看着照跑
+    // （Windows 上 libuv 的 Job Object 已经会连带杀，这条在那儿是第二道保险）
+    const proc = spawn('java', args, { stdio: ['pipe', 'pipe', 'pipe'] })
     child = proc
     // Java 的日志走 stderr。平时不打扰用户，但后端起不来/崩了时它就是唯一的线索，
     // 所以留一个滚动窗口，报错时一起抛出去。

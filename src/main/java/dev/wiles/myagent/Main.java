@@ -4,6 +4,7 @@ import dev.wiles.myagent.cli.Cli;
 import dev.wiles.myagent.cli.CliOptions;
 import dev.wiles.myagent.relay.RelayServer;
 import dev.wiles.myagent.server.AgentServer;
+import dev.wiles.myagent.server.ParentWatch;
 
 
 /**
@@ -90,6 +91,11 @@ public final class Main {
         }));
 
         server.start();
+        if (options.exitWithParent()) {
+            // 走 System.exit 而不是直接 stop：关审计、关 MCP 子进程都在上面那个钩子里，
+            // 正在跑的那一轮（agent 线程）也得跟着 JVM 一起停
+            ParentWatch.start(System.in, () -> System.exit(0));
+        }
         try {
             server.awaitStop();
         } catch (InterruptedException e) {

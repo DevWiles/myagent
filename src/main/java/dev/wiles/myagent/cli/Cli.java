@@ -34,6 +34,7 @@ public final class Cli {
         String onceMode = "react";
         String onceOut = null;
         int maxSteps = 0;
+        boolean exitWithParent = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -51,6 +52,7 @@ public final class Cli {
                 }
                 case "--relay-reset" -> relayReset = true;
                 case "--relay-serve" -> relayServe = true;
+                case "--exit-with-parent" -> exitWithParent = true;
                 case "--port" -> {
                     requireValue(args, i, arg);
                     port = parsePort(args[++i]);
@@ -99,7 +101,7 @@ public final class Cli {
             }
         }
         return new CliOptions(workspace, model, readOnly, help, version, serve, port, lan,
-                relay, relayReset, relayServe, once, onceMode, onceOut, maxSteps);
+                relay, relayReset, relayServe, once, onceMode, onceOut, maxSteps, exitWithParent);
     }
 
     private static int parsePort(String value) {
@@ -142,6 +144,8 @@ public final class Cli {
                       --relay-reset    换一套房间号和配对密钥，手机要重新扫码
                       --relay-serve    以中继服务端启动（部署在公网机器上），
                                        配合 --port；这条路径不起 agent
+                      --exit-with-parent stdin 关闭时退出。界面本机拉起后端时用，
+                                       界面被硬杀也不会留下孤儿后端
                       --once <文件>    无头单次运行：读文件里的提示词（"-" 读 stdin），跑完就退。
                                        危险动作一律自动批准——只在沙盒/容器里用。
                                        最后的回答打到 stdout，退出码 0 = 正常收口

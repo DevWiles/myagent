@@ -27,6 +27,8 @@ import java.nio.file.Path;
  * @param relayReset 换一套房间号和配对密钥。手机需要重新扫码
  * @param relayServe 以中继服务端的身份启动（部署在公网机器上用），
  *                   这条路径不碰 API key、不注册工具、不起 agent
+ * @param exitWithParent stdin 关了就退出。界面本机拉起后端时传，防它被硬杀后后端成孤儿
+ *                   （见 {@code ParentWatch}）
  */
 public record CliOptions(
         Path workspace,
@@ -47,12 +49,13 @@ public record CliOptions(
         /** 单次运行的结果摘要（JSON）写到哪；null 就打到 stderr。 */
         String onceOut,
         /** 单次运行的步数上限；0 用默认。 */
-        int maxSteps
+        int maxSteps,
+        boolean exitWithParent
 ) {
     public CliOptions(Path workspace, String model, boolean readOnly, boolean help,
                       boolean version, boolean serve, int port, boolean lan, String relay,
                       boolean relayReset, boolean relayServe) {
         this(workspace, model, readOnly, help, version, serve, port, lan, relay,
-                relayReset, relayServe, null, "react", null, 0);
+                relayReset, relayServe, null, "react", null, 0, false);
     }
 }
