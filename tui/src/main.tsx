@@ -15,10 +15,12 @@ import { render } from "@opentui/solid"
 import { writeSync } from "node:fs"
 import { queryCursorOrigin, restoreCursorOrigin, type CursorOrigin } from "./cursor-origin.ts"
 import { resolve } from "node:path"
-import type { Accessor } from "solid-js"
+import { createSignal, Show, type Accessor } from "solid-js"
 import { App } from "./components/App.tsx"
+import { TrustDialog } from "./components/TrustDialog.tsx"
 import { buildEpilogue } from "./epilogue.ts"
 import type { SessionState } from "./store.ts"
+import { isTrusted, loadTrusted, rememberTrusted, riskOf, shouldRemember } from "./trust.ts"
 
 /**
  * 整场会话的起点。
@@ -57,7 +59,6 @@ if (argv.includes("-h") || argv.includes("--help")) {
   -d, --dir <路径>    工作区，默认当前目录
   -m, --model <名字>  覆盖模型
       --readonly      只读模式，不允许改文件
-      --unsafe        放行工作区外的路径
       --rebuild       后端不管新鲜不新鲜都重 build 一遍
       --lan           局域网模式：手机可以扫码连进来（界面里敲 /qr 出码）。
                       明文 ws，只在可信网络用
@@ -182,34 +183,55 @@ process.on("SIGINT", () => shutdown())
 process.on("SIGTERM", () => shutdown())
 process.on("SIGHUP", () => shutdown())
 
+// 在本机起后端之前先问信不信任这个目录（见 trust.ts）。连远端后端、回放录像时
+// 工作区不在这台机器上（或者根本没有后端），问了也没意义
+const needsTrust =
+  !flag("--connect") && !process.env["MYAGENT_REPLAY"] && !isTrusted(workspace, loadTrusted())
+const [trusted, setTrusted] = createSignal(!needsTrust)
+
 await render(
   () => (
-    <App
-      options={{
-        workspace,
-        model: flag("-m", "--model"),
-        planMode: argv.includes("--readonly"),
-        unsafe: argv.includes("--unsafe"),
-        forceRebuild: argv.includes("--rebuild"),
-        lan: argv.includes("--lan"),
-        relay: flag("--relay"),
-        relayReset: argv.includes("--relay-reset"),
-        connect: flag("--connect"),
-      }}
-      // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
-      // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的
+    <Show
+      when={trusted()}
+      fallback={
+        <TrustDialog
+          workspace={workspace}
+          risk={riskOf(workspace)}
+          remembered={shouldRemember(workspace)}
+          onAccept={() => {
+            if (shouldRemember(workspace)) rememberTrusted(workspace)
+            setTrusted(true)
+          }}
+          onDecline={() => shutdown("没有信任这个目录，myagent 没有启动。")}
+        />
+      }
+    >
+      <App
+        options={{
+          workspace,
+          model: flag("-m", "--model"),
+          planMode: argv.includes("--readonly"),
+          forceRebuild: argv.includes("--rebuild"),
+          lan: argv.includes("--lan"),
+          relay: flag("--relay"),
+          relayReset: argv.includes("--relay-reset"),
+          connect: flag("--connect"),
+        }}
+        // 分支由后端从 .git/HEAD 读出来，随 ready 帧下来（见 store 的 branch）。
+        // 这里原来传的是 basename(workspace)——目录名冒充分支，显示出来是错的
 
-      // 后端**彻底**没了（协议不兼容、崩溃循环）才退出，并把原因留在终端上——
-      // altscreen 一还原，界面里印的任何错误都会跟着消失，只有这里打的才看得见。
-      // 普通断线不走这儿：backend.ts 会自己重连，界面照常活着
-      onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
-      onExit={() => shutdown()}
-      onMounted={(handle) => {
-        exit.state = handle.state
-        exit.dispose = handle.dispose
-        appOwnsCtrlC = true
-      }}
-    />
+        // 后端**彻底**没了（协议不兼容、崩溃循环）才退出，并把原因留在终端上——
+        // altscreen 一还原，界面里印的任何错误都会跟着消失，只有这里打的才看得见。
+        // 普通断线不走这儿：backend.ts 会自己重连，界面照常活着
+        onClosed={(reason) => shutdown(`myagent 已退出：${reason}`, 1)}
+        onExit={() => shutdown()}
+        onMounted={(handle) => {
+          exit.state = handle.state
+          exit.dispose = handle.dispose
+          appOwnsCtrlC = true
+        }}
+      />
+    </Show>
   ),
   renderer,
 )

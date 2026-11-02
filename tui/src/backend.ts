@@ -39,7 +39,6 @@ export type BackendOptions = {
   workspace: string
   model?: string
   planMode: boolean
-  unsafe: boolean
   jar?: string
   /** 不管新鲜不新鲜都重 build 一遍（--rebuild）。只对仓库自带的 jar 有意义。 */
   forceRebuild?: boolean
@@ -244,7 +243,6 @@ export function startBackend(
     const args = [...javaOptions(), '-jar', jar, '--serve', '--port', '0', '-d', options.workspace]
     if (options.model) args.push('-m', options.model)
     if (options.planMode) args.push('--plan')
-    if (options.unsafe) args.push('--unsafe')
     if (options.lan) args.push('--lan')
     if (options.relay) args.push('--relay', options.relay)
     if (options.relayReset) args.push('--relay-reset')

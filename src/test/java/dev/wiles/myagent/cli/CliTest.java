@@ -31,7 +31,6 @@ class CliTest {
         assertTrue(Cli.parse(new String[]{"-v"}).version());
         assertTrue(Cli.parse(new String[]{"-r"}).readOnly());
         assertTrue(Cli.parse(new String[]{"--readonly"}).readOnly());
-        assertTrue(Cli.parse(new String[]{"--unsafe"}).unsafe());
     }
 
     @Test
@@ -113,10 +112,10 @@ class CliTest {
         String usage = Cli.usage();
 
         for (String flag : new String[]{"--serve", "--port", "--lan", "--relay", "--dir", "--model",
-                "--readonly", "--unsafe", "--help"}) {
+                "--readonly", "--help"}) {
             assertTrue(usage.contains(flag), "帮助里漏了 " + flag);
         }
-        for (String gone : new String[]{"--no-color", "--fullscreen", "--mouse"}) {
+        for (String gone : new String[]{"--no-color", "--fullscreen", "--mouse", "--unsafe"}) {
             assertFalse(usage.contains(gone), "帮助里还留着已经删掉的 " + gone);
         }
         assertTrue(usage.contains("myagent-tui"), "得告诉人界面在哪儿启动");

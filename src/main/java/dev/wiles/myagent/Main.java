@@ -81,16 +81,6 @@ public final class Main {
     private static void serve(CliOptions options) {
         AgentServer server = new AgentServer(options, options.port());
 
-        // 不该在家目录/根目录上跑 agent
-        String rejection = server.workspaceRejection();
-        if (rejection != null) {
-            System.err.println("拒绝在此目录启动: " + options.workspace().toAbsolutePath());
-            System.err.println(rejection);
-            System.err.println("请指定一个具体的项目目录（-d），确实需要的话加 --unsafe");
-            System.exit(3);
-            return;
-        }
-
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
                 server.stop(1000);

@@ -59,7 +59,6 @@ import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.ApprovalOrigin;
 import dev.wiles.myagent.tool.safety.PolicyGate;
 import dev.wiles.myagent.tool.safety.PolicyStore;
-import dev.wiles.myagent.tool.safety.WorkspaceGuard;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -494,16 +493,6 @@ public final class AgentServer extends WebSocketServer {
 
     public String token() {
         return token;
-    }
-
-    /**
-     * 启动前的工作区安全检查，语义和交互式模式保持一致。
-     *
-     * @return 不能启动时返回拒绝原因，可以启动返回 null
-     */
-    public String workspaceRejection() {
-        String rejection = WorkspaceGuard.rejectionReason(workspace.root());
-        return (rejection == null || options.unsafe()) ? null : rejection;
     }
 
     /** 阻塞到服务停止。前台跑的时候用它挂住主线程。 */
@@ -1400,10 +1389,6 @@ public final class AgentServer extends WebSocketServer {
                 // 只有一段时摆个选择器是纯噪音，直接 continue 就行
                 continuable.put("count", history.size());
             }
-        }
-        String rejection = WorkspaceGuard.rejectionReason(workspace.root());
-        if (rejection != null) {
-            n.put("workspaceWarning", rejection);   // 能走到这儿说明是 --unsafe 放行的
         }
         // 角色名册。界面靠它给每一步标出「派了谁」，不用自己维护一张表
         n.set("roles", Protocol.encodeRoles());

@@ -13,7 +13,6 @@ import java.nio.file.Path;
  * @param workspace 工作区目录，默认当前目录
  * @param model     覆盖配置里的模型名
  * @param readOnly  只读模式：不注册写文件和执行命令的工具
- * @param unsafe    跳过工作区安全检查
  * @param help      打印用法
  * @param version   打印版本
  * @param serve     无头模式。<b>现在是唯一的运行方式</b>，留着这个开关是因为
@@ -33,7 +32,6 @@ public record CliOptions(
         Path workspace,
         String model,
         boolean readOnly,
-        boolean unsafe,
         boolean help,
         boolean version,
         boolean serve,
@@ -51,10 +49,10 @@ public record CliOptions(
         /** 单次运行的步数上限；0 用默认。 */
         int maxSteps
 ) {
-    public CliOptions(Path workspace, String model, boolean readOnly, boolean unsafe, boolean help,
+    public CliOptions(Path workspace, String model, boolean readOnly, boolean help,
                       boolean version, boolean serve, int port, boolean lan, String relay,
                       boolean relayReset, boolean relayServe) {
-        this(workspace, model, readOnly, unsafe, help, version, serve, port, lan, relay,
+        this(workspace, model, readOnly, help, version, serve, port, lan, relay,
                 relayReset, relayServe, null, "react", null, 0);
     }
 }

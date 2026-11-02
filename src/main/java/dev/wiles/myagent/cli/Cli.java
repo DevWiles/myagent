@@ -22,7 +22,6 @@ public final class Cli {
         Path workspace = Path.of("");
         String model = null;
         boolean readOnly = false;
-        boolean unsafe = "1".equals(System.getenv("MYAGENT_UNSAFE_WORKSPACE"));
         boolean help = false;
         boolean version = false;
         boolean serve = false;
@@ -44,7 +43,6 @@ public final class Cli {
                 // -p/--plan 是只读模式的老名字。界面还在传它（tui/src/backend.ts），
                 // 而且老脚本里也可能有——改掉它得两边同时改，不值当
                 case "-r", "--readonly", "-p", "--plan" -> readOnly = true;
-                case "--unsafe" -> unsafe = true;
                 case "--serve" -> serve = true;
                 case "--lan" -> lan = true;
                 case "--relay" -> {
@@ -100,7 +98,7 @@ public final class Cli {
                                 + "要对话请用 myagent-tui 起界面）");
             }
         }
-        return new CliOptions(workspace, model, readOnly, unsafe, help, version, serve, port, lan,
+        return new CliOptions(workspace, model, readOnly, help, version, serve, port, lan,
                 relay, relayReset, relayServe, once, onceMode, onceOut, maxSteps);
     }
 
@@ -154,7 +152,6 @@ public final class Cli {
                   -d, --dir <路径>     指定工作区目录（默认当前目录）
                   -m, --model <名称>   覆盖配置里的模型
                   -r, --readonly       只读模式：写文件和执行命令的工具压根不注册
-                      --unsafe         跳过工作区安全检查（危险）
                   -h, --help           显示本帮助
                   -v, --version        显示版本
 

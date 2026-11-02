@@ -270,7 +270,6 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
                "compact"],
   "tools": [{"name": "read_file", "description": "…"}],
-  "workspaceWarning": "（可选）--unsafe 放行时的警告文案",
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
   "resumable": {
     "goal": "上次那份没跑完的计划的目标",
@@ -295,6 +294,10 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 > ⚠️ `planMode` 是**只读模式**的历史字段名（对应 CLI 的 `--readonly`），
 > 和「先规划后执行」没有任何关系。名字保留是为了不破坏已有界面。
+
+> `workspaceWarning` **不再发送**。以前后端在家目录这类地方拒绝启动、`--unsafe` 放行时
+> 用它补一句警告；现在改成界面在拉起后端之前问用户信不信任这个目录，风险写在那个确认框里。
+> 界面照旧认它（老后端还会发），有就显示。
 
 `auditLog` 是本次运行的审计轨迹落在哪。界面退出时会把它显示给用户——
 界面活在备用屏里，退出后整段对话随屏幕消失，这个路径是唯一一条还能继续查的线索。
