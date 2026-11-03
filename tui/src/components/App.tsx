@@ -954,7 +954,7 @@ export function App(props: AppProps) {
                   ? "正在跑…（Esc 或 Ctrl-C 中断）"
                   : state().interrupted
                     ? continueHint(state().interrupted!)
-                    : "交代一件事，比如「把 README 里的启动命令补全」"
+                    : ""
           }
           busy={state().busy}
           suspended={pending()}
