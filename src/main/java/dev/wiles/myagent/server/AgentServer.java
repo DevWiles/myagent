@@ -662,8 +662,16 @@ public final class AgentServer extends WebSocketServer {
         }
         String type = Protocol.str(cmd, "t", "");
         switch (type) {
-            case "prompt" -> handlePrompt(peer, Protocol.str(cmd, "text", "").trim(),
-                    Protocol.str(cmd, "cid", ""));
+            case "prompt" -> {
+                List<String> images;
+                try {
+                    images = PromptImages.parse(cmd);
+                } catch (IllegalArgumentException e) {
+                    peer.send(error(e.getMessage()));
+                    return;
+                }
+                handlePrompt(peer, Protocol.str(cmd, "text", "").trim(), Protocol.str(cmd, "cid", ""), images);
+            }
             case "cancel" -> handleCancel();
             case "approval_reply" -> {
                 int id = Protocol.num(cmd, "id", -1);
@@ -701,13 +709,14 @@ public final class AgentServer extends WebSocketServer {
         }
     }
 
-    private void handlePrompt(Peer peer, String text, String cid) {
+    /** @param images 用户贴的图，{@code data:} URL（见 {@link PromptImages}） */
+    private void handlePrompt(Peer peer, String text, String cid, List<String> images) {
         if (agent == null) {
             peer.send(error("没有配置 API key，无法对话。设置环境变量 DEEPSEEK_API_KEY "
                     + "或写进 ~/.myagent/config.json"));
             return;
         }
-        if (text.isEmpty()) {
+        if (text.isEmpty() && images.isEmpty()) {
             return;
         }
         if (!busy.compareAndSet(false, true)) {
@@ -734,9 +743,14 @@ public final class AgentServer extends WebSocketServer {
                     reviewing = loop;
                     try {
                         loop.run(new ReviewLoop.MainTurn() {
+                            /** 图只跟着用户那句原话走；审查打回来的修改意见是纯文字 */
+                            private boolean first = true;
+
                             @Override
                             public String run(String input) {
-                                return agent.run(input);
+                                List<String> withImages = first ? images : List.of();
+                                first = false;
+                                return agent.run(input, withImages);
                             }
 
                             @Override
@@ -748,7 +762,7 @@ public final class AgentServer extends WebSocketServer {
                         reviewing = null;
                     }
                 } else {
-                    agent.run(text);             // 事件在 onAgentEvent 里已经播出去了
+                    agent.run(text, images);     // 事件在 onAgentEvent 里已经播出去了
                 }
             } catch (RuntimeException e) {
                 log.error("agent 跑挂了", e);

@@ -13,6 +13,7 @@
 
 import { TextAttributes } from "@opentui/core"
 import { createMemo, For, Show } from "solid-js"
+import { imagePasteHint } from "../clipboard-image.ts"
 import { truncateStart } from "../path.ts"
 import { useTheme } from "../theme.ts"
 import { Banner, BannerCompact, BANNER_MIN_WIDTH } from "./Banner.tsx"
@@ -122,9 +123,9 @@ const TIPS = [
 ] as const
 
 const WHATS_NEW = [
+  `贴图：截图后按 ${imagePasteHint()}，或者把图片文件拖进来`,
   "/status 看当前用的模型、baseUrl 和 API key",
   "角色化：计划的每一步派给一个角色，工具和提示词都按角色装",
   "多会话：一次会话一份存档，/resume 挑一段接着聊",
   "断网/超限断在半路，说一句「继续」就接着干",
-  "界面自己认斜杠命令，认不出的不再发给模型",
 ] as const

@@ -10,6 +10,7 @@
  * 把它按新框架重写一遍，然后用两套实现去追同一个后端。
  */
 
+import type { ClipImage } from "./clipboard-image.ts"
 import { readFileSync } from "node:fs"
 import { createSignal, onCleanup, type Accessor } from "solid-js"
 import { startBackend, type Backend, type BackendOptions } from "./backend.ts"
@@ -20,7 +21,7 @@ export type Session = {
   /** 当前快照。Solid 的 signal，读它就会建立依赖。 */
   state: Accessor<SessionState>
   /** 发一轮普通对话。`display` 是转录里画的样子（大段粘贴折成占位符），不给就画 text */
-  prompt: (text: string, display?: string) => void
+  prompt: (text: string, display?: string, images?: ClipImage[]) => void
   /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
   plan: (goal: string, display?: string) => void
   /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */
@@ -239,11 +240,11 @@ export function createSession(options: BackendOptions): Session {
     toggleEntry(key) {
       store.toggleEntry(key)
     },
-    prompt(text, display) {
+    prompt(text, display, images) {
       // 先把用户这句话记进 transcript，再发出去——否则从按回车到后端回第一个
       // 事件之间，屏幕上什么都没有，像是按键丢了
       store.submitPrompt(text, display)
-      send({ t: "prompt", text, cid: store.clientId })
+      send({ t: "prompt", text, cid: store.clientId, ...(images && images.length > 0 ? { images } : {}) })
     },
     plan(goal, display) {
       // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行

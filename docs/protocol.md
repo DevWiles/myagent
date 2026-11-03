@@ -926,13 +926,38 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 客户端发 `prompt` / `plan` 时带上自己的 `cid`；不带也能用，
 只是发起方会看到自己那句话显示两遍（一次本地、一次回显）。
 
+### 3.17 带图（feature: `images`）
+
+`prompt` 可以带用户贴的截图，顺序和 `text` 里的 `[图片 #n]` 占位符一一对应。占位符留在文字里，
+模型才知道「这张图」指的是哪张：
+
+```json
+{"t":"prompt","text":"这个报错 [图片 #1] 怎么回事","cid":"a3f9",
+ "images":[{"mime":"image/png","data":"iVBORw0KGgo..."}]}
+```
+
+| 规矩 | 说明 |
+|---|---|
+| `mime` | 只认 `image/png` `image/jpeg` `image/gif` `image/webp` |
+| `data` | 原图的 base64，不带 `data:` 前缀 |
+| 上限 | 一句最多 10 张，单张解码后 10 MB。超了回 `error`，这一轮不开跑 |
+| 只有图没有字 | 允许，`text` 可以是空串 |
+| `plan` | 不收图。界面在计划模式下拦住带图的提交 |
+
+图跟着那条 user 消息进对话记录和会话存档，之后每一步请求都会连同历史再发一遍，和文字一样。
+存档里用的是 OpenAI 的写法：带图的消息 `content` 是 `[{type:"text"}, {type:"image_url"}...]` 数组，
+不带图的仍是字符串，所以老存档不受影响。
+
+**没宣告 `images` 的后端会把这个字段整个忽略**：模型只看到占位符，收不到图，而且不会报错。
+所以界面只在后端宣告了 `images` 时才放行带图的提交。
+
 ---
 
 ## 4. 界面 → 服务端
 
 | `t` | 字段 | 说明 |
 |---|---|---|
-| `prompt` | `text` `cid?` | 普通一轮对话。`cid` 见 3.15 |
+| `prompt` | `text` `cid?` `images?` | 普通一轮对话。`cid` 见 3.16，`images` 见 3.17 |
 | `plan` | `goal` `cid?` | 先规划后执行 |
 | `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always`，`rules[]`（可选），`feedback`（可选） | 回应 `approval_request`。见 3.3 |

@@ -40,8 +40,15 @@ public final class TokenEstimator {
         return (int) Math.ceil(cjk * CJK_RATE + other * OTHER_RATE);
     }
 
+    /**
+     * 一张图按这么多算。实测 DeepSeek 一张 64×32 的小图记 200 左右，整屏截图多得多；
+     * 这里取偏大的数——估少了会在窗口快满时漏判，估多了只是早一点压缩。
+     */
+    static final int IMAGE_TOKENS = 1_500;
+
     public static int estimate(ChatMessage message) {
-        int total = MESSAGE_OVERHEAD + estimate(message.content());
+        int total = MESSAGE_OVERHEAD + estimate(message.content())
+                + IMAGE_TOKENS * message.imagesOrEmpty().size();
         if (message.toolCallId() != null) {
             total += estimate(message.toolCallId());
         }

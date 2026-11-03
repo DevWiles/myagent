@@ -20,6 +20,7 @@
 
 import { decodePasteBytes, stripAnsiSequences, type KeyEvent, type PasteEvent, type TextareaRenderable } from "@opentui/core"
 import { normalizePaste, PasteStore, shouldFold } from "../paste-fold.ts"
+import { ImageStore, imageFromPastedPath, readClipboardImage, type ClipImage } from "../clipboard-image.ts"
 import { createSignal } from "solid-js"
 import { useTheme } from "../theme.ts"
 
@@ -80,13 +81,21 @@ export type PromptInputProps = {
    * 而不是等一轮往返之后被告知「没这个命令」。
    */
   matched?: boolean
-  /** 挂载时把「改内容」的手交出去，Tab 补全要用。 */
-  controls?: (api: { setValue: (value: string) => void }) => void
+  /**
+   * 挂载时把控件的手交出去：`setValue` 给 Tab 补全，`pasteImage` 给贴图快捷键
+   * （按键在 App 的全局 handler 里接，见 clipboard-image.ts）。
+   */
+  controls?: (api: { setValue: (value: string) => void; pasteImage: () => void }) => void
+  /** 这句话现在不能带图的原因（计划模式、后端太老）。有值时带图的提交会被拦下、输入框原样留着 */
+  imagesBlocked?: string
+  /** 贴图没成、带图被拦时说一声。不给就静默 */
+  onNotice?: (level: "info" | "warn", text: string) => void
   /**
    * @param value   发给模型的全文：粘贴折成的占位符已经换回原文
    * @param display 给人看的那份，占位符原样留着；转录里画这个（见 paste-fold.ts）
+   * @param images  贴进来、占位符还在的那几张图，按出现顺序
    */
-  onSubmit: (value: string, display: string) => void
+  onSubmit: (value: string, display: string, images: ClipImage[]) => void
 }
 
 export function PromptInput(props: PromptInputProps) {
@@ -94,14 +103,36 @@ export function PromptInput(props: PromptInputProps) {
   let input: TextareaRenderable | undefined
   /** 这一句里贴进来的大段文字。占位符在输入框里，原文在这儿 */
   const pastes = new PasteStore()
+  /** 这一句里贴进来的图，同一个路子 */
+  const images = new ImageStore()
 
-  /** 大段粘贴折成占位符；短的放行，让 textarea 照常插进去。 */
+  const attach = (result: ReturnType<typeof imageFromPastedPath>): void => {
+    if (!input || !result) return
+    if (result.ok) input.insertText(images.add(result.image))
+    else props.onNotice?.("warn", result.reason)
+  }
+
+  /**
+   * 粘贴进来的东西：拖进来的图片文件路径当图附上；大段文字折成占位符；
+   * 短的放行，让 textarea 照常插进去。
+   */
   const handlePaste = (event: PasteEvent): void => {
     if (!input) return
     const text = normalizePaste(stripAnsiSequences(decodePasteBytes(event.bytes)))
+    const dropped = imageFromPastedPath(text)
+    if (dropped) {
+      event.preventDefault()
+      attach(dropped)
+      return
+    }
     if (!shouldFold(text)) return
     event.preventDefault()
     input.insertText(pastes.add(text))
+  }
+
+  /** 贴图快捷键：去系统剪贴板里拿图。要起一个子进程，所以是异步的 */
+  const pasteImage = (): void => {
+    void readClipboardImage().then(attach)
   }
 
   /**
@@ -130,9 +161,16 @@ export function PromptInput(props: PromptInputProps) {
   const submit = (): void => {
     const display = (input?.plainText ?? "").trim()
     if (!display) return
-    props.onSubmit(pastes.expand(display).trim(), display)
+    const attached = images.collect(display)
+    if (attached.length > 0 && props.imagesBlocked) {
+      // 拦在清空之前：条件满足了（切回 normal 之类）就能原样发出去，不用重贴
+      props.onNotice?.("warn", props.imagesBlocked)
+      return
+    }
+    props.onSubmit(pastes.expand(display).trim(), display, attached)
     // 提交后立刻清空，否则下一句会接在上一句后面
     pastes.clear()
+    images.clear()
     input?.setText("")
     setRows(1)
     props.onValueChange?.("")   // 清空是程序干的，内容事件不会叫，菜单得自己收
@@ -163,9 +201,11 @@ export function PromptInput(props: PromptInputProps) {
           ref={(r: TextareaRenderable) => {
             input = r
             props.controls?.({
+              pasteImage,
               setValue: (value: string) => {
                 // 程序改写整行（Tab 补全、清空）：原来那几段粘贴的占位符都不在了
                 pastes.clear()
+                images.clear()
                 r.setText(value)
                 syncRows()
                 props.onValueChange?.(value)

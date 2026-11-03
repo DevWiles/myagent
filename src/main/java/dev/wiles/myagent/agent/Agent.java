@@ -463,6 +463,16 @@ public final class Agent {
      * @return 模型的最终文本答复
      */
     public String run(String userInput) {
+        return run(userInput, List.of());
+    }
+
+    /**
+     * 带图的一句话（用户粘贴的截图）。图只跟着这一条 user 消息走，
+     * 之后每一步请求都会把它连同历史一起再发一遍，和文字一样，直到被压缩掉。
+     *
+     * @param images {@code data:} URL，空表示不带图
+     */
+    public String run(String userInput, List<String> images) {
         cancelled = false;
         budgetExhausted = false;
         // 断点之后的第一句话：前面拼上中断说明，告诉模型现场怎么读（见 Interruption.resumeNote）。
@@ -470,7 +480,7 @@ public final class Agent {
         // 只拼一次：这一轮说完，unfinished 就清了
         Interruption cut = unfinished;
         history.add(ChatMessage.user(cut == null ? userInput
-                : cut.resumeNote(clock.getAsLong()) + "\n\n" + userInput));
+                : cut.resumeNote(clock.getAsLong()) + "\n\n" + userInput, images));
         // 断的时候要知道跑到第几步了，所以 step 活在 try 外面
         int step = 0;
 

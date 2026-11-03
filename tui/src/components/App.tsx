@@ -18,6 +18,7 @@ import type { SessionState } from "../store.ts"
 import { continueHint } from "../store.ts"
 import { tildify } from "../path.ts"
 import { FRAME_MS, tabStatus, tabTitle } from "../terminal-title.ts"
+import { isImagePasteKey, type ClipImage } from "../clipboard-image.ts"
 import {
   DEFAULT_SCROLL_SPEED,
   formatSpeed,
@@ -228,7 +229,7 @@ export function App(props: AppProps) {
 
   onCleanup(() => clearTimeout(copyHintTimer))
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
-  let inputControls: { setValue: (value: string) => void } | undefined
+  let inputControls: { setValue: (value: string) => void; pasteImage: () => void } | undefined
 
   /** 对话区的滚动容器。展开/收起工具明细时要按住它的滚动位置（见 toggleToolEntry）。 */
   let transcriptScroll: ScrollBoxRenderable | undefined
@@ -320,23 +321,24 @@ export function App(props: AppProps) {
    * <p>模式在**提交这一刻**才起作用，不是打字时。所以用户可以先写完一长段，
    * 再想起来「这该走规划」，Shift+Tab 一下再回车——不用重打。
    */
-  const sendByMode = (text: string, display?: string): void => {
+  /** 图只有 normal 能带：plan 模式下输入框会先拦住（见 PromptInput 的 allowImages） */
+  const sendByMode = (text: string, display?: string, images: ClipImage[] = []): void => {
     switch (state().mode) {
       case "plan":
         session.plan(text, display)
         return
       default:
-        session.prompt(text, display)
+        session.prompt(text, display, images)
     }
   }
 
   /** `display` 是输入框里看到的样子：大段粘贴还折在占位符里，转录照这个画。 */
-  const submit = (value: string, display?: string): void => {
+  const submit = (value: string, display?: string, images: ClipImage[] = []): void => {
     if (state().busy) return
     const decision = resolve(value, commandContext())
     switch (decision.kind) {
       case "prompt":
-        sendByMode(decision.text, display)
+        sendByMode(decision.text, display, images)
         return
       case "unknown":
         session.notice("warn", `没有 ${decision.typed} 这个命令。敲一个 / 看有哪些，或者 /help。`)
@@ -680,6 +682,13 @@ export function App(props: AppProps) {
       return
     }
 
+    // 贴图：去系统剪贴板拿图，在光标处插一个 [图片 #n]。会话选择器开着时输入框是搜索框，不贴
+    if (isImagePasteKey(key) && !picker() && !speedDialog()) {
+      consume()
+      inputControls?.pasteImage()
+      return
+    }
+
     // 滚轮速度弹窗开着时，键全归它：输入框这会儿不该收字
     const speed = speedDialog()
     if (speed) {
@@ -961,6 +970,14 @@ export function App(props: AppProps) {
           onValueChange={setDraft}
           matched={matched()}
           controls={(api) => (inputControls = api)}
+          imagesBlocked={
+            state().mode === "plan"
+              ? "计划模式还不支持带图。Shift+Tab 切回 normal 再发，或者删掉图片占位符"
+              : !(state().ready?.features ?? []).includes("images")
+                ? "连着的后端太老，收不了图（图会被丢掉、模型只看到占位符）。重启 myagent 升级后端，或者删掉图片占位符"
+                : undefined
+          }
+          onNotice={(level, text) => session.notice(level, text)}
           onSubmit={submit}
         />
 

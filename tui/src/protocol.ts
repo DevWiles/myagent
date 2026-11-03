@@ -355,7 +355,8 @@ export type ApprovalDecision = 'yes' | 'no' | 'always'
 
 export type ClientCommand =
   /** `cid` 是本连接的 id，用来在收到回显时认出「这是我自己刚说的」（协议 3.15）。 */
-  | { t: 'prompt'; text: string; cid?: string }
+  /** images：用户贴的截图，顺序对应 text 里的 `[图片 #n]`（见 PromptImages.java）。没图就不带这个字段 */
+  | { t: 'prompt'; text: string; cid?: string; images?: { mime: string; data: string }[] }
   | { t: 'plan'; goal: string; cid?: string }
   /**
    * 接着跑上次没跑完的计划。没有存档时后端回 error。

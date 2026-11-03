@@ -132,6 +132,21 @@ class AgentTest {
     }
 
     @Test
+    @DisplayName("带图的一句话：图跟着那条 user 消息进历史，模型那边收得到")
+    void imagesRideOnTheUserMessage() {
+        FakeLlm llm = new FakeLlm().says("看到了，是个 NPE");
+        Agent agent = agent(llm, new ToolRegistry());
+        String png = "data:image/png;base64,iVBORw0KGgo=";
+
+        agent.run("这个报错 [图片 #1]", List.of(png));
+
+        ChatMessage sent = llm.received.get(0).get(1);
+        assertEquals("这个报错 [图片 #1]", sent.content());
+        assertEquals(List.of(png), sent.imagesOrEmpty());
+        assertEquals(List.of(png), agent.history().get(1).imagesOrEmpty());
+    }
+
+    @Test
     @DisplayName("一次工具调用：历史按 user → assistant(tool_calls) → tool → assistant 攒起来")
     void oneToolCall() {
         FakeLlm llm = new FakeLlm()

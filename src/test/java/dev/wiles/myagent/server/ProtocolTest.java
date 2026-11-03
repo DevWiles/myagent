@@ -268,6 +268,7 @@ class ProtocolTest {
         assertFalse(Protocol.FEATURES.contains("auto_mode"), "自动改走规划已经撤了，再宣告界面会等一条永远不来的 mode_switched");
         assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("events_resume"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("images"), "不宣告的话，新界面会以为后端收不了图、一律拦下");
         assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
         assertFalse(Protocol.FEATURES.contains("team"), "流水线已经撤了，再宣告界面会画出一个点了没反应的模式");
     }
