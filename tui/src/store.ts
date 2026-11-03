@@ -523,17 +523,6 @@ export class SessionStore {
     this.set({ expanded: next })
   }
 
-  /**
-   * Ctrl-O：整体展开/收起全部工具组。有任何一条收着就全展开，全展开了就全收起，
-   * 按一下总能得到确定结果，不卡在中间态。
-   */
-  toggleExpanded(): void {
-    const keys = this.state.entries.filter(e => e.kind === 'tools').map(e => e.key)
-    if (keys.length === 0) return
-    const allExpanded = keys.every(k => this.state.expanded.has(k))
-    this.set({ expanded: allExpanded ? new Set() : new Set(keys) })
-  }
-
   /** 回答完计划确认（发送由调用方负责），把框收掉。 */
   clearPlanConfirm(): void {
     this.set({ planConfirm: null })

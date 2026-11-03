@@ -118,7 +118,7 @@ const TIPS = [
   "Shift+Tab 切模式：normal 直接干 · plan 先拆计划",
   "敲一个 / 看有哪些命令，边打边筛",
   "/resume 挑一段历史会话接着聊，/continue 直接接最近那段",
-  "Ctrl-O 展开工具调用详情，Ctrl-C 中断当前这轮（空着连按两次退出）",
+  "点工具调用那一行展开详情，Ctrl-C 中断当前这轮（空着连按两次退出）",
 ] as const
 
 const WHATS_NEW = [

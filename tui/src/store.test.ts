@@ -187,27 +187,12 @@ describe('多轮对话', () => {
     feed(store,
       { t: 'tool_started', id: 1, tool: 'bash', arguments: '{}' },
       { t: 'tool_finished', id: 1, tool: 'bash', ok: true, output: 'x' })
-    store.toggleExpanded()
+    store.toggleEntry(store.getSnapshot().entries.find(e => e.kind === 'tools')!.key)
     expect(store.getSnapshot().expanded.size).toBe(1)
 
     store.submitPrompt('下一个问题')
     // 不清空：上一轮的工具组还活着、还能展开着看
     expect(store.getSnapshot().expanded.size).toBe(1)
-  })
-
-  test('Ctrl-O 覆盖全部轮次的工具组——全屏下都可展开', () => {
-    const store = new SessionStore()
-    feed(store,
-      { t: 'tool_started', id: 1, tool: 'bash', arguments: '{}' },
-      { t: 'tool_finished', id: 1, tool: 'bash', ok: true, output: 'x' },
-      { t: 'text_delta', text: '第一轮结束' })
-    store.submitPrompt('再来')
-    feed(store,
-      { t: 'tool_started', id: 2, tool: 'read_file', arguments: '{}' },
-      { t: 'tool_finished', id: 2, tool: 'read_file', ok: true, output: 'y' })
-
-    store.toggleExpanded()
-    expect(store.getSnapshot().expanded.size).toBe(2)
   })
 
   test('toggleEntry 精确控制单条（鼠标点击走这条），不影响其它', () => {
@@ -221,28 +206,6 @@ describe('多轮对话', () => {
     expect(store.getSnapshot().expanded.has(key)).toBe(true)
     store.toggleEntry(key)
     expect(store.getSnapshot().expanded.has(key)).toBe(false)
-  })
-})
-
-describe('Ctrl-O 展开', () => {
-  test('只对工具组生效，反复按是开关', () => {
-    const store = new SessionStore()
-    feed(store,
-      { t: 'text_delta', text: '文本' },
-      { t: 'tool_started', id: 1, tool: 'bash', arguments: '{}' },
-      { t: 'tool_finished', id: 1, tool: 'bash', ok: true, output: 'x' })
-
-    store.toggleExpanded()
-    expect(store.getSnapshot().expanded.size).toBe(1)
-    store.toggleExpanded()
-    expect(store.getSnapshot().expanded.size).toBe(0)
-  })
-
-  test('这一轮没有工具调用时按了不该有副作用', () => {
-    const store = new SessionStore()
-    feed(store, { t: 'text_delta', text: '纯聊天' })
-    store.toggleExpanded()
-    expect(store.getSnapshot().expanded.size).toBe(0)
   })
 })
 
