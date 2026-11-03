@@ -333,13 +333,6 @@ export type ServerEvent =
    * 和 plan_tasks_added 的「计划照常长大」不是一回事，面板上该看得出区别。
    */
   | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
-  /**
-   * 一条 prompt 被自动改走规划了，reason 是后端给的判断依据。
-   *
-   * 不显示它的话，用户发的是普通一句话、屏幕上却冒出个计划面板——
-   * 他会完全不知道发生了什么，也没机会说「不用，直接做」。
-   */
-  | { t: 'mode_switched'; mode: string; reason: string }
   /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
   | {
       t: 'plan_finished'

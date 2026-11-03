@@ -41,8 +41,6 @@ import dev.wiles.myagent.skill.SkillTool;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.ToolRegistry;
-import dev.wiles.myagent.plan.ExecutionMode;
-import dev.wiles.myagent.plan.ModeHeuristic;
 import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.PlanCheckpoint;
 import dev.wiles.myagent.plan.PlanExecuteAgent;
@@ -107,12 +105,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class AgentServer extends WebSocketServer {
 
     private static final Logger log = LoggerFactory.getLogger(AgentServer.class);
-    /** MYAGENT_AUTO_PLAN=0 时 prompt 不再按字面启发式改走规划；评测里用它做纯单 agent 对照 */
-    private static final boolean AUTO_PLAN = !"0".equals(System.getenv("MYAGENT_AUTO_PLAN"));
-
     /**
      * MYAGENT_FINAL_REVIEW=1 时，每句话改了文件就做一次收尾独立审查（{@link ReviewLoop}）。
-     * 默认关：等评测证明它划算再考虑默认开。和 AUTO_PLAN 一样先做成环境变量，评测驱动脚本好切。
+     * 默认关：等评测证明它划算再考虑默认开。先做成环境变量，评测驱动脚本好切。
      */
     private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
 
@@ -719,17 +714,9 @@ public final class AgentServer extends WebSocketServer {
         publish(Protocol.event("busy").put("busy", true));
         checkpoints.mark(brief(text), agent.history().size());
 
-        // 看一眼这句话该不该改走规划。**ASK 在这儿并到 PLAN**：无头模式问不了，
-        // 而规划本来就带一道确认（plan_confirm_request），「问一句」的效果它已经有了，
-        // 代价只是多花一次规划调用。为此单开一条协议消息不划算
-        ModeHeuristic.Decision decision = ModeHeuristic.assess(text);
-        // MYAGENT_AUTO_PLAN=0 关掉这道字面判断（评测对照用：纯单 agent 基线），prompt 永远直接对话
-        if (planAgent != null && AUTO_PLAN && decision.mode() != ExecutionMode.DIRECT) {
-            publish(Protocol.encodeModeSwitch(decision.explain()));
-            worker.submit(() -> runPlan(text));
-            return;
-        }
-
+        // 普通模式下每句话都直接对话，不再按字面猜「这件事该不该先拆计划」：
+        // 误判的代价是一次规划调用加一道确认，评测里它不提升完成率、只让触发的那几次慢好几倍。
+        // 要先规划就由用户 Shift+Tab 切到 plan 模式（走 handlePlan）
         worker.submit(() -> {
             long startedAt = System.currentTimeMillis();
             try {

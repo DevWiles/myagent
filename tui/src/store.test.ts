@@ -632,26 +632,6 @@ describe('计划面板', () => {
     expect(plan.tasks[1]?.acceptance).toBeUndefined()
   })
 
-  test('自动改走规划时，把后端给的理由摆出来', () => {
-    const store = new SessionStore()
-    feed(store, { t: 'mode_switched', mode: 'plan', reason: '范围铺得比较开' })
-
-    const entry = store.getSnapshot().entries.at(-1)
-    if (entry?.kind !== 'notice') throw new Error('没落成提示')
-    // 不说清楚的话，用户发的是一句话、屏幕上却冒出个计划，他会完全不知道为什么
-    expect(entry.text).toContain('范围铺得比较开')
-    expect(entry.level).toBe('info')
-  })
-
-  test('后端没给理由也不能空着一句', () => {
-    const store = new SessionStore()
-    feed(store, { t: 'mode_switched', mode: 'plan', reason: '' })
-
-    const entry = store.getSnapshot().entries.at(-1)
-    if (entry?.kind !== 'notice') throw new Error('没落成提示')
-    expect(entry.text.length).toBeGreaterThan(0)
-  })
-
   test('首帧带上次没跑完的计划，界面据此放出「接着跑」', () => {
     const store = new SessionStore()
     feed(store, {

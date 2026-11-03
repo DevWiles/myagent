@@ -49,7 +49,7 @@ def main():
     name = f"compact-bench-{uuid.uuid4().hex[:8]}"
     r = sh(["docker", "run", "-d", "--rm", "--name", name, "-p", "127.0.0.1::7777",
             "-v", f"{JAR}:/opt/myagent.jar:ro", "-v", f"{work}:/work", "-v", f"{home}:/home/bench",
-            "-e", "HOME=/home/bench", "-e", "MYAGENT_AUTO_PLAN=0", "-e", f"MYAGENT_CONTEXT_TOKENS={args.window}",
+            "-e", "HOME=/home/bench", "-e", f"MYAGENT_CONTEXT_TOKENS={args.window}",
             "-w", "/work", IMAGE, "java", "-jar", "/opt/myagent.jar", "--serve", "--lan", "--port", "7777", "-d", "/work"])
     assert r.returncode == 0, r.stderr
     token = port = None

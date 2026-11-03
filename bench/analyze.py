@@ -7,8 +7,8 @@ import statistics
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(BENCH, "results")
-ORDER = ["react", "prompt", "plan", "team"]
-TITLE = {"react": "单 agent（关自动规划）", "prompt": "产品默认（可自动改走规划）", "plan": "显式规划→执行", "team": "流水线（规划→并行→验收）"}
+ORDER = ["react", "plan", "team"]
+TITLE = {"react": "单 agent", "plan": "显式规划→执行", "team": "流水线（规划→并行→验收）"}
 KIND = {"bugfix": "修 bug", "feature": "实现功能", "refactor": "重构", "multi": "多文件"}
 
 

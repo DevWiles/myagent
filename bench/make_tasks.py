@@ -5,7 +5,7 @@
 - src/      初始代码（有 bug 或缺实现）
 - tests/    agent 可见的测试（初始状态应当失败）
 - hidden/   验收用的隐藏测试，运行时才拷进容器；成功 = tests + hidden 全部通过
-每个任务标注 kind（bugfix / feature / refactor / multi）和 difficulty（1~3），便于分组统计。
+每个任务标注 kind（bugfix / feature / refactor / multi / long / hard）和 difficulty（1~3），便于分组统计。
 """
 import json
 import os
@@ -951,6 +951,657 @@ task("inventory_service", "multi", 3, """
         svc = InventoryService(); svc.import_csv("sku,name,qty,price\\nA1,b,1,1\\n")
         svc.release("A1", 2)
         assert svc.total_value() == 3
+    """,
+})
+
+
+# ---------------------------------------------------------------- long：一句话里塞 8~10 条要求，测「长任务会不会漏步骤」
+# 要求写成连贯的一段话、不编号——编了号模型照着勾就行，测不出它自己记不记得住。
+# 每条要求对应一条隐藏测试，tests_passed / 总数就是「做到了几条」。
+
+task("todo_overhaul", "long", 3, """
+    给 src/todo 下的待办工具做一轮改造。Todo 加一个 priority 字段，取值 low/normal/high，默认 normal，传别的值构造时就抛 ValueError。
+    TodoStore.add(title, priority="normal") 返回新条目的 id，id 要从 1 开始递增（现在是从 0 开始，这是个 bug）。
+    加 complete(id) 把条目标成已完成，id 不存在时抛 KeyError。加 list(status="all")，status 可以是 all/open/done，按状态过滤，
+    结果按优先级 high→normal→low 排、同优先级按 id 升序。加 save(path) 和类方法 load(path)，用 JSON 存取，priority 和完成状态都要保留，
+    load 回来之后继续 add 的 id 要接着已有的最大 id 往下排。命令行 src/todo/cli.py 的 main(argv, store) 要支持
+    `add <标题> [--priority high]`（打印 `added <id>`）、`done <id>`（打印 `done <id>`）、`list`（每条一行，格式 `[ ] 1 买菜 (high)`，
+    完成的是 `[x]`，顺序同 list()）。最后在 README.md 加一个 `## 用法` 小节，写清这三个命令和 --priority 选项。tests/ 里的测试不要改。
+""", {
+    "src/__init__.py": "",
+    "src/todo/__init__.py": "",
+    "src/todo/models.py": """
+    from dataclasses import dataclass
+
+
+    @dataclass
+    class Todo:
+        id: int
+        title: str
+        done: bool = False
+    """,
+    "src/todo/store.py": """
+    from .models import Todo
+
+
+    class TodoStore:
+        def __init__(self):
+            self._items = []
+
+        def add(self, title):
+            t = Todo(id=len(self._items), title=title)
+            self._items.append(t)
+            return t.id
+
+        def all(self):
+            return list(self._items)
+    """,
+    "src/todo/cli.py": """
+    import sys
+
+    from .store import TodoStore
+
+
+    def main(argv=None, store=None):
+        argv = sys.argv[1:] if argv is None else argv
+        store = store or TodoStore()
+        if argv[0] == "add":
+            print(f"added {store.add(argv[1])}")
+        return store
+
+
+    if __name__ == "__main__":
+        main()
+    """,
+    "README.md": "# todo\n\n一个小待办工具。\n",
+    "tests/test_todo.py": """
+    from src.todo.store import TodoStore
+
+    def test_ids_start_at_one():
+        s = TodoStore()
+        assert s.add("a") == 1
+    """,
+    "hidden/test_hidden.py": """
+    import pytest
+    from src.todo.models import Todo
+    from src.todo.store import TodoStore
+    from src.todo import cli
+
+    def test_priority_default_and_validation():
+        assert Todo(id=1, title="a").priority == "normal"
+        with pytest.raises(ValueError):
+            Todo(id=1, title="a", priority="urgent")
+
+    def test_ids_increment_from_one():
+        s = TodoStore()
+        assert s.add("a") == 1 and s.add("b") == 2
+
+    def test_complete():
+        s = TodoStore(); i = s.add("a")
+        s.complete(i)
+        assert [t.done for t in s.list("done")] == [True]
+        with pytest.raises(KeyError):
+            s.complete(99)
+
+    def test_list_filter():
+        s = TodoStore(); a = s.add("a"); s.add("b"); s.complete(a)
+        assert [t.title for t in s.list("open")] == ["b"]
+        assert [t.title for t in s.list("done")] == ["a"]
+        assert len(s.list()) == 2
+
+    def test_list_order():
+        s = TodoStore()
+        s.add("l", priority="low"); s.add("n1"); s.add("h", priority="high"); s.add("n2")
+        assert [t.title for t in s.list()] == ["h", "n1", "n2", "l"]
+
+    def test_save_load_roundtrip(tmp_path):
+        s = TodoStore(); a = s.add("a", priority="high"); s.add("b"); s.complete(a)
+        p = tmp_path / "t.json"; s.save(str(p))
+        s2 = TodoStore.load(str(p))
+        assert {t.title: (t.priority, t.done) for t in s2.list()} == {"a": ("high", True), "b": ("normal", False)}
+
+    def test_load_continues_ids(tmp_path):
+        s = TodoStore(); s.add("a"); s.add("b")
+        p = tmp_path / "t.json"; s.save(str(p))
+        assert TodoStore.load(str(p)).add("c") == 3
+
+    def test_cli_add_priority(capsys):
+        s = TodoStore()
+        cli.main(["add", "买菜", "--priority", "high"], s)
+        assert capsys.readouterr().out.strip() == "added 1"
+        assert s.list()[0].priority == "high"
+
+    def test_cli_done_and_list(capsys):
+        s = TodoStore()
+        cli.main(["add", "买菜", "--priority", "high"], s); cli.main(["add", "洗碗"], s)
+        capsys.readouterr()
+        cli.main(["done", "1"], s)
+        assert capsys.readouterr().out.strip() == "done 1"
+        cli.main(["list"], s)
+        assert capsys.readouterr().out.strip().splitlines() == ["[x] 1 买菜 (high)", "[ ] 2 洗碗 (normal)"]
+
+    def test_readme_usage():
+        text = open("README.md", encoding="utf-8").read()
+        assert "## 用法" in text and "--priority" in text
+    """,
+})
+
+task("text_stats", "long", 3, """
+    扩展 src/textstats 这个文本统计小库。先修 core.word_count：按任意空白切词，空串要返回 0（现在返回 1）。在 core 里加
+    char_count(text, spaces=True)，spaces=False 时不算任何空白字符；加 top_words(text, n=3)，返回 [(词, 次数), ...]，词一律转小写、
+    去掉两端的 .,!?;: 标点，按次数降序、次数相同按字母序；加 sentence_count(text)，以 . ! ? 结尾算一句，连在一起的标点（比如 ?!）只算一次，
+    末尾没有标点的最后一段也算一句，空串是 0；加 reading_time(text, wpm=200)，按词数算分钟数并向上取整，空串返回 0。
+    新建 src/textstats/report.py，report(text) 返回一个 dict，键正好是 words、chars、sentences、top、minutes 五个（top 用 top_words 的默认 n）。
+    新建命令行 src/textstats/cli.py，main(argv) 读 argv[0] 指向的文件：默认依次打印 `words: N`、`chars: N`、`sentences: N`、`minutes: N` 四行，
+    带 --json 时改为打印 report 的 JSON。src/textstats/__init__.py 要能直接 `from src.textstats import report, word_count`。
+    最后在 CHANGELOG.md 加一个 0.2.0 条目，列出新增的函数。tests/ 里的测试不要改。
+""", {
+    "src/__init__.py": "",
+    "src/textstats/__init__.py": "",
+    "src/textstats/core.py": """
+    def word_count(text):
+        return len(text.split(" "))
+    """,
+    "CHANGELOG.md": "# Changelog\n\n## 0.1.0\n- word_count\n",
+    "tests/test_core.py": """
+    from src.textstats.core import word_count
+
+    def test_word_count_empty():
+        assert word_count("") == 0
+    """,
+    "hidden/test_hidden.py": """
+    import json
+    from src.textstats import core
+
+    def test_word_count():
+        assert core.word_count("") == 0 and core.word_count("  a  b\\tc ") == 3
+
+    def test_char_count():
+        assert core.char_count("a b") == 3 and core.char_count("a b\\n", spaces=False) == 2
+
+    def test_top_words():
+        assert core.top_words("The cat. the dog! A cat, a bird", n=3) == [("a", 2), ("cat", 2), ("the", 2)]
+
+    def test_sentence_count():
+        assert core.sentence_count("Hi. How are you?! Fine") == 3 and core.sentence_count("") == 0
+
+    def test_reading_time():
+        assert core.reading_time("") == 0 and core.reading_time("w " * 201) == 2 and core.reading_time("w") == 1
+
+    def test_report():
+        from src.textstats.report import report
+        r = report("Hi there. Bye")
+        assert set(r) == {"words", "chars", "sentences", "top", "minutes"}
+        assert r["words"] == 3 and r["sentences"] == 2 and r["minutes"] == 1
+
+    def test_cli_plain(tmp_path, capsys):
+        from src.textstats import cli
+        p = tmp_path / "a.txt"; p.write_text("Hi there. Bye", encoding="utf-8")
+        cli.main([str(p)])
+        assert capsys.readouterr().out.splitlines() == ["words: 3", "chars: 13", "sentences: 2", "minutes: 1"]
+
+    def test_cli_json(tmp_path, capsys):
+        from src.textstats import cli
+        p = tmp_path / "a.txt"; p.write_text("Hi there. Bye", encoding="utf-8")
+        cli.main([str(p), "--json"])
+        assert json.loads(capsys.readouterr().out)["words"] == 3
+
+    def test_package_exports():
+        from src.textstats import report, word_count
+        assert callable(report) and word_count("a b") == 2
+
+    def test_changelog():
+        text = open("CHANGELOG.md", encoding="utf-8").read()
+        assert "0.2.0" in text and "top_words" in text
+    """,
+})
+
+task("sales_report", "long", 3, """
+    把 src/sales 做成一个销售报表模块。load.read_rows(text) 解析表头为 date,region,amount 的 CSV 文本：amount 转成 float（现在是字符串），
+    每个字段去掉两端空白，跳过空行；某行 amount 不是数字时抛 ValueError，错误信息里写明行号，格式 `line N`，行号从表头那行算 1。
+    新建 src/sales/summary.py：total_by_region(rows) 返回 {地区: 合计}，合计保留两位小数；monthly(rows) 返回按 `YYYY-MM` 汇总的 dict，
+    键按月份升序；top_region(rows) 返回合计最大的地区，并列取字母序靠前的，rows 为空返回 None。
+    新建 src/sales/export.py：to_markdown(totals, currency="CNY") 输出 markdown 表格，表头 `| region | total (CNY) |`（括号里跟着 currency 变），
+    第二行 `|---|---|`，数据行按合计降序、金额保留两位小数，整张表不带结尾换行；to_csv(totals) 输出 `region,total` 表头加数据行，
+    顺序和小数位同上，每行以换行结尾。最后在 README.md 加一个 `## 报表` 小节，说明 to_markdown 和 to_csv 的用法。tests/ 里的测试不要改。
+""", {
+    "src/__init__.py": "",
+    "src/sales/__init__.py": "",
+    "src/sales/load.py": """
+    import csv
+    import io
+
+
+    def read_rows(text):
+        return list(csv.DictReader(io.StringIO(text)))
+    """,
+    "README.md": "# sales\n\n销售数据小工具。\n",
+    "tests/test_load.py": """
+    from src.sales.load import read_rows
+
+    def test_amount_is_float():
+        rows = read_rows("date,region,amount\\n2026-01-03,east,10\\n")
+        assert rows[0]["amount"] == 10.0
+    """,
+    "hidden/test_hidden.py": """
+    import importlib
+    import pytest
+    from src.sales.load import read_rows
+
+    # 在用到时才导入：漏建一个模块只该挂相关的那几条，不能让整个文件收集失败、一条都数不出来
+    summary = lambda: importlib.import_module("src.sales.summary")
+    export = lambda: importlib.import_module("src.sales.export")
+
+    DATA = "date,region,amount\\n2026-01-03, east ,10\\n\\n2026-01-20,west,5.5\\n2026-02-01,east,2.25\\n"
+
+    def test_read_rows_types():
+        rows = read_rows(DATA)
+        assert len(rows) == 3 and rows[0] == {"date": "2026-01-03", "region": "east", "amount": 10.0}
+
+    def test_read_rows_bad_line():
+        with pytest.raises(ValueError, match="line 3"):
+            read_rows("date,region,amount\\n2026-01-01,east,1\\n2026-01-02,west,abc\\n")
+
+    def test_total_by_region():
+        assert summary().total_by_region(read_rows(DATA)) == {"east": 12.25, "west": 5.5}
+
+    def test_monthly():
+        assert list(summary().monthly(read_rows(DATA)).items()) == [("2026-01", 15.5), ("2026-02", 2.25)]
+
+    def test_top_region():
+        assert summary().top_region(read_rows(DATA)) == "east"
+        assert summary().top_region([]) is None
+        tie = [{"date": "2026-01-01", "region": "b", "amount": 1.0}, {"date": "2026-01-01", "region": "a", "amount": 1.0}]
+        assert summary().top_region(tie) == "a"
+
+    def test_to_markdown():
+        assert export().to_markdown({"west": 5.5, "east": 12.25}) == "| region | total (CNY) |\\n|---|---|\\n| east | 12.25 |\\n| west | 5.50 |"
+
+    def test_to_markdown_currency():
+        assert export().to_markdown({"a": 1}, currency="USD").splitlines()[0] == "| region | total (USD) |"
+
+    def test_to_csv():
+        assert export().to_csv({"west": 5.5, "east": 12.25}) == "region,total\\neast,12.25\\nwest,5.50\\n"
+
+    def test_readme():
+        text = open("README.md", encoding="utf-8").read()
+        assert "## 报表" in text and "to_markdown" in text
+    """,
+})
+
+
+# ---------------------------------------------------------------- hard：一句话里 20 条要求、分在 5~7 个文件、规则之间互相牵连
+# 第一轮的 long 三组都是满分（天花板），测不出计划工具的作用；这一档专门往「记不住」那边推。
+
+task("library_loans", "hard", 3, """
+    把 src/lib 做成一个图书借阅系统。models.py 里的 Book(isbn, title, author, year, copies=1) 构造时要把 isbn 里的短横线和空格去掉，
+    去完必须是 10 位或 13 位数字，否则抛 ValueError；再加一个 Member(id, name, tier="basic")，tier 只能是 basic 或 premium，否则抛 ValueError。
+    catalog.py 的 Catalog：add(book) 遇到已有的 isbn 不新建条目，而是把 copies 加到原来那本上，并返回库里的那本；find(isbn) 接受带短横线的写法，
+    找不到返回 None；search(q) 在书名或作者里做不区分大小写的子串匹配，结果按书名排序；export_csv() 输出表头 `isbn,title,author,year,copies`
+    加数据行，按 isbn 升序，每行以换行结尾。新建 members.py 的 Members：register(name, tier="basic") 返回自动编号的 id，依次是 M001、M002……；
+    get(id) 找不到抛 KeyError。新建 loans.py：定义异常 NotAvailable 和 LimitExceeded；Loans(catalog, members) 的 borrow(member_id, isbn, on)
+    返回借阅编号（从 1 开始的整数），on 是 datetime.date；available(isbn) 是馆藏册数减去未还的借阅数，为 0 时 borrow 抛 NotAvailable；
+    同时在借的数量 basic 最多 2 本、premium 最多 5 本，超了抛 LimitExceeded；应还日期 basic 是借出日加 14 天、premium 加 28 天；
+    get(loan_id) 返回借阅记录，字段有 id、member_id、isbn、borrowed、due、returned（没还是 None）、fine；return_book(loan_id, on) 返回罚款并记到 fine 上，
+    每逾期一天 basic 罚 0.5、premium 罚 0.25，没逾期是 0，同一笔还第二次抛 ValueError；overdue(on) 返回在 on 这天已经过了应还日期还没还的借阅，
+    按应还日期升序、同一天按编号升序。新建 report.py：member_summary(loans, member_id) 返回 {"active": 在借数, "returned": 已还数, "fines": 罚款合计}，
+    罚款保留两位小数；popular(loans, n=3) 返回 [(isbn, 被借次数), ...]，按次数降序、次数相同按 isbn 升序。
+    最后在 README.md 加一个 `## 借阅规则` 小节写清两种会员的借书上限、借期和罚款标准，在 CHANGELOG.md 加一个 0.2.0 条目。tests/ 里的测试不要改。
+""", {
+    "src/__init__.py": "",
+    "src/lib/__init__.py": "",
+    "src/lib/models.py": """
+    from dataclasses import dataclass
+
+
+    @dataclass
+    class Book:
+        isbn: str
+        title: str
+        author: str
+        year: int
+    """,
+    "src/lib/catalog.py": """
+    class Catalog:
+        def __init__(self):
+            self._books = []
+
+        def add(self, book):
+            self._books.append(book)
+            return book
+
+        def find(self, isbn):
+            for b in self._books:
+                if b.isbn == isbn:
+                    return b
+            return None
+    """,
+    "README.md": "# lib\n\n小型图书馆。\n",
+    "CHANGELOG.md": "# Changelog\n\n## 0.1.0\n- Catalog.add / find\n",
+    "tests/test_catalog.py": """
+    from src.lib.catalog import Catalog
+    from src.lib.models import Book
+
+    def test_find_with_hyphens():
+        c = Catalog(); c.add(Book("978-7-111-12345-6", "A", "x", 2020))
+        assert c.find("9787111123456") is not None
+    """,
+    "hidden/test_hidden.py": """
+    import importlib
+    from datetime import date, timedelta
+    import pytest
+
+    def mod(name):
+        return importlib.import_module("src.lib." + name)
+
+    ISBN1, ISBN2, ISBN3 = "9787111123456", "9787111654321", "0306406152"
+
+    def setup(tier="basic", copies=1):
+        M, C = mod("models"), mod("catalog")
+        cat = C.Catalog()
+        cat.add(M.Book(ISBN1, "Python", "Guido", 2020, copies))
+        cat.add(M.Book(ISBN2, "Algorithms", "Knuth", 1968, copies))
+        cat.add(M.Book(ISBN3, "Compilers", "Aho", 1986, copies))
+        mem = mod("members").Members()
+        mid = mem.register("ann", tier)
+        return cat, mem, mod("loans").Loans(cat, mem), mid
+
+    D0 = date(2026, 1, 1)
+
+    def test_isbn_normalized_and_validated():
+        M = mod("models")
+        assert M.Book("978-7-111 12345-6", "t", "a", 1).isbn == ISBN1
+        with pytest.raises(ValueError):
+            M.Book("12345", "t", "a", 1)
+
+    def test_member_tier():
+        M = mod("models")
+        assert M.Member("M001", "a").tier == "basic"
+        with pytest.raises(ValueError):
+            M.Member("M001", "a", "gold")
+
+    def test_add_merges_copies():
+        M, C = mod("models"), mod("catalog")
+        cat = C.Catalog()
+        cat.add(M.Book(ISBN1, "t", "a", 1, 2))
+        kept = cat.add(M.Book("978-7111-123456", "t", "a", 1, 3))
+        assert kept.copies == 5 and cat.find(ISBN1).copies == 5
+
+    def test_find_hyphenated_or_missing():
+        cat = setup()[0]
+        assert cat.find("978-7-111-12345-6").title == "Python"
+        assert cat.find("9780000000000") is None
+
+    def test_search_sorted_case_insensitive():
+        cat = setup()[0]
+        assert [b.title for b in cat.search("O")] == ["Algorithms", "Compilers", "Python"]
+        assert [b.title for b in cat.search("knu")] == ["Algorithms"]
+
+    def test_export_csv():
+        cat = setup()[0]
+        assert cat.export_csv() == ("isbn,title,author,year,copies\\n0306406152,Compilers,Aho,1986,1\\n"
+                                    "9787111123456,Python,Guido,2020,1\\n9787111654321,Algorithms,Knuth,1968,1\\n")
+
+    def test_register_ids():
+        mem = mod("members").Members()
+        assert [mem.register("a"), mem.register("b", "premium")] == ["M001", "M002"]
+        assert mem.get("M002").tier == "premium"
+
+    def test_get_missing_member():
+        with pytest.raises(KeyError):
+            mod("members").Members().get("M999")
+
+    def test_borrow_ids_and_available():
+        cat, mem, loans, mid = setup(copies=2)
+        assert loans.borrow(mid, ISBN1, D0) == 1 and loans.borrow(mid, ISBN2, D0) == 2
+        assert loans.available(ISBN1) == 1
+
+    def test_not_available():
+        cat, mem, loans, mid = setup()
+        other = mem.register("bob")
+        loans.borrow(mid, ISBN1, D0)
+        with pytest.raises(mod("loans").NotAvailable):
+            loans.borrow(other, ISBN1, D0)
+
+    def test_limits_by_tier():
+        L = mod("loans")
+        cat, mem, loans, mid = setup(copies=10)
+        loans.borrow(mid, ISBN1, D0); loans.borrow(mid, ISBN2, D0)
+        with pytest.raises(L.LimitExceeded):
+            loans.borrow(mid, ISBN3, D0)
+        cat, mem, loans, pid = setup("premium", copies=10)
+        for _ in range(5):
+            loans.borrow(pid, ISBN1, D0)
+        with pytest.raises(L.LimitExceeded):
+            loans.borrow(pid, ISBN2, D0)
+
+    def test_due_dates():
+        cat, mem, loans, mid = setup()
+        pid = mem.register("p", "premium")
+        assert loans.get(loans.borrow(mid, ISBN1, D0)).due == D0 + timedelta(days=14)
+        assert loans.get(loans.borrow(pid, ISBN2, D0)).due == D0 + timedelta(days=28)
+
+    def test_fine_basic_late():
+        cat, mem, loans, mid = setup()
+        lid = loans.borrow(mid, ISBN1, D0)
+        assert loans.return_book(lid, D0 + timedelta(days=17)) == 1.5
+        assert loans.get(lid).fine == 1.5 and loans.get(lid).returned == D0 + timedelta(days=17)
+
+    def test_fine_premium_and_on_time():
+        cat, mem, loans, pid = setup("premium")
+        a = loans.borrow(pid, ISBN1, D0); b = loans.borrow(pid, ISBN2, D0)
+        assert loans.return_book(a, D0 + timedelta(days=30)) == 0.5
+        assert loans.return_book(b, D0 + timedelta(days=28)) == 0
+
+    def test_double_return():
+        cat, mem, loans, mid = setup()
+        lid = loans.borrow(mid, ISBN1, D0); loans.return_book(lid, D0)
+        with pytest.raises(ValueError):
+            loans.return_book(lid, D0)
+
+    def test_overdue_sorted():
+        cat, mem, loans, mid = setup(copies=3)
+        pid = mem.register("p", "premium")
+        a = loans.borrow(mid, ISBN1, D0 + timedelta(days=2))   # 应还 +16
+        b = loans.borrow(mid, ISBN2, D0)                       # 应还 +14
+        c = loans.borrow(pid, ISBN3, D0 - timedelta(days=20))  # 应还 +8
+        d = loans.borrow(pid, ISBN2, D0 - timedelta(days=14))  # 应还 +14，和 b 同一天
+        assert [l.id for l in loans.overdue(D0 + timedelta(days=20))] == [c, b, d, a]
+        loans.return_book(a, D0 + timedelta(days=20))
+        assert [l.id for l in loans.overdue(D0 + timedelta(days=20))] == [c, b, d]
+        assert [l.id for l in loans.overdue(D0 + timedelta(days=8))] == []
+
+    def test_member_summary():
+        cat, mem, loans, mid = setup(copies=3)
+        a = loans.borrow(mid, ISBN1, D0); loans.borrow(mid, ISBN2, D0)
+        loans.return_book(a, D0 + timedelta(days=15))
+        assert mod("report").member_summary(loans, mid) == {"active": 1, "returned": 1, "fines": 0.5}
+
+    def test_popular():
+        cat, mem, loans, mid = setup(copies=5)
+        for isbn in (ISBN2, ISBN1):
+            l = loans.borrow(mid, isbn, D0); loans.return_book(l, D0)
+        l = loans.borrow(mid, ISBN2, D0); loans.return_book(l, D0)
+        assert mod("report").popular(loans, n=2) == [(ISBN2, 2), (ISBN1, 1)]
+        assert mod("report").popular(loans) == [(ISBN2, 2), (ISBN1, 1)]
+
+    def test_readme_rules():
+        t = open("README.md", encoding="utf-8").read()
+        assert "## 借阅规则" in t and "14" in t and "28" in t
+
+    def test_changelog():
+        assert "0.2.0" in open("CHANGELOG.md", encoding="utf-8").read()
+    """,
+})
+
+task("shop_pricing", "hard", 3, """
+    给 src/shop 做一套结算。money.py 的 to_money(x) 要把金额转成保留两位小数的 Decimal，四舍五入用 ROUND_HALF_UP，float 先转成字符串再转，
+    所以 to_money(2.675) 和 to_money("2.675") 都是 2.68（现在用的 round 是错的）。catalog.py 的 Product(sku, name, price, category) 构造时把 price 转成
+    to_money 的结果。cart.py 的 Cart(catalog, member="basic")：add(sku, qty=1) 遇到同一个 sku 合并数量，sku 不在目录里抛 KeyError，qty 小于等于 0 抛 ValueError；
+    remove(sku) 不在购物车里抛 KeyError；set_qty(sku, qty) 设成 0 就删掉这一行、负数抛 ValueError；lines() 返回 [(sku, qty), ...]，按 sku 升序；
+    subtotal() 是单价乘数量的合计。新建 promo.py：line_discounts(cart) 返回 {sku: 优惠额}，只放有优惠的行；同一个 sku 数量满 10 件这一行打九折（叫 BULK）；
+    category 是 fruit 的商品买三送一（叫 3FOR2，每 3 件里免 1 件的钱）；两条都满足时只取优惠更多的那条。apply_coupon(cart, code) 支持 SAVE10 和 FLAT5，
+    别的码抛 ValueError，后用的券替换先用的；coupon_discount(cart) 以「小计减去行优惠」为基数：SAVE10 在基数满 100 时打九折、不满 100 不给优惠，
+    FLAT5 减 5 元但最多减到 0。新建 tax.py：tax(cart) 按每行「行金额减行优惠」乘税率求和，food 和 fruit 税率 0，其余 13%，优惠券不影响税额。
+    新建 checkout.py：totals(cart) 返回 {"subtotal", "discount", "tax", "shipping", "total"}，discount 是行优惠加券的合计；运费在「小计减行优惠」满 99
+    或 member 是 premium 时为 0，否则 8；total = subtotal - discount + tax + shipping；全部金额都用 to_money。新建 receipt.py：render(cart) 返回小票文本，
+    每个商品按 sku 升序一行 `<sku> x<数量> = <行金额>`，有行优惠的紧跟一行两个空格缩进的 `  BULK -<金额>` 或 `  3FOR2 -<金额>`，
+    之后依次是 `Subtotal <金额>`、`Discount -<金额>`、`Tax <金额>`、`Shipping <金额>`、`Total <金额>` 五行，行与行之间用换行连接、结尾不带换行。
+    最后在 README.md 加一个 `## 优惠规则` 小节，写清 BULK、3FOR2、SAVE10、FLAT5 和运费规则。tests/ 里的测试不要改。
+""", {
+    "src/__init__.py": "",
+    "src/shop/__init__.py": "",
+    "src/shop/money.py": """
+    def to_money(x):
+        return round(float(x), 2)
+    """,
+    "src/shop/catalog.py": """
+    from dataclasses import dataclass
+
+
+    @dataclass
+    class Product:
+        sku: str
+        name: str
+        price: float
+        category: str
+
+
+    class Catalog:
+        def __init__(self, products=()):
+            self._by_sku = {p.sku: p for p in products}
+
+        def get(self, sku):
+            return self._by_sku[sku]
+
+        def __contains__(self, sku):
+            return sku in self._by_sku
+    """,
+    "src/shop/cart.py": """
+    class Cart:
+        def __init__(self, catalog, member="basic"):
+            self.catalog = catalog
+            self.member = member
+            self.items = []
+
+        def add(self, sku, qty=1):
+            self.items.append((sku, qty))
+    """,
+    "README.md": "# shop\n\n结算模块。\n",
+    "tests/test_money.py": """
+    from decimal import Decimal
+    from src.shop.money import to_money
+
+    def test_half_up():
+        assert to_money("2.675") == Decimal("2.68")
+    """,
+    "hidden/test_hidden.py": """
+    import importlib
+    from decimal import Decimal as D
+    import pytest
+
+    def mod(name):
+        return importlib.import_module("src.shop." + name)
+
+    def cart(member="basic", **items):
+        C = mod("catalog")
+        cat = C.Catalog([C.Product("A1", "apple", "3.00", "fruit"), C.Product("B1", "bread", "5.50", "food"),
+                         C.Product("P1", "pen", "2", "office"), C.Product("L1", "lamp", 120, "home")])
+        c = mod("cart").Cart(cat, member)
+        for sku, qty in items.items():
+            c.add(sku, qty)
+        return c
+
+    def test_to_money_half_up():
+        m = mod("money")
+        assert m.to_money(2.675) == D("2.68") and m.to_money("2.675") == D("2.68") and m.to_money(1) == D("1.00")
+
+    def test_product_price_is_money():
+        price = mod("catalog").Product("X", "x", 2, "o").price
+        assert isinstance(price, D) and str(price) == "2.00"
+
+    def test_add_merges_and_unknown():
+        c = cart(P1=2); c.add("P1", 3)
+        assert c.lines() == [("P1", 5)]
+        with pytest.raises(KeyError):
+            c.add("ZZ")
+
+    def test_add_bad_qty():
+        with pytest.raises(ValueError):
+            cart().add("P1", 0)
+
+    def test_remove_missing():
+        with pytest.raises(KeyError):
+            cart(P1=1).remove("A1")
+
+    def test_set_qty():
+        c = cart(P1=2, A1=1); c.set_qty("P1", 0)
+        assert c.lines() == [("A1", 1)]
+        with pytest.raises(ValueError):
+            c.set_qty("A1", -1)
+
+    def test_lines_sorted():
+        assert cart(P1=1, A1=2, B1=1).lines() == [("A1", 2), ("B1", 1), ("P1", 1)]
+
+    def test_subtotal():
+        assert cart(P1=3, B1=1).subtotal() == D("11.50")
+
+    def test_bulk():
+        assert mod("promo").line_discounts(cart(P1=10)) == {"P1": D("2.00")}
+
+    def test_three_for_two():
+        assert mod("promo").line_discounts(cart(A1=7, P1=1)) == {"A1": D("6.00")}
+
+    def test_best_of_bulk_and_3for2():
+        assert mod("promo").line_discounts(cart(A1=12)) == {"A1": D("12.00")}
+
+    def test_save10_threshold():
+        p = mod("promo")
+        big = cart(L1=1); p.apply_coupon(big, "SAVE10")
+        small = cart(P1=5); p.apply_coupon(small, "SAVE10")
+        assert p.coupon_discount(big) == D("12.00") and p.coupon_discount(small) == D("0.00")
+
+    def test_flat5_floor():
+        p = mod("promo"); c = cart(P1=2); p.apply_coupon(c, "FLAT5")
+        assert p.coupon_discount(c) == D("4.00")
+
+    def test_coupon_replace_and_unknown():
+        p = mod("promo"); c = cart(L1=1)
+        p.apply_coupon(c, "FLAT5"); p.apply_coupon(c, "SAVE10")
+        assert p.coupon_discount(c) == D("12.00")
+        with pytest.raises(ValueError):
+            p.apply_coupon(c, "FREE")
+
+    def test_tax_categories_and_line_discount():
+        assert mod("tax").tax(cart(P1=10, B1=1, A1=3)) == D("2.34")
+
+    def test_coupon_does_not_change_tax():
+        c = cart(L1=1); mod("promo").apply_coupon(c, "SAVE10")
+        assert mod("tax").tax(c) == D("15.60")
+
+    def test_shipping():
+        t = mod("checkout").totals
+        assert t(cart(B1=1))["shipping"] == D("8.00")
+        assert t(cart(L1=1))["shipping"] == D("0.00")
+        assert t(cart("premium", B1=1))["shipping"] == D("0.00")
+        # 小计 108 过了 99，但减掉 BULK 之后是 97.20：门槛看的是减完行优惠的数
+        assert t(cart(P1=54))["shipping"] == D("8.00")
+        assert t(cart(P1=55))["shipping"] == D("0.00")
+
+    def test_totals():
+        c = cart(P1=10, A1=3); mod("promo").apply_coupon(c, "FLAT5")
+        assert mod("checkout").totals(c) == {"subtotal": D("29.00"), "discount": D("10.00"), "tax": D("2.34"),
+                                             "shipping": D("8.00"), "total": D("29.34")}
+
+    def test_receipt():
+        c = cart(P1=10, A1=3); mod("promo").apply_coupon(c, "FLAT5")
+        assert mod("receipt").render(c) == "\\n".join([
+            "A1 x3 = 9.00", "  3FOR2 -3.00", "P1 x10 = 20.00", "  BULK -2.00",
+            "Subtotal 29.00", "Discount -10.00", "Tax 2.34", "Shipping 8.00", "Total 29.34"])
+
+    def test_readme_rules():
+        t = open("README.md", encoding="utf-8").read()
+        assert "## 优惠规则" in t and all(k in t for k in ("BULK", "3FOR2", "SAVE10", "FLAT5"))
     """,
 })
 

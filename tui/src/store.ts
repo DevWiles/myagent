@@ -970,14 +970,6 @@ export class SessionStore {
         this.notice('warn', `断线期间有 ${event.to - event.from + 1} 条事件补不回来了（第 ${event.from}–${event.to} 号）`)
         return
 
-      case 'mode_switched': {
-        // 用一条普通提示带过，不占计划面板的位置——它马上就要出来了。
-        // 要紧的是把「凭什么这么判」摆出来：用户发的是一句话，屏幕上却冒出个计划，
-        // 不说清楚他只会觉得莫名其妙，也没机会说「不用，直接做」
-        this.notice('info', event.reason ? `${event.reason}，先拆个计划` : '这件事先拆个计划')
-        return
-      }
-
       case 'session_list': {
         this.set({ sessionPicker: { currentId: event.currentId, sessions: event.sessions } })
         return

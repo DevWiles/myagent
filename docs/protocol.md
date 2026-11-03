@@ -222,7 +222,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
+"features": ["plan", "replan", "resume", "resume_plan", "session", "sessions",
              "compact", "memory", "roles", "undo", "rewind"]
 ```
 
@@ -267,7 +267,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "tokens": 1234,
   "sentTokens": 156800,
   "contextLimit": 1000000,
-  "features": ["plan", "replan", "resume", "resume_plan", "auto_mode", "session", "sessions",
+  "features": ["plan", "replan", "resume", "resume_plan", "session", "sessions",
                "compact"],
   "tools": [{"name": "read_file", "description": "…"}],
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
@@ -453,7 +453,6 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `plan_task_finished` | `taskId` `status` `durationMs` `result` `error` | `result`/`error` 可能是 `null` |
 | `plan_tasks_added` | `parentId` `tasks[]` | 图长大了，见 3.5 |
 | `plan_revised` | `failedTaskId` `tasks[]` | 某一步失败后补出了救场任务，见 3.6 |
-| `mode_switched` | `mode` `reason` | 一条 `prompt` 被自动改走规划了，见 3.8 |
 | `plan_finished` | `status` `succeeded` `failed` `skipped` `replans` `durationMs` | 用户否决时只有 `status` |
 
 `plan_created`：
@@ -567,34 +566,15 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 存档认工作区：在别的目录连上来，哪怕文件名撞了也不会给你续——
 一份计划里的任务描述全是针对某个仓库写的。
 
-### 3.8 简单任务不规划（feature: `auto_mode`）
+### 3.8 简单任务不规划（已移除）
 
-不是每句话都值得先拆计划。「PlanParser 为什么从第一个 `{` 抠起」是个查询，
-为它多花一次规划调用纯属浪费。所以服务端收到 `prompt` 时会先做一次**字面判断**，
-决定直接对话还是改走规划。判断分三档，只有前两档会改道：
+以前服务端收到 `prompt` 时会先按字面判断「这句话该不该先拆计划」，判为该规划就发
+`mode_switched` 再转走 3.4 的流程（feature `auto_mode`）。**这套判断已经删掉**：`prompt` 一律直接对话，
+要先规划就由用户切到 plan 模式、发 `plan` 命令。
 
-| 档 | 服务端行为 |
-|---|---|
-| 直接干 | 照常走对话，不发 `mode_switched` |
-| 拿不准 | **并到「规划」处理**（见下） |
-| 该规划 | 发 `mode_switched`，然后走 3.4 那套完整流程 |
-
-```json
-{"t":"mode_switched","mode":"plan","reason":"是改动面比较大的活、范围铺得比较开"}
-```
-
-**为什么「拿不准」不单开一条协议消息去问用户**：规划本来就带一道确认
-（`plan_confirm_request`），「先问一句」的效果它已经有了，代价只是多花一次规划调用。
-终端版能直接读一行 y/n，所以那边是真的会问；无头模式为此新增一轮往返不划算。
-
-**界面该做的事**：收到 `mode_switched` 就把 `reason` 显示出来。不显示的话，
-用户发的是 `prompt`、回来的却是 `plan_created`，会完全不知道发生了什么。
-
-**`/plan`（也就是 `plan` 命令）不受这套判断影响**——显式表态优先于启发式。
-
-> ⚠️ 这是**字面**判断，没有理解。「把那个改一下」六个字背后可能是三天的活。
-> 它认的是明显的两头，中间那片本来就该由人来定，所以 `plan_confirm_request`
-> 那一步任何时候都不能省。
+删的理由是评测：同一个模型在 10~20 条要求的长任务上，不转走规划也全部做对；转走规划的那几次
+只是慢了 3~6 倍。这和 Claude Code、Codex 的做法一致——两家都不替用户自动切进计划模式。
+界面收到老后端发来的 `mode_switched` 可以直接忽略。
 
 ### 3.9 会话：接着聊，或者挑一段接着聊（feature: `session` / `sessions`）
 
@@ -1018,13 +998,12 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | 计划确认超过 900 秒没回 | 按否决处理，发 `plan_finished` | — |
 | 没有任何连接时需要确认 | 直接否决，不执行 | — |
 | `cancel` | 调度器不再开新任务、掐断正在跑的子循环和规划请求 | 正在跑的那个任务会变 `FAILED`，其余 `SKIPPED` |
-| 某个任务超时（默认 1 小时） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
+| 某个任务超时（默认不限时；调用方显式设了时限才会发生） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
 | 并行工具调用整批超时（默认 60 秒） | 超时那个发 `tool_finished`（`ok:false`），其余照常收 | 那一行标失败，别继续转圈 |
 | 规划失败（模型连 3 次给不出可用计划） | 发 `failed`，带原因 | 照常显示错误 |
 | 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |
 | 某步失败、但模型判断补不了 | 不发 `plan_revised`，照原样收场 | 照常显示失败 |
 | 重规划本身挂了（调用失败、给的图不合法） | 静默忽略，照原样收场 | 界面无感，和没配重规划一样 |
-| `prompt` 被判定为该规划 | 发 `mode_switched`，转走计划流程 | 显示 `reason`，别让用户莫名其妙 |
 | `resume_plan` 但没有存档 | 回 `error` | `ready.resumable` 不存在时就别放出这个入口 |
 | `session_resume` 的 id 已经没了 | 回 `error` | 列表和挑中之间隔着用户的思考时间，别假设它还在 |
 | 存档读不出来 / 格式过期 | 当作没有存档 | 同上 |

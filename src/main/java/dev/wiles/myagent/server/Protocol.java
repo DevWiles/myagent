@@ -67,7 +67,7 @@ public final class Protocol {
      * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
      */
     public static final List<String> FEATURES =
-            List.of("plan", "replan", "resume", "resume_plan", "auto_mode",
+            List.of("plan", "replan", "resume", "resume_plan",
                     "session", "sessions", "compact", "memory", "roles",
                     "events_resume", "user_echo", "undo", "rewind");
 
@@ -357,19 +357,6 @@ public final class Protocol {
         n.put("skipped", result.skipped());
         n.put("replans", result.replans());
         n.put("durationMs", plan.durationMillis());
-        return n;
-    }
-
-    /**
-     * 这句话被自动改走规划了。
-     *
-     * <p>不发这条的话，界面会看到「我发的是 prompt，回来的却是 plan_created」——
-     * 用户更是莫名其妙。带上理由，他才知道系统凭什么这么判，也才有机会说「不用，直接做」。
-     */
-    public static ObjectNode encodeModeSwitch(String reason) {
-        ObjectNode n = event("mode_switched");
-        n.put("mode", "plan");
-        n.put("reason", reason);
         return n;
     }
 
