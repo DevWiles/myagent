@@ -1381,3 +1381,19 @@ test('大段粘贴：转录记全文也记折起来的那份，画的是后者�
   expect(pasted.display).toBe('看下 [粘贴的文本 #1 +3 行]')
   expect(plain.display).toBeUndefined()
 })
+
+test('会话标题：首帧带来、session_title 更新、清空对话清掉、接回别的会话先清空等新的', () => {
+  const store = new SessionStore()
+  feed(store, { ...(ready() as Extract<ServerEvent, { t: 'ready' }>), sessionTitle: '排查登录 500' })
+  expect(store.getSnapshot().sessionTitle).toBe('排查登录 500')
+
+  feed(store, { t: 'session_title', title: '修分页' })
+  expect(store.getSnapshot().sessionTitle).toBe('修分页')
+
+  feed(store, { t: 'reset_done' })
+  expect(store.getSnapshot().sessionTitle).toBeNull()
+
+  feed(store, { t: 'session_title', title: '修分页' })
+  feed(store, { t: 'session_restored', messages: 2, turns: 1, firstMessage: 'x', savedAt: 1 })
+  expect(store.getSnapshot().sessionTitle).toBeNull()
+})

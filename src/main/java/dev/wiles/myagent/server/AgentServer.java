@@ -14,6 +14,7 @@ import dev.wiles.myagent.context.TokenMeter;
 import dev.wiles.myagent.context.SessionId;
 import dev.wiles.myagent.context.SessionSnapshot;
 import dev.wiles.myagent.context.SessionStore;
+import dev.wiles.myagent.context.SessionTitle;
 import dev.wiles.myagent.context.SessionSummary;
 import dev.wiles.myagent.memory.MemoryEntry;
 import dev.wiles.myagent.memory.MemoryMetadata;
@@ -159,6 +160,11 @@ public final class AgentServer extends WebSocketServer {
      * <p>{@code volatile}：存盘发生在 worker 线程，换 id 发生在连接线程。
      */
     private volatile String sessionId = SessionId.create(System.currentTimeMillis());
+
+    /** 当前会话的标题（见 {@link SessionTitle}），还没起好是 null。 */
+    private volatile String sessionTitle;
+    /** 给哪段会话请求过标题。每段只请求一次：生成失败也不在之后每句话上重试 */
+    private volatile String titleRequestedFor;
     private volatile long sessionStartedAt = System.currentTimeMillis();
     /**
      * 审计轨迹。
@@ -712,6 +718,7 @@ public final class AgentServer extends WebSocketServer {
         // 少了这一条，另一块屏上会凭空冒出一段回答（协议 3.15）
         publish(Protocol.encodeUserMessage(text, "normal", cid));
         publish(Protocol.event("busy").put("busy", true));
+        nameSession(text);
         checkpoints.mark(brief(text), agent.history().size());
 
         // 普通模式下每句话都直接对话，不再按字面猜「这件事该不该先拆计划」：
@@ -783,6 +790,7 @@ public final class AgentServer extends WebSocketServer {
         }
         publish(Protocol.encodeUserMessage(goal, "plan", cid));
         publish(Protocol.event("busy").put("busy", true));
+        nameSession(goal);
         checkpoints.mark("计划: " + brief(goal), agent.history().size());
         worker.submit(() -> runPlan(goal));
     }
@@ -920,6 +928,7 @@ public final class AgentServer extends WebSocketServer {
         meter.seed(snapshot.ledger());
         sessionId = snapshot.id();
         sessionStartedAt = snapshot.startedAt();
+        sessionTitle = null;
         checkpoints.session(sessionId);
         ObjectNode done = Protocol.event("session_restored");
         done.put("id", snapshot.id());
@@ -937,6 +946,8 @@ public final class AgentServer extends WebSocketServer {
         agent.unfinished().ifPresent(
                 cut -> Protocol.encodeInterruption(done.putObject("interrupted"), cut));
         publish(done);
+        // 标题不进存档：接回来时按首句再起一次，省得为一个锦上添花的字段改存档格式
+        nameSession(snapshot.firstUserMessage());
     }
 
     private void runResume() {
@@ -1226,6 +1237,7 @@ public final class AgentServer extends WebSocketServer {
         // 两边不一致的话，同一个存档在两个界面里表现不同，那种 bug 没人查得动
         sessionId = SessionId.create(System.currentTimeMillis());
         sessionStartedAt = System.currentTimeMillis();
+        sessionTitle = null;
         checkpoints.session(sessionId);
         meter.reset();      // 新会话新账本，和终端的 /clear 是同一条语义
         // 授权规则**不清**。以前这里有一句 approval.reset()，清的是那个
@@ -1233,6 +1245,26 @@ public final class AgentServer extends WebSocketServer {
         // 现在的授权是用户一条条挑定、并且存进了 ~/.myagent/policy.json 的东西，
         // 清空对话没有理由把它撤销；要撤销就去改那个文件
         publish(Protocol.event("reset_done"));
+    }
+
+    /**
+     * 这段会话还没请求过标题就起一个，放在后台线程：一次模型调用要好几秒，不能挡着这一轮。
+     * 起好时会话已经换了（/clear、/resume）就丢掉——那个标题已经不属于眼前这段。
+     */
+    private void nameSession(String firstMessage) {
+        String forSession = sessionId;
+        if (agent == null || forSession.equals(titleRequestedFor)) {
+            return;
+        }
+        titleRequestedFor = forSession;
+        Thread t = new Thread(() -> SessionTitle.generate(newClient(), firstMessage).ifPresent(title -> {
+            if (forSession.equals(sessionId)) {
+                sessionTitle = title;
+                publish(Protocol.event("session_title").put("title", title));
+            }
+        }), "session-title");
+        t.setDaemon(true);
+        t.start();
     }
 
     // ---------------------------------------------------------------- 发事件
@@ -1342,6 +1374,9 @@ public final class AgentServer extends WebSocketServer {
         // 到此刻为止的最后一个事件号。重连的客户端拿它和自己看到的比对
         n.put("lastSeq", events.lastSeq());
         n.put("busy", busy.get());
+        if (sessionTitle != null) {
+            n.put("sessionTitle", sessionTitle);      // 重连的界面不用等下一句话才有标签页标题
+        }
         if (agent != null) {
             n.put("tokens", agent.estimatedTokens());
             n.put("sentTokens", meter.snapshot().promptTokens());

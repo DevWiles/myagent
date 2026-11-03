@@ -317,6 +317,8 @@ export type SessionState = {
    * 不管他说的是「继续」还是别的，那一轮都已经接着现场在跑了。
    */
   interrupted: Interrupted | null
+  /** 这段会话的摘要标题，终端标签页显示它（见 terminal-title.ts）。还没起好是 null */
+  sessionTitle: string | null
 }
 
 const EMPTY_STATE: SessionState = {
@@ -340,6 +342,7 @@ const EMPTY_STATE: SessionState = {
   bootStatus: '连接后端中…',
   sessionPicker: null,
   interrupted: null,
+  sessionTitle: null,
 }
 
 export class SessionStore {
@@ -685,6 +688,7 @@ export class SessionStore {
           },
           busy: event.busy,
           interrupted: event.interrupted ?? null,
+          sessionTitle: event.sessionTitle ?? null,
           tokens: event.tokens ?? 0,
           sentTokens: event.sentTokens ?? 0,
           contextLimit: event.contextLimit ?? 0,
@@ -953,9 +957,13 @@ export class SessionStore {
         return
       }
 
+      case 'session_title':
+        this.set({ sessionTitle: event.title })
+        return
+
       case 'reset_done':
         this.clearTranscript()
-        this.set({ interrupted: null })   // 那段对话不要了，它的断点也就不作数
+        this.set({ interrupted: null, sessionTitle: null })   // 那段对话不要了，它的断点也就不作数
         // 后端 reset 时会把会话存档一起删掉，入口留着的话点了只会得到一条 error
         this.set({ ready: this.clearContinuable() })
         this.notice('info', '对话已清空')
@@ -979,7 +987,9 @@ export class SessionStore {
         // 存档已经用掉了，入口该收——留着会指向一段已经在内存里的历史。
         // 面板也收：挑完了还摆在屏幕上，下一次 ↑↓ 会落在一个已经接过的列表上
         // 接回来的那段要是断在半路，断点跟着回来（协议 3.9）；没有就清掉上一段的
-        this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: event.interrupted ?? null })
+        // 标题换成接回来那段的：后端会按它的首句重起一个、随后发 session_title
+        this.set({ ready: this.clearContinuable(), sessionPicker: null, interrupted: event.interrupted ?? null,
+          sessionTitle: null })
         // 对话本身原样摆回来（照 Claude Code），摘要那行跟在后面，说明上面这些是接回来的
         if (event.transcript && event.transcript.length > 0) {
           this.set({

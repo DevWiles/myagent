@@ -10,13 +10,14 @@
  */
 
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
-import { useKeyboard, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
+import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/solid"
 import { armedAfter, createArmState, decideCtrlC } from "../interrupt.ts"
 import { createEffect, createSignal, Index, onCleanup, Show, type Accessor } from "solid-js"
 import type { BackendOptions } from "../backend.ts"
 import type { SessionState } from "../store.ts"
 import { continueHint } from "../store.ts"
 import { tildify } from "../path.ts"
+import { FRAME_MS, tabStatus, tabTitle } from "../terminal-title.ts"
 import {
   DEFAULT_SCROLL_SPEED,
   formatSpeed,
@@ -86,6 +87,18 @@ export function App(props: AppProps) {
   // 在组件体里直接调，不放 onMount：越早把 dispose 交出去越好——
   // 在这之前按 Ctrl-C，退出路径就够不着已经 spawn 出来的 java 进程了
   props.onMounted?.({ state, dispose: session.dispose })
+
+  // 终端标签页标题：状态图标 + 会话摘要（见 terminal-title.ts）。只有在跑时图标才动，
+  // 定时器也只在那时开着；别的状态下标题一个字节都不用往终端写
+  const renderer = useRenderer()
+  const status = () => tabStatus(state())
+  const [titleFrame, setTitleFrame] = createSignal(0)
+  createEffect(() => {
+    if (status() !== "busy") return
+    const timer = setInterval(() => setTitleFrame((f) => f + 1), FRAME_MS)
+    onCleanup(() => clearInterval(timer))
+  })
+  createEffect(() => renderer.setTerminalTitle(tabTitle(state().sessionTitle, status(), titleFrame())))
 
   // 后端挂了就退出。不能在这儿直接 process.exit：终端还在 altscreen 模式里，
   // 得让入口先把 renderer destroy 掉，否则用户的终端会留在没有回显的状态

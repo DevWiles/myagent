@@ -156,6 +156,8 @@ function shutdown(reason?: string, code = 0): void {
   // 但那是别人的实现细节，而且后端还没起好时那条链路根本够不着已经 spawn 出来的
   // java 进程。实测不显式关的话，java 在 Ctrl-C 之后还要活 10 秒以上。
   exit.dispose?.()
+  // 标签页标题还回去：留着「✳ 某某摘要」的话，退出后的 shell 标签页会一直顶着一段已经结束的对话
+  if (!renderer.isDestroyed) renderer.setTerminalTitle("")
   if (!renderer.isDestroyed) renderer.destroy()
   // destroy 若被推迟（正好卡在渲染帧中间）就靠这两下兜底。两个都是幂等的
   restoreCursor()

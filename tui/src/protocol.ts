@@ -102,6 +102,8 @@ export type ServerEvent =
        * 比我们记的还小，说明对面换过进程，老号作废。
        */
       lastSeq?: number
+      /** 当前会话的摘要标题（见 session_title）。还没起好或老后端不发 */
+      sessionTitle?: string
       tokens?: number
       /** 累计真正发出去的提示词。和 tokens 不是一回事，见 protocol 3.10。 */
       sentTokens?: number
@@ -333,6 +335,8 @@ export type ServerEvent =
    * 和 plan_tasks_added 的「计划照常长大」不是一回事，面板上该看得出区别。
    */
   | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
+  /** 后端让模型给这段会话起好了短标题，界面拿它当终端标签页标题。 */
+  | { t: 'session_title'; title: string }
   /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
   | {
       t: 'plan_finished'
