@@ -15,14 +15,16 @@ class ProtocolParseTest {
         val event = parseServerEvent(
             """{"t":"ready","seq":0,"protocol":1,"version":"0.3.0","workspace":"/tmp/x",
                "model":"deepseek-chat","planMode":false,"hasApiKey":true,"busy":false,
-               "features":["plan","events_resume"],"lastSeq":42,"branch":"dev",
+               "features":["plan_mode","events_resume"],"lastSeq":42,"branch":"dev","mode":"normal",
                "tools":[{"name":"read_file","description":"读文件"}],
                "continuable":{"id":"abc","turns":3,"messages":7,"firstMessage":"你好","savedAt":1,"count":2}}""",
         )
         val ready = event as ServerEvent.Ready
         assertEquals(1, ready.protocol)
         assertEquals(42L, ready.lastSeq)
-        assertEquals(listOf("plan", "events_resume"), ready.features)
+        assertEquals(listOf("plan_mode", "events_resume"), ready.features)
+        assertEquals("normal", ready.mode)
+        assertTrue(ready.skills.isEmpty())
         assertEquals("read_file", ready.tools.single().name)
         assertEquals(2, ready.continuable?.count)
     }
@@ -67,15 +69,30 @@ class ProtocolParseTest {
     }
 
     @Test
-    fun `plan_created 的任务和分层`() {
-        val event = parseServerEvent(
-            """{"t":"plan_created","goal":"改配置","tasks":[
-                 {"id":"t1","type":"FILE_READ","role":"explorer","roleTitle":"侦察",
-                  "description":"看看","status":"PENDING","parentId":null,"dependsOn":[]}],
-               "layers":[["t1"]]}""",
-        ) as ServerEvent.PlanCreated
-        assertEquals("t1", event.tasks.single().id)
-        assertEquals(listOf(listOf("t1")), event.layers)
+    fun `plan_confirm_request 两种 kind，老后端缺 kind 当 exit`() {
+        val enter = parseServerEvent("""{"t":"plan_confirm_request","id":1,"kind":"enter"}""")
+            as ServerEvent.PlanConfirmRequest
+        assertEquals("enter", enter.kind)
+        assertEquals("", enter.plan)
+        val exit = parseServerEvent("""{"t":"plan_confirm_request","id":2,"plan":"## 计划"}""")
+            as ServerEvent.PlanConfirmRequest
+        assertEquals("exit", exit.kind)
+        assertEquals("## 计划", exit.plan)
+    }
+
+    @Test
+    fun `mode 和 hook`() {
+        val mode = parseServerEvent("""{"t":"mode","seq":5,"mode":"plan"}""") as ServerEvent.ModeChanged
+        assertEquals("plan", mode.mode)
+        val hook = parseServerEvent("""{"t":"hook","blocked":true,"message":"不行"}""") as ServerEvent.Hook
+        assertTrue(hook.blocked)
+        assertEquals("不行", hook.message)
+    }
+
+    @Test
+    fun `已经下线的 DAG 计划事件静默忽略`() {
+        assertNull(parseServerEvent("""{"t":"plan_created","goal":"g","tasks":[],"layers":[]}"""))
+        assertNull(parseServerEvent("""{"t":"plan_finished","status":"COMPLETED"}"""))
     }
 
     @Test

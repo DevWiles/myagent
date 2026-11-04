@@ -2,7 +2,6 @@ package dev.wiles.myagent.client.protocol
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -30,18 +29,6 @@ data class RoleInfo(
     val mutates: Boolean,
 )
 
-data class PlanTaskWire(
-    val id: String,
-    val type: String,
-    val role: String?,
-    val roleTitle: String?,
-    val description: String,
-    val acceptance: String?,
-    val status: String,
-    val parentId: String?,
-    val dependsOn: List<String>,
-)
-
 data class MemoryRow(
     val name: String,
     val description: String,
@@ -62,7 +49,8 @@ data class SessionRow(
 
 data class ApprovalSuggestion(val label: String, val patterns: List<String>)
 
-data class Resumable(val goal: String, val remaining: Int, val total: Int, val savedAt: Long)
+/** 用户能用 `/名字` 点的技能（ready.skills），菜单里列出来、点了就填进输入框。 */
+data class SkillInfo(val id: String, val description: String)
 
 /** 断点：被打断的那一轮。在 = 说一句「继续」就能接上。failed 和 ready 共用（协议 3.2）。 */
 data class Interrupted(val reason: String, val prompt: String, val steps: Int, val at: Long)
@@ -87,7 +75,10 @@ sealed interface ServerEvent {
         val version: String,
         val workspace: String,
         val model: String,
+        /** 只读启动（`--readonly`）。字段名是历史遗留，和下面的 [mode] 不是一回事 */
         val planMode: Boolean,
+        /** 会话眼下的模式：normal | plan（plan 模式是权限模式，见协议） */
+        val mode: String,
         val hasApiKey: Boolean,
         val busy: Boolean,
         val features: List<String>,
@@ -98,10 +89,10 @@ sealed interface ServerEvent {
         val roles: List<RoleInfo>,
         val branch: String?,
         val lastSeq: Long,
-        val resumable: Resumable?,
         val continuable: Continuable?,
         val interrupted: Interrupted?,
         val tools: List<ToolInfo>,
+        val skills: List<SkillInfo>,
     ) : ServerEvent
 
     data class Thinking(override val seq: Long?, val step: Int) : ServerEvent
@@ -178,32 +169,19 @@ sealed interface ServerEvent {
     data class ErrorEvent(override val seq: Long?, val message: String) : ServerEvent
     data class Pong(override val seq: Long?) : ServerEvent
 
-    data class PlanCreated(
-        override val seq: Long?, val goal: String,
-        val tasks: List<PlanTaskWire>, val layers: List<List<String>>,
+    /**
+     * plan 模式的两道确认：enter = 模型提议先进 plan 模式（同意/不同意）；
+     * exit = 模型交了计划（批准/不批准，可附一句意见）。plan 只在 exit 时有。
+     */
+    data class PlanConfirmRequest(
+        override val seq: Long?, val id: Int, val kind: String, val plan: String,
     ) : ServerEvent
 
-    data class PlanConfirmRequest(override val seq: Long?, val id: Int) : ServerEvent
-    data class PlanTaskStarted(override val seq: Long?, val taskId: String) : ServerEvent
-    data class PlanTaskFinished(
-        override val seq: Long?, val taskId: String, val status: String,
-        val durationMs: Long, val error: String?,
-    ) : ServerEvent
+    /** 会话模式变了（界面切的，或者模型提议、用户同意的）。 */
+    data class ModeChanged(override val seq: Long?, val mode: String) : ServerEvent
 
-    data class PlanTasksAdded(
-        override val seq: Long?, val parentId: String, val tasks: List<PlanTaskWire>,
-    ) : ServerEvent
-
-    data class PlanRevised(
-        override val seq: Long?, val failedTaskId: String, val tasks: List<PlanTaskWire>,
-    ) : ServerEvent
-
-    data class PlanFinished(
-        override val seq: Long?, val status: String, val succeeded: Int?,
-        val failed: Int?, val skipped: Int?, val durationMs: Long?,
-    ) : ServerEvent
-
-    data class ModeSwitched(override val seq: Long?, val reason: String) : ServerEvent
+    /** 用户提交时跑的 hook：blocked = 这句话被拦下了，模型没看到；否则是 hook 自己出的问题。 */
+    data class Hook(override val seq: Long?, val blocked: Boolean, val message: String) : ServerEvent
 
     /** 断线重连时留底装不下，这一段永远补不回来了（协议 1.2）。 */
     data class ReplayGap(override val seq: Long?, val from: Long, val to: Long) : ServerEvent
@@ -239,18 +217,6 @@ private fun interruptedOf(o: JsonObject): Interrupted? = (o["interrupted"] as? J
     Interrupted(it.str("reason"), it.str("prompt"), it.int("steps"), it.long("at"))
 }
 
-private fun planTask(o: JsonObject) = PlanTaskWire(
-    id = o.str("id"),
-    type = o.str("type"),
-    role = o.strOrNull("role"),
-    roleTitle = o.strOrNull("roleTitle"),
-    description = o.str("description"),
-    acceptance = o.strOrNull("acceptance"),
-    status = o.str("status", "PENDING"),
-    parentId = o.strOrNull("parentId"),
-    dependsOn = o.strings("dependsOn"),
-)
-
 /**
  * 一行报文 → 事件。认不出的 `t` 和解析失败都返回 null：
  * 一条脏报文不该让整个界面挂掉，调用方把它当噪声丢掉就行（协议第 2 节）。
@@ -270,6 +236,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
             workspace = o.str("workspace"),
             model = o.str("model"),
             planMode = o.bool("planMode"),
+            mode = o.str("mode", "normal"),
             hasApiKey = o.bool("hasApiKey"),
             busy = o.bool("busy"),
             features = o.strings("features"),
@@ -282,9 +249,6 @@ fun parseServerEvent(raw: String): ServerEvent? {
             },
             branch = o.strOrNull("branch"),
             lastSeq = o.long("lastSeq"),
-            resumable = (o["resumable"] as? JsonObject)?.let {
-                Resumable(it.str("goal"), it.int("remaining"), it.int("total"), it.long("savedAt"))
-            },
             continuable = (o["continuable"] as? JsonObject)?.let {
                 Continuable(
                     it.str("id"), it.strOrNull("branch"), it.int("turns"), it.int("messages"),
@@ -293,6 +257,7 @@ fun parseServerEvent(raw: String): ServerEvent? {
             },
             interrupted = interruptedOf(o),
             tools = o.objects("tools").map { ToolInfo(it.str("name"), it.str("description")) },
+            skills = o.objects("skills").map { SkillInfo(it.str("id"), it.str("description")) },
         )
 
         "thinking" -> ServerEvent.Thinking(seq, o.int("step"))
@@ -369,36 +334,12 @@ fun parseServerEvent(raw: String): ServerEvent? {
         "error" -> ServerEvent.ErrorEvent(seq, o.str("message"))
         "pong" -> ServerEvent.Pong(seq)
 
-        "plan_created" -> ServerEvent.PlanCreated(
-            seq, o.str("goal"), o.objects("tasks").map { planTask(it) },
-            (o["layers"] as? kotlinx.serialization.json.JsonArray)
-                ?.map { layer -> layer.jsonArray.mapNotNull { it.jsonPrimitive.contentOrNull } }
-                ?: emptyList(),
+        "plan_confirm_request" -> ServerEvent.PlanConfirmRequest(
+            seq, o.int("id", -1), o.str("kind", "exit"), o.str("plan"),
         )
 
-        "plan_confirm_request" -> ServerEvent.PlanConfirmRequest(seq, o.int("id", -1))
-        "plan_task_started" -> ServerEvent.PlanTaskStarted(seq, o.str("taskId"))
-        "plan_task_finished" -> ServerEvent.PlanTaskFinished(
-            seq, o.str("taskId"), o.str("status"), o.long("durationMs"), o.strOrNull("error"),
-        )
-
-        "plan_tasks_added" -> ServerEvent.PlanTasksAdded(
-            seq, o.str("parentId"), o.objects("tasks").map { planTask(it) },
-        )
-
-        "plan_revised" -> ServerEvent.PlanRevised(
-            seq, o.str("failedTaskId"), o.objects("tasks").map { planTask(it) },
-        )
-
-        "plan_finished" -> ServerEvent.PlanFinished(
-            seq, o.str("status"),
-            o["succeeded"]?.jsonPrimitive?.intOrNull,
-            o["failed"]?.jsonPrimitive?.intOrNull,
-            o["skipped"]?.jsonPrimitive?.intOrNull,
-            o.longOrNull("durationMs"),
-        )
-
-        "mode_switched" -> ServerEvent.ModeSwitched(seq, o.str("reason"))
+        "mode" -> ServerEvent.ModeChanged(seq, o.str("mode", "normal"))
+        "hook" -> ServerEvent.Hook(seq, o.bool("blocked"), o.str("message"))
 
         "replay_gap" -> ServerEvent.ReplayGap(seq, o.long("from"), o.long("to"))
 

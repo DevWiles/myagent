@@ -4,9 +4,9 @@ import dev.wiles.myagent.client.protocol.ApprovalSuggestion
 import dev.wiles.myagent.client.protocol.Continuable
 import dev.wiles.myagent.client.protocol.Interrupted
 import dev.wiles.myagent.client.protocol.MemoryRow
-import dev.wiles.myagent.client.protocol.Resumable
 import dev.wiles.myagent.client.protocol.RoleInfo
 import dev.wiles.myagent.client.protocol.SessionRow
+import dev.wiles.myagent.client.protocol.SkillInfo
 import dev.wiles.myagent.client.protocol.ToolInfo
 
 /**
@@ -23,32 +23,6 @@ data class ToolCall(
     val output: String? = null,
     /** 改了什么（统一 diff）。只有写文件这类工具才有 */
     val diff: String? = null,
-)
-
-data class PlanTask(
-    val id: String,
-    val type: String,
-    val role: String?,
-    val roleTitle: String?,
-    val description: String,
-    val acceptance: String?,
-    /** 失败后补出来的救场任务，面板上要和原计划区分开 */
-    val recovery: Boolean = false,
-    /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
-    val status: String,
-    val parentId: String?,
-    val durationMs: Long? = null,
-    val error: String? = null,
-)
-
-data class PlanSummary(val succeeded: Int, val failed: Int, val skipped: Int, val durationMs: Long)
-
-data class PlanData(
-    val goal: String,
-    val tasks: List<PlanTask>,
-    /** CREATED | RUNNING | COMPLETED | FAILED | CANCELLED */
-    val status: String,
-    val summary: PlanSummary? = null,
 )
 
 sealed interface Entry {
@@ -71,8 +45,13 @@ sealed interface Entry {
     ) : Entry
 
     data class Memory(override val key: String, val rows: List<MemoryRow>) : Entry
-    data class Plan(override val key: String, val plan: PlanData) : Entry
 }
+
+/**
+ * plan 模式的一道确认（协议 plan_confirm_request）。
+ * [kind] = enter：模型提议先进 plan 模式；exit：模型交了计划 [plan]（Markdown），等批准。
+ */
+data class PlanConfirm(val id: Int, val kind: String, val plan: String)
 
 data class Approval(
     val id: Int,
@@ -100,12 +79,23 @@ data class ReadyInfo(
     val roles: List<RoleInfo>,
     val features: List<String>,
     val branch: String?,
-    val resumable: Resumable?,
     val continuable: Continuable?,
+    val skills: List<SkillInfo> = emptyList(),
 )
 
-/** 下一句话按什么方式跑。跨轮保持——模式是用户表过的态（同 TUI）。 */
-enum class Mode { NORMAL, PLAN }
+/**
+ * 会话模式。状态在**服务端**：切换发 set_mode，以服务端广播回来的 `mode` 为准——
+ * 模型也能提议进 plan 模式、交了计划被批准后自己退出，界面只是跟着显示。
+ */
+enum class Mode {
+    NORMAL, PLAN;
+
+    val wire: String get() = if (this == PLAN) "plan" else "normal"
+
+    companion object {
+        fun of(wire: String) = if (wire == "plan") PLAN else NORMAL
+    }
+}
 
 /** 连接生命周期。手机和终端不同：断了不等于结束，automatic 重连是常态。 */
 enum class Link { CONNECTING, CONNECTED, RECONNECTING, CLOSED }
@@ -120,7 +110,7 @@ data class SessionState(
     val busy: Boolean = false,
     val step: Int = 0,
     val approval: Approval? = null,
-    val planConfirm: Int? = null,
+    val planConfirm: PlanConfirm? = null,
     val mode: Mode = Mode.NORMAL,
     val tokens: Long = 0,
     /** 累计真正发出去的提示词，只增不减（协议 3.10） */

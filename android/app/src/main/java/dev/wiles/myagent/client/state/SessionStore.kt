@@ -1,7 +1,6 @@
 package dev.wiles.myagent.client.state
 
 import dev.wiles.myagent.client.protocol.Interrupted
-import dev.wiles.myagent.client.protocol.PlanTaskWire
 import dev.wiles.myagent.client.protocol.ServerEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,9 +32,8 @@ class SessionStore {
      */
     val clientId: String = (1..8).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("")
 
-    /** 当前那根压缩进度条 / 计划面板的 key。语义同 TUI（多半不在队尾）。 */
+    /** 当前那根压缩进度条的 key。语义同 TUI（多半不在队尾）。 */
     private var compactingKey: String? = null
-    private var planKey: String? = null
 
     // ------------------------------------------------------------ 用户动作
 
@@ -47,6 +45,7 @@ class SessionStore {
         it.copy(entries = it.entries + Entry.Notice(nextKey("notice"), level, text))
     }
 
+    /** 本地先切（不让人对着没反应的胶囊再点一次），服务端广播的 `mode` 到了以它为准。 */
     fun setMode(mode: Mode) = _state.update { it.copy(mode = mode) }
 
     /** 回答完审批（发送由调用方负责），当场收框——工具跑得久时别让人对着答过的框发呆。 */
@@ -79,9 +78,10 @@ class SessionStore {
                         roles = event.roles,
                         features = event.features,
                         branch = event.branch,
-                        resumable = event.resumable,
                         continuable = event.continuable,
+                        skills = event.skills,
                     ),
+                    mode = Mode.of(event.mode),
                     link = Link.CONNECTED,
                     closedReason = null,
                     busy = event.busy,
@@ -224,8 +224,19 @@ class SessionStore {
             }
 
             is ServerEvent.PlanConfirmResolved -> _state.update {
-                if (it.planConfirm == event.id) it.copy(planConfirm = null) else it
+                if (it.planConfirm?.id == event.id) it.copy(planConfirm = null) else it
             }
+
+            is ServerEvent.PlanConfirmRequest -> _state.update {
+                it.copy(planConfirm = PlanConfirm(event.id, event.kind, event.plan))
+            }
+
+            is ServerEvent.ModeChanged -> _state.update { it.copy(mode = Mode.of(event.mode)) }
+
+            is ServerEvent.Hook -> notice(
+                if (event.blocked) Entry.Notice.Level.ERROR else Entry.Notice.Level.WARN,
+                if (event.blocked) "这句话被 hook 拦下了，没发给模型：${event.message}" else event.message,
+            )
 
             is ServerEvent.UserMessage -> {
                 // 只画别的界面说的话；自己那条在按发送时就画过了
@@ -251,11 +262,6 @@ class SessionStore {
 
             is ServerEvent.ErrorEvent -> notice(Entry.Notice.Level.ERROR, event.message)
 
-            is ServerEvent.ModeSwitched -> notice(
-                Entry.Notice.Level.INFO,
-                if (event.reason.isNotBlank()) "${event.reason}，先拆个计划" else "这件事先拆个计划",
-            )
-
             is ServerEvent.SessionList -> _state.update {
                 it.copy(sessionPicker = event.currentId to event.sessions)
             }
@@ -280,74 +286,6 @@ class SessionStore {
                 event.interrupted?.let { notice(Entry.Notice.Level.INFO, continueHint(it)) }
             }
 
-            is ServerEvent.PlanCreated -> {
-                val key = nextKey("plan")
-                planKey = key
-                _state.update {
-                    it.copy(
-                        ready = it.ready?.copy(resumable = null),
-                        entries = it.entries + Entry.Plan(key, PlanData(
-                            goal = event.goal,
-                            tasks = event.tasks.map { t -> fromWire(t) },
-                            status = "CREATED",
-                        )),
-                    )
-                }
-            }
-
-            is ServerEvent.PlanConfirmRequest -> _state.update { it.copy(planConfirm = event.id) }
-
-            is ServerEvent.PlanTaskStarted -> updatePlan { plan ->
-                plan.copy(
-                    status = "RUNNING",
-                    tasks = plan.tasks.map { t ->
-                        if (t.id == event.taskId) t.copy(status = "RUNNING") else t
-                    },
-                )
-            }
-
-            is ServerEvent.PlanTaskFinished -> updatePlan { plan ->
-                plan.copy(tasks = plan.tasks.map { t ->
-                    if (t.id == event.taskId) t.copy(
-                        status = event.status, durationMs = event.durationMs, error = event.error,
-                    ) else t
-                })
-            }
-
-            is ServerEvent.PlanTasksAdded -> updatePlan { plan ->
-                // 就地插到父任务（和先到的兄弟）后面，别 push 到末尾（同 TUI）
-                val tasks = plan.tasks.toMutableList()
-                var at = tasks.indexOfFirst { it.id == event.parentId }
-                if (at < 0) {
-                    tasks += event.tasks.map { fromWire(it) }
-                } else {
-                    while (at + 1 < tasks.size && tasks[at + 1].parentId == event.parentId) at++
-                    tasks.addAll(at + 1, event.tasks.map { fromWire(it) })
-                }
-                plan.copy(tasks = tasks)
-            }
-
-            is ServerEvent.PlanRevised -> updatePlan { plan ->
-                // 改道：补救任务接在失败那一步后面，不甩到末尾（同 TUI）
-                val tasks = plan.tasks.toMutableList()
-                val at = tasks.indexOfFirst { it.id == event.failedTaskId }
-                val recovered = event.tasks.map { fromWire(it, recovery = true) }
-                if (at < 0) tasks += recovered else tasks.addAll(at + 1, recovered)
-                plan.copy(tasks = tasks)
-            }
-
-            is ServerEvent.PlanFinished -> {
-                updatePlan { plan ->
-                    plan.copy(
-                        status = event.status,
-                        summary = event.succeeded?.let {
-                            PlanSummary(it, event.failed ?: 0, event.skipped ?: 0, event.durationMs ?: 0)
-                        },
-                    )
-                }
-                _state.update { it.copy(planConfirm = null) }
-            }
-
             is ServerEvent.ReplayGap -> notice(
                 Entry.Notice.Level.WARN,
                 "断线期间有 ${event.to - event.from + 1} 条事件补不回来了（${event.from}〜${event.to}）。" +
@@ -358,17 +296,7 @@ class SessionStore {
         }
     }
 
-    // ------------------------------------------------------------ 面板原地更新
-
-    private fun updatePlan(update: (PlanData) -> PlanData) {
-        val key = planKey ?: return
-        _state.update { st ->
-            st.copy(entries = st.entries.map { entry ->
-                if (entry is Entry.Plan && entry.key == key) entry.copy(plan = update(entry.plan))
-                else entry
-            })
-        }
-    }
+    // ------------------------------------------------------------ 进度条原地更新
 
     /** 进度条第一条建、后面的原地改——不然转录区被几百根条刷爆（同 TUI）。 */
     private fun upsertCompacting(phase: String, done: Int, total: Int, percent: Int) {
@@ -396,18 +324,6 @@ class SessionStore {
         compactingKey = null
         _state.update { st -> st.copy(entries = st.entries.filter { it.key != key }) }
     }
-
-    private fun fromWire(task: PlanTaskWire, recovery: Boolean = false) = PlanTask(
-        id = task.id,
-        type = task.type,
-        role = task.role,
-        roleTitle = task.roleTitle,
-        description = task.description,
-        acceptance = task.acceptance,
-        recovery = recovery,
-        status = task.status,
-        parentId = task.parentId,
-    )
 }
 
 /** 「继续」那行提示。转录和输入框占位共用，措辞和 TUI 的 continueHint 一字不差。 */

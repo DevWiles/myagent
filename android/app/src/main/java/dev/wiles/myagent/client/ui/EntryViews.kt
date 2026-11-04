@@ -84,7 +84,6 @@ fun EntryView(entry: Entry) {
         )
 
         is Entry.Memory -> MemoryCard(entry)
-        is Entry.Plan -> PlanCard(entry.plan)
     }
 }
 

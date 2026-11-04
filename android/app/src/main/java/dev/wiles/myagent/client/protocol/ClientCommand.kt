@@ -36,11 +36,15 @@ object ClientCommand {
     fun hello(since: Long) = cmd("hello", "since" to since.toInt())
 
     fun prompt(text: String, cid: String) = cmd("prompt", "text" to text, "cid" to cid)
-    fun plan(goal: String, cid: String) = cmd("plan", "goal" to goal, "cid" to cid)
-    fun resumePlan() = cmd("resume_plan")
     fun continueSession() = cmd("continue")
-    fun planConfirmReply(id: Int, approved: Boolean) =
-        cmd("plan_confirm_reply", "id" to id, "approved" to approved)
+
+    /** 切会话模式：normal | plan。服务端会广播 `mode` 回来，所有界面跟着变。 */
+    fun setMode(mode: String) = cmd("set_mode", "mode" to mode)
+
+    /** 不批准时可以附一句意见，原话交还给模型。空串不发。 */
+    fun planConfirmReply(id: Int, approved: Boolean, feedback: String? = null) =
+        cmd("plan_confirm_reply", "id" to id, "approved" to approved,
+            "feedback" to feedback?.takeIf { it.isNotBlank() })
 
     fun cancel() = cmd("cancel")
 

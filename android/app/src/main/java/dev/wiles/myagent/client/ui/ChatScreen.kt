@@ -31,17 +31,15 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.MoreHoriz
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -50,7 +48,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -63,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import dev.wiles.myagent.client.state.SlashSuggest
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -161,12 +159,8 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
         }
         client.store.submitPrompt(text)
         val cid = client.store.clientId
-        client.send(
-            when (state.mode) {
-                Mode.NORMAL -> ClientCommand.prompt(text, cid)
-                Mode.PLAN -> ClientCommand.plan(text, cid)
-            },
-        )
+        // plan 模式也是普通的 prompt：模式在服务端，它照着模式收窄工具菜单（`/技能 参数` 也由服务端展开）
+        client.send(ClientCommand.prompt(text, cid))
         draft = ""
     }
 
@@ -218,11 +212,16 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
                     onMode = {
                         buzz(Buzz.TICK)
                         client.store.setMode(it)
+                        client.send(ClientCommand.setMode(it.wire))
                     },
                     menu = {
                         Box {
                             RoundIcon(Icons.Rounded.MoreHoriz, "命令") { menuOpen = true }
-                            CommandMenu(menuOpen, state, client, onDismiss = { menuOpen = false })
+                            CommandMenu(
+                                menuOpen, state, client,
+                                onSkill = { draft = "/$it " },
+                                onDismiss = { menuOpen = false },
+                            )
                         }
                     },
                 )
@@ -260,31 +259,11 @@ fun ChatScreen(client: AgentClient, state: SessionState) {
         }
     }
 
-    state.planConfirm?.let { id ->
-        AlertDialog(
-            onDismissRequest = { /* 后端在等，别让手滑关掉 */ },
-            title = { Text("按这个计划跑吗？") },
-            text = {
-                Text(
-                    "任务拆解在上面的计划卡片里。900 秒不回后端按否决处理。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    buzz(Buzz.CONFIRM)
-                    client.store.clearPlanConfirm()
-                    client.send(ClientCommand.planConfirmReply(id, true))
-                }) { Text("执行") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    buzz(Buzz.REJECT)
-                    client.store.clearPlanConfirm()
-                    client.send(ClientCommand.planConfirmReply(id, false))
-                }) { Text("放弃", color = MaterialTheme.colorScheme.error) }
-            },
-        )
+    state.planConfirm?.let { confirm ->
+        PlanConfirmSheet(confirm) { approved, feedback ->
+            client.store.clearPlanConfirm()
+            client.send(ClientCommand.planConfirmReply(confirm.id, approved, feedback))
+        }
     }
 
     state.sessionPicker?.let { (currentId, sessions) ->
@@ -394,6 +373,38 @@ private fun Composer(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column {
+            // 敲 / 时在输入框上面列出对得上的技能，点一条就补全名字（和终端的斜杠菜单同一个判据）
+            val suggestions = if ("skills" in (state.ready?.features ?: emptyList())) {
+                SlashSuggest.matches(draft, state.ready?.skills ?: emptyList())
+            } else {
+                emptyList()
+            }
+            for (skill in suggestions) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onDraft(SlashSuggest.complete(skill)) }
+                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("/${skill.id}", style = MaterialTheme.typography.labelLarge)
+                    if (skill.description.isNotBlank()) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            skill.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AgentColors.skipped,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            if (suggestions.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             val textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface)
             BasicTextField(
                 value = draft,
@@ -413,7 +424,7 @@ private fun Composer(
                                     state.interrupted != null && !state.busy -> "说「继续」接着做…"
                                     else -> when (state.mode) {
                                     Mode.NORMAL -> "说点什么…"
-                                    Mode.PLAN -> "要规划的目标…"
+                                    Mode.PLAN -> "plan 模式：只调研、出计划…"
                                     }
                                 },
                                 style = textStyle,
@@ -490,7 +501,7 @@ private fun SendButton(busy: Boolean, enabled: Boolean, onSubmit: () -> Unit, on
 
 private fun modeLabel(mode: Mode) = when (mode) {
     Mode.NORMAL -> "对话"
-    Mode.PLAN -> "计划"
+    Mode.PLAN -> "plan"
 }
 
 @Composable
@@ -499,13 +510,16 @@ private fun modeColor(mode: Mode): Color = when (mode) {
     Mode.PLAN -> AgentColors.ok
 }
 
-/** 模式胶囊：带色点，点开挑。没宣告的模式不进菜单（同 TUI：进得去一用就报错比切不进去更困惑） */
+/**
+ * 模式胶囊：带色点，点开挑。没宣告的模式不进菜单（同 TUI：进得去一用就报错比切不进去更困惑）。
+ * 只读启动（ready.planMode）时没有 plan 模式可切。
+ */
 @Composable
 private fun ModePill(state: SessionState, onMode: (Mode) -> Unit) {
     val features = state.ready?.features ?: emptyList()
     val modes = buildList {
         add(Mode.NORMAL)
-        if ("plan" in features) add(Mode.PLAN)
+        if ("plan_mode" in features && state.ready?.planMode != true) add(Mode.PLAN)
     }
     var open by remember { mutableStateOf(false) }
     val color = modeColor(state.mode)
@@ -606,6 +620,7 @@ private fun CommandMenu(
     open: Boolean,
     state: SessionState,
     client: AgentClient,
+    onSkill: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val ready = state.ready
@@ -640,12 +655,6 @@ private fun CommandMenu(
         if ("sessions" in features) {
             item(Icons.Rounded.History, "从历史里挑一段…") { client.send(ClientCommand.sessions()) }
         }
-        if ("resume_plan" in features || "resume" in features) {
-            item(Icons.Rounded.PlayArrow, "接着跑上次的计划", enabled = ready?.resumable != null && !state.busy) {
-                client.store.submitPrompt("/resume-plan")
-                client.send(ClientCommand.resumePlan())
-            }
-        }
         if ("compact" in features) {
             item(Icons.Rounded.Compress, "现在压缩上下文", enabled = !state.busy) {
                 client.store.submitPrompt("/compact")
@@ -656,6 +665,12 @@ private fun CommandMenu(
             item(Icons.Rounded.Psychology, "看长期记忆") {
                 client.store.submitPrompt("/memory")
                 client.send(ClientCommand.memory("list"))
+            }
+        }
+        // 技能：点了把 `/名字 ` 填进输入框，补上参数再发（服务端展开正文，同 TUI 的斜杠菜单）
+        if ("skills" in features) {
+            for (skill in ready?.skills ?: emptyList()) {
+                item(Icons.Rounded.AutoAwesome, "/${skill.id}") { onSkill(skill.id) }
             }
         }
         item(Icons.Rounded.AddCircleOutline, "清空对话（旧的还留着）", enabled = !state.busy) {

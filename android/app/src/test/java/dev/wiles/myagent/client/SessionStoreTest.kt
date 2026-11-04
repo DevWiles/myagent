@@ -2,6 +2,7 @@ package dev.wiles.myagent.client
 
 import dev.wiles.myagent.client.protocol.parseServerEvent
 import dev.wiles.myagent.client.state.Entry
+import dev.wiles.myagent.client.state.Mode
 import dev.wiles.myagent.client.state.SessionStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -95,19 +96,46 @@ class SessionStoreTest {
     }
 
     @Test
-    fun `救场任务插在失败那一步后面并带改道标`() {
+    fun `模式以服务端为准：首帧带着，mode 广播跟着变`() {
         val s = store()
         s.feed(
-            """{"t":"plan_created","goal":"g","tasks":[
-                 {"id":"t1","type":"COMMAND","description":"一","status":"PENDING","parentId":null,"dependsOn":[]},
-                 {"id":"t2","type":"COMMAND","description":"二","status":"PENDING","parentId":null,"dependsOn":[]}],
-               "layers":[["t1","t2"]]}""",
-            """{"t":"plan_revised","failedTaskId":"t1","tasks":[
-                 {"id":"r1","type":"COMMAND","description":"救","status":"PENDING","parentId":null,"dependsOn":[]}]}""",
+            """{"t":"ready","protocol":1,"version":"x","workspace":"/w","model":"m",
+               "planMode":false,"mode":"plan","hasApiKey":true,"busy":false,"lastSeq":0,"tools":[],
+               "skills":[{"id":"deploy","description":"发版"}]}""",
         )
-        val plan = (s.state.value.entries.single() as Entry.Plan).plan
-        assertEquals(listOf("t1", "r1", "t2"), plan.tasks.map { it.id })
-        assertTrue(plan.tasks[1].recovery)
+        assertEquals(Mode.PLAN, s.state.value.mode)
+        assertEquals("deploy", s.state.value.ready!!.skills.single().id)
+        // 模型交的计划被批准，服务端退出 plan 模式
+        s.feed("""{"t":"mode","mode":"normal"}""")
+        assertEquals(Mode.NORMAL, s.state.value.mode)
+    }
+
+    @Test
+    fun `计划确认框：带上 kind 和计划全文，别的屏答掉就收`() {
+        val s = store()
+        s.feed("""{"t":"plan_confirm_request","id":4,"kind":"exit","plan":"## 计划
+1. 改 a"}""")
+        val confirm = s.state.value.planConfirm!!
+        assertEquals("exit", confirm.kind)
+        assertTrue(confirm.plan.contains("改 a"))
+        // id 对不上的迟到回执不乱收
+        s.feed("""{"t":"plan_confirm_resolved","id":3}""")
+        assertEquals(4, s.state.value.planConfirm?.id)
+        s.feed("""{"t":"plan_confirm_resolved","id":4}""")
+        assertNull(s.state.value.planConfirm)
+    }
+
+    @Test
+    fun `hook 拦下落成错误，hook 自己出问题落成警告`() {
+        val s = store()
+        s.feed(
+            """{"t":"hook","blocked":true,"message":"消息里有密钥"}""",
+            """{"t":"hook","blocked":false,"message":"hook「x」退出码 1"}""",
+        )
+        val (blocked, warned) = s.state.value.entries.map { it as Entry.Notice }
+        assertEquals(Entry.Notice.Level.ERROR, blocked.level)
+        assertTrue(blocked.text.contains("消息里有密钥"))
+        assertEquals(Entry.Notice.Level.WARN, warned.level)
     }
 
     @Test

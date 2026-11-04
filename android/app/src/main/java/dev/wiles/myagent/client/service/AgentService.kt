@@ -72,6 +72,8 @@ class AgentService : Service() {
                 }
         }
 
+        watchPlanConfirm(nm)
+
         // 审批来了弹高优通知；答完（approval 变 null）自动收
         scope.launch {
             client.store.state
@@ -97,6 +99,45 @@ class AgentService : Service() {
                                 .setContentIntent(openApp())
                                 .addAction(0, "同意", decide(approval.id, "yes"))
                                 .addAction(0, "拒绝", decide(approval.id, "no"))
+                                .build(),
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * plan 模式的确认（提议进 plan 模式 / 交了计划等批准）也是 agent 卡在等人。
+     * 和审批不同，通知上**不放按钮**：计划得读完才批得了，一键「批准」等于没看就放行——
+     * 点通知回到 app，在确认框里读完再答。
+     */
+    private fun watchPlanConfirm(nm: NotificationManager) {
+        val client = (application as AgentApp).client
+        scope.launch {
+            client.store.state
+                .map { it.planConfirm }
+                .distinctUntilChanged()
+                .collect { confirm ->
+                    if (confirm == null) {
+                        nm.cancel(PLAN_CONFIRM_ID)
+                    } else {
+                        val exit = confirm.kind != "enter"
+                        nm.notify(
+                            PLAN_CONFIRM_ID,
+                            NotificationCompat.Builder(this@AgentService, CHANNEL_APPROVAL)
+                                .setSmallIcon(R.drawable.ic_stat_agent)
+                                .setColor(BRAND)
+                                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                                .setContentTitle(if (exit) "myagent 交了计划，等你批准" else "myagent 想先出个计划")
+                                .setContentText(if (exit) "点开读完计划再批" else "点开决定要不要进 plan 模式")
+                                .apply {
+                                    if (exit && confirm.plan.isNotBlank()) {
+                                        setStyle(NotificationCompat.BigTextStyle().bigText(confirm.plan))
+                                    }
+                                }
+                                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                                .setAutoCancel(true)
+                                .setContentIntent(openApp())
                                 .build(),
                         )
                     }
@@ -151,6 +192,7 @@ class AgentService : Service() {
         const val CHANNEL_APPROVAL = "approval"
         const val ONGOING_ID = 1
         const val APPROVAL_ID = 2
+        const val PLAN_CONFIRM_ID = 3
         const val BRAND = 0xFFD97757.toInt()
     }
 }
