@@ -42,17 +42,14 @@ import dev.wiles.myagent.skill.SkillTool;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.ToolRegistry;
-import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.PlanCheckpoint;
-import dev.wiles.myagent.plan.PlanExecuteAgent;
-import dev.wiles.myagent.plan.PlanListener;
-import dev.wiles.myagent.plan.PlanContext;
-import dev.wiles.myagent.plan.PlanResult;
-import dev.wiles.myagent.plan.PlanStore;
-import dev.wiles.myagent.plan.AgentRole;
 import dev.wiles.myagent.plan.AgentRoles;
+import dev.wiles.myagent.agent.PlanMode;
+import dev.wiles.myagent.agent.PlanModeTools;
+import dev.wiles.myagent.context.SystemReminder;
+import dev.wiles.myagent.hooks.PromptHooks;
+import dev.wiles.myagent.skill.SkillCommand;
+import dev.wiles.myagent.tool.ToolSearchTool;
 import dev.wiles.myagent.review.ReviewLoop;
-import dev.wiles.myagent.plan.Planner;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.Workspace;
 import dev.wiles.myagent.tool.safety.ApprovalOrigin;
@@ -112,22 +109,8 @@ public final class AgentServer extends WebSocketServer {
      */
     private static final boolean FINAL_REVIEW = "1".equals(System.getenv("MYAGENT_FINAL_REVIEW"));
 
-    /**
-     * 子 agent 怎么派：MYAGENT_SUBAGENTS=off / explicit（默认，照 Codex：用户没要求不派）/ proactive / auto。
-     *
-     * <p>auto（开工前跑委派决策器）目前只在无头单次运行里生效。交互模式下每句话都先多一次决策请求，
-     * 连「你好」也要付一次，这笔账还没想清楚，所以这里按 explicit 处理。
-     */
-    private static final SubAgents.Mode SUBAGENTS = interactive(
-            SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS")));
-
-    private static SubAgents.Mode interactive(SubAgents.Mode mode) {
-        if (mode == SubAgents.Mode.AUTO) {
-            log.info("MYAGENT_SUBAGENTS=auto 目前只在 --once 里生效，交互模式按 explicit 处理");
-            return SubAgents.Mode.EXPLICIT;
-        }
-        return mode;
-    }
+    /** 子 agent 开不开：MYAGENT_SUBAGENTS=on（默认）/ off。派不派由模型按工具说明自己定。 */
+    private static final SubAgents.Mode SUBAGENTS = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
 
     /** 正在进行的收尾审查，按停时要一起掐。 */
     private volatile ReviewLoop reviewing;
@@ -174,19 +157,19 @@ public final class AgentServer extends WebSocketServer {
      * 那是个缺口，不是有意的设计。
      */
     private final AuditLog audit = AuditLog.forNewRun();
-    /** 计划存档。断了能接着跑，靠的是它。 */
+    /** plan 模式进出的确认框：模型提议进、交计划要出，都在这儿等用户回话。 */
     private final PlanConfirmation planConfirm;
-    /** 规划器。和 agent 用各自的客户端：取消一个不该把另一个也掐了。 */
-    private final Planner planner;
-
-    /** 当前这一轮的计划执行器，Esc/cancel 要能够到它。 */
+    /** 会话是不是 plan 模式。界面 Shift+Tab 和模型的两个工具都改它，见 {@link PlanMode}。 */
+    private final PlanMode planMode = new PlanMode();
     /**
-     * 「先规划后执行」的编排层。没有 API key 时是 null。
-     *
-     * <p>它顺带收走了原来那两个 {@code runningPlan} / {@code runningTasks} 字段——
-     * 那是为了叫停时能掐到正在跑的东西才挂在这儿的，现在取消归它管了。
+     * 上一句话拼进去时模型以为的模式。模式在两句话之间被用户切了，下一句话前面要交代一声——
+     * 模型手上最后一份说明还停在切换之前。
      */
-    private final PlanExecuteAgent planAgent;
+    private volatile boolean toldPlanMode;
+    /** 用户提交一句话时跑的 hook。 */
+    private final PromptHooks hooks;
+    /** 技能库。模型从 skill 工具点，用户用 /名字 点。 */
+    private final SkillLibrary skills;
 
     /** 一次性访问令牌，随进程生灭。 */
     private final String token;
@@ -302,6 +285,17 @@ public final class AgentServer extends WebSocketServer {
                         SUBAGENTS, this::onAgentEvent);
         if (subagents != null) {
             tools.registerAll(subagents.tools());
+            subagents.readOnlyWhen(planMode::on);
+        }
+        // plan 模式的两个工具。只读启动时不接：那时什么都改不了，没有「先规划再动手」这回事
+        if (!options.readOnly()) {
+            tools.registerAll(PlanModeTools.create(planMode, (ask, plan) -> {
+                PlanModeTools.Answer answer = planConfirm.review(ask, plan);
+                if (ask == PlanModeTools.Ask.EXIT) {
+                    audit.planReviewed(plan, answer.approved(), answer.feedback());   // 批了的那份就是当时的约定
+                }
+                return answer;
+            }));
         }
         this.checkpoints = new dev.wiles.myagent.snapshot.Checkpoints(shadow);
         checkpoints.session(sessionId);
@@ -315,11 +309,19 @@ public final class AgentServer extends WebSocketServer {
         // 技能：用户自己写的说明书，标准 SKILL.md 格式。一份都没有就不注册这个工具——
         // 清单挂在它的描述上，注册了就是每一轮的固定开销。只读模式照接：
         // 技能本身只是一段文字，真正动手的是模型读完之后调的那些工具
-        SkillLibrary skills = SkillLibrary.load(workspace.root());
+        this.skills = SkillLibrary.load(workspace.root());
+        this.hooks = PromptHooks.load(workspace.root());
         if (!skills.isEmpty()) {
             tools.register(new SkillTool(skills));
             log.info("接入 {} 份技能: {}", skills.all().size(),
                     skills.all().stream().map(Skill::id).collect(java.util.stream.Collectors.joining(", ")));
+        }
+        // 延迟加载（照 Claude Code）：MCP 工具和不常用的内置工具平时只露名字，用到时 tool_search 拉。
+        // 放在所有工具都注册完之后：tool_search 的说明里列的就是此刻这张表上的延迟工具
+        tools.defer(BuiltinTools.DEFERRED_TOOLS);
+        tools.defer(mcp.tools().stream().map(Tool::name).toList());
+        if (!tools.deferredTools().isEmpty()) {
+            tools.register(new ToolSearchTool(tools));
         }
 
         // 索引扫一次就定：它是 history 的第 0 条，改它等于改已经发生过的历史
@@ -327,29 +329,24 @@ public final class AgentServer extends WebSocketServer {
                 ? new Agent(newClient(), tools,
                         SystemPrompt.forWorkspace(workspace.root(), memory.index(workspace.root(),
                                 MemoryIndex.budgetFor(config.contextTokens())),
-                                options.readOnly(), subagents != null && SUBAGENTS == SubAgents.Mode.PROACTIVE),
+                                options.readOnly()),
                         Agent.DEFAULT_MAX_STEPS, contextManager(options.readOnly()))
                         // 后台预压缩用独立客户端：DeepSeekClient 有可变状态，
                         // 和主循环共用会互相踩 currentCall，取消就失灵
                         .withPrecompute(new Precompute(contextManager(options.readOnly()),
                                 () -> newClient()))
                         .withWritingTools(BuiltinTools.WRITING_TOOLS)
+                        .withToolGate(planMode::allows)
                         .onEvent(this::onAgentEvent)
                 : null;
         if (subagents != null) {
             subagents.attach(agent);
         }
-        this.planner = config.hasApiKey()
-                ? new Planner(newClient())
-                        .readOnly(options.readOnly())
-                        .context(PlanContext.of(workspace.root(), tools))
-                : null;
-        // 编排全交出去，这边只留「怎么问」和「怎么发事件」
-        this.planAgent = planner == null ? null
-                : new PlanExecuteAgent(planner, () -> newClient(), tools,
-                        workspace.root(), PlanStore.inUserHome())
-                        .approval(plan -> planConfirm.confirm())
-                        .listener(new ProtocolPlanView());
+        // 模式变了（不管是界面切的还是模型提议、用户同意的）就告诉所有界面
+        planMode.onChange(on -> {
+            audit.note("plan_mode", "on", String.valueOf(on));
+            publish(Protocol.event("mode").put("mode", on ? "plan" : "normal"));
+        });
     }
 
 /**
@@ -421,72 +418,6 @@ public final class AgentServer extends WebSocketServer {
         }
         return new MemoryEntry(h.name(), h.description(), h.content(),
                 MemoryScope.PROJECT, MemorySource.OBSERVATION, LocalDate.now(), metadata);
-    }
-
-    /**
-     * 把一次「先规划后执行」翻成协议事件。
-     *
-     * <p>这个类里<b>只有翻译</b>：什么时候规划、什么时候存档、失败了要不要改道，
-     * 全归 {@link PlanExecuteAgent}。终端版那边是同一套编排配另一个 {@link PlanListener}——
-     * 这正是把它抽出来的理由，从前加个功能得在两处各改一遍，漏一处就是
-     * 「某个界面上这功能就是不灵」。
-     */
-    private final class ProtocolPlanView implements PlanListener {
-
-        @Override
-        public void onPlanCreated(Plan plan) {
-            audit.planCreated(plan);
-            publish(Protocol.encodePlan(plan));
-        }
-
-        @Override
-        public void onRejected(Plan plan) {
-            audit.note("plan_rejected", "goal", plan.goal());
-            publish(Protocol.event("plan_finished").put("status", plan.status().name()));
-        }
-
-        @Override
-        public void onTaskStarted(Task task) {
-            audit.taskStarted(task);
-            // 接下来弹出的确认框要说清是谁要干这事。屏幕上七八个任务依次跑过时，
-            // 一个没有出处的「执行命令: rm -rf target」，用户想不清楚就只会点同意
-            approval.origin(originOf(task));
-            publish(Protocol.encodeTaskStarted(task));
-        }
-
-        @Override
-        public void onTaskFinished(Task task) {
-            audit.taskFinished(task);
-            approval.origin(null);
-            publish(Protocol.encodeTaskFinished(task));
-        }
-
-        @Override
-        public void onTasksAdded(Task parent, List<Task> added) {
-            publish(Protocol.encodeAddedTasks(parent.id(), added));
-        }
-
-        @Override
-        public void onReplanned(Task failed, List<Task> recovery) {
-            publish(Protocol.encodeReplanned(failed, recovery));
-        }
-
-        @Override
-        public void onAgentEvent(Task task, AgentEvent event) {
-            // 必须写全限定的外部类，否则解析到的是本类这个同名方法，自己递归调自己
-            AgentServer.this.onAgentEvent(task, event);
-        }
-
-        @Override
-        public void onFinished(Plan plan, PlanResult result) {
-            audit.planFinished(plan, result);
-            publish(Protocol.encodePlanFinished(plan, result));
-        }
-    }
-
-    /** 任务 → 审批框上那行「谁在问」。 */
-    private static ApprovalOrigin originOf(Task task) {
-        return new ApprovalOrigin(task.id(), task.role().id(), task.role().title());
     }
 
     private static String newToken() {
@@ -682,17 +613,14 @@ public final class AgentServer extends WebSocketServer {
                     publish(Protocol.event("approval_resolved").put("id", id));
                 }
             }
-            case "plan" -> handlePlan(peer, Protocol.str(cmd, "goal", "").trim(),
-                    Protocol.str(cmd, "cid", ""));
-            // resume 是老名字（那会儿只有计划能续）。终端那边已经改叫 /resume-plan，
-            // 协议这边两个都认：改名不该让还没更新的界面连不上
-            case "resume", "resume_plan" -> handleResume(peer);
+            case "set_mode" -> handleSetMode(peer, Protocol.str(cmd, "mode", "normal"));
             case "continue" -> handleContinue(peer);
             case "sessions" -> handleSessions(peer);
             case "session_resume" -> handleSessionResume(peer, Protocol.str(cmd, "id", ""));
             case "plan_confirm_reply" -> {
                 int id = Protocol.num(cmd, "id", -1);
-                if (planConfirm.reply(id, Protocol.bool(cmd, "approved", false))) {
+                if (planConfirm.reply(id, Protocol.bool(cmd, "approved", false),
+                        Protocol.str(cmd, "feedback", ""))) {
                     publish(Protocol.event("plan_confirm_resolved").put("id", id));
                 }
             }
@@ -725,32 +653,36 @@ public final class AgentServer extends WebSocketServer {
         }
         // 先播「用户说了这句话」，再播 busy——顺序就是屏幕上该出现的顺序。
         // 少了这一条，另一块屏上会凭空冒出一段回答（协议 3.15）
-        publish(Protocol.encodeUserMessage(text, "normal", cid));
+        publish(Protocol.encodeUserMessage(text, planMode.on() ? "plan" : "normal", cid));
         publish(Protocol.event("busy").put("busy", true));
         nameSession(text);
         checkpoints.mark(brief(text), agent.history().size());
 
-        // 普通模式下每句话都直接对话，不再按字面猜「这件事该不该先拆计划」：
-        // 误判的代价是一次规划调用加一道确认，评测里它不提升完成率、只让触发的那几次慢好几倍。
-        // 要先规划就由用户 Shift+Tab 切到 plan 模式（走 handlePlan）
+        // 不按字面猜「这件事该不该先规划」（照 Claude Code）：要先规划，要么用户 Shift+Tab 切进 plan 模式，
+        // 要么模型自己调 enter_plan_mode 提议、用户同意。这里只把此刻的模式如实交代给模型
         worker.submit(() -> {
             long startedAt = System.currentTimeMillis();
             try {
+                String input = prepare(text);
+                if (input == null) {
+                    return;                     // 被 hook 拦下了，理由已经播出去
+                }
                 if (FINAL_REVIEW) {
-                    // 审查方的事件带着 final-review 的任务号播出去，和计划子任务同一条通道
+                    // 审查方的事件带着 final-review 的任务号播出去
                     ReviewLoop loop = new ReviewLoop(this::newClient, tools, workspace.root(),
                             this::onAgentEvent);
                     reviewing = loop;
                     try {
                         loop.run(new ReviewLoop.MainTurn() {
-                            /** 图只跟着用户那句原话走；审查打回来的修改意见是纯文字 */
+                            /** 图和拼好的说明只跟着用户那句原话走；审查打回来的修改意见是纯文字 */
                             private boolean first = true;
 
                             @Override
-                            public String run(String input) {
+                            public String run(String next) {
                                 List<String> withImages = first ? images : List.of();
+                                String sent = first ? input : next;
                                 first = false;
-                                return agent.run(input, withImages);
+                                return agent.run(sent, withImages);
                             }
 
                             @Override
@@ -762,13 +694,13 @@ public final class AgentServer extends WebSocketServer {
                         reviewing = null;
                     }
                 } else {
-                    agent.run(text, images);     // 事件在 onAgentEvent 里已经播出去了
+                    agent.run(input, images);     // 事件在 onAgentEvent 里已经播出去了
                 }
             } catch (RuntimeException e) {
                 log.error("agent 跑挂了", e);
                 publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
             } finally {
-                // 一轮说完存一次盘，粒度和计划存档的「每了结一个任务存一次」对齐
+                // 一轮说完存一次盘
                 sessions.save(sessionId, agent.history(), workspace.root(),
                         config.model(), sessionStartedAt, agent.compaction(), meter.snapshot(),
                         agent.unfinished().orElse(null));
@@ -786,51 +718,60 @@ public final class AgentServer extends WebSocketServer {
     }
 
     /**
-     * 先规划后执行。三幕：规划 → 让界面确认 → 逐个任务跑。
-     * 编排本身归 {@link PlanExecuteAgent}，这儿只负责把过程翻译成事件发出去，
-     * 以及用 {@link PlanConfirmation} 等界面回一句「跑不跑」。
+     * 把用户那句话变成发给模型的那条消息：先过 hook，再在前面拼上给模型看的说明
+     * （{@link SystemReminder}）。三样说明各管各的：
+     * <ol>
+     *   <li><b>模式</b>：plan 模式下每句话都带上规矩；刚从 plan 模式切回来的那一句交代一声能动手了</li>
+     *   <li><b>hook 补的上下文</b>：用户自己的规则（{@link PromptHooks}）</li>
+     *   <li><b>点名的技能</b>：用户敲了 {@code /名字}，正文直接给（{@link SkillCommand}）</li>
+     * </ol>
+     *
+     * @return null 表示被 hook 拦下了，这句话不发给模型
      */
-    private void handlePlan(Peer peer, String goal, String cid) {
-        if (planner == null) {
-            peer.send(error("没有配置 API key，无法规划"));
-            return;
+    private String prepare(String text) {
+        PromptHooks.Outcome hooked = hooks.run(text, sessionId);
+        hooked.warnings().forEach(w -> publish(Protocol.event("hook").put("blocked", false).put("message", w)));
+        if (hooked.blocked()) {
+            audit.note("prompt_blocked", "reason", hooked.reason());
+            publish(Protocol.event("hook").put("blocked", true).put("message", hooked.reason()));
+            return null;
         }
-        if (goal.isEmpty()) {
-            return;
+        List<String> notes = new java.util.ArrayList<>();
+        boolean plan = planMode.on();
+        if (plan) {
+            notes.add(toldPlanMode ? "仍在 plan 模式：只调研、不改东西，计划写好了调 " + PlanMode.EXIT_TOOL + " 交给用户批。"
+                    : PlanModeTools.rules());
+        } else if (toldPlanMode) {
+            notes.add("用户已经退出 plan 模式，写文件和跑命令的工具都回来了，可以动手。");
         }
-        if (!busy.compareAndSet(false, true)) {
-            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
-            return;
+        toldPlanMode = plan;
+        notes.addAll(hooked.context());
+        SkillCommand.expand(skills, text).ifPresent(e -> notes.add(e.reminder()));
+
+        String input = text;
+        for (int k = notes.size() - 1; k >= 0; k--) {
+            input = SystemReminder.prepend(notes.get(k), input);
         }
-        publish(Protocol.encodeUserMessage(goal, "plan", cid));
-        publish(Protocol.event("busy").put("busy", true));
-        nameSession(goal);
-        checkpoints.mark("计划: " + brief(goal), agent.history().size());
-        worker.submit(() -> runPlan(goal));
+        return input;
     }
 
     /**
-     * 接着跑上次没跑完的计划。
-     *
-     * <p>「有没有存档」这件事在这儿就查掉，而不是丢进后台线程再说——
-     * 没有存档是个该定向回给发命令那个连接的错误（`error` 只发给他一个人），
-     * 而后台线程手上没有 conn，只能广播，等于打扰了所有连着的界面。
+     * 界面切模式（Shift+Tab）。忙着的时候也能切：正在跑的那一轮下一步请求时菜单就换了，
+     * 和 Claude Code 一样。只读启动时没有「切出 plan 模式能动手」这回事，拒掉。
      */
-    private void handleResume(Peer peer) {
-        if (planner == null) {
-            peer.send(error("没有配置 API key，无法执行计划"));
+    private void handleSetMode(Peer peer, String mode) {
+        boolean plan = "plan".equals(mode);
+        if (!plan && !"normal".equals(mode)) {
+            peer.send(error("mode 只认 normal / plan，收到: " + mode));
             return;
         }
-        if (!planAgent.hasSavedPlan()) {
-            peer.send(error("这个工作区没有没跑完的计划"));
+        if (options.readOnly()) {
+            peer.send(error("只读启动，没有 plan 模式可切"));
             return;
         }
-        if (!busy.compareAndSet(false, true)) {
-            peer.send(error("正在处理上一条，请先等它结束或按 Esc 中断"));
-            return;
-        }
-        publish(Protocol.event("busy").put("busy", true));
-        worker.submit(this::runResume);
+        planMode.set(plan);
+        // 和眼下一样时 set 不会广播，这里补一条回执给发命令的那个，让它的显示对上
+        peer.send(Protocol.event("mode").put("mode", planMode.on() ? "plan" : "normal"));
     }
 
     /**
@@ -944,6 +885,7 @@ public final class AgentServer extends WebSocketServer {
         sessionStartedAt = snapshot.startedAt();
         sessionTitle = null;
         checkpoints.session(sessionId);
+        toldPlanMode = false;   // 接回来的那段里交代过什么不作数，下一句按眼下的模式重新交代
         ObjectNode done = Protocol.event("session_restored");
         done.put("id", snapshot.id());
         done.put("messages", restored);
@@ -964,48 +906,6 @@ public final class AgentServer extends WebSocketServer {
         nameSession(snapshot.firstUserMessage());
     }
 
-    private void runResume() {
-        long startedAt = System.currentTimeMillis();
-        try {
-            if (planAgent.resume().isEmpty() && !planAgent.hasSavedPlan()) {
-                // 从 handleResume 查过到这儿之间，存档可能被删了（另一个会话跑完了它）。
-                // 用户否决也会返回 empty，但那时存档还在，且 onRejected 已经发过话了
-                publish(Protocol.event("failed").put("reason", "存档没了，没法接着跑"));
-            }
-        } catch (RuntimeException e) {
-            log.error("续跑挂了", e);
-            publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
-        } finally {
-            settleBusy(startedAt);
-        }
-    }
-
-    private void runPlan(String goal) {
-        long startedAt = System.currentTimeMillis();
-        try {
-            planAgent.run(goal);
-        } catch (RuntimeException e) {
-            log.error("计划跑挂了", e);
-            publish(Protocol.event("failed").put("reason", String.valueOf(e.getMessage())));
-        } finally {
-            settleBusy(startedAt);
-        }
-    }
-
-    /** 上次没跑完的计划。没配 API key 时没有编排层，也就无从谈起。 */
-    private Optional<PlanCheckpoint> savedPlan() {
-        return planAgent == null ? Optional.empty() : planAgent.savedPlan();
-    }
-
-    /** 收工：清 busy 标志并广播。规划和续跑两条路都要走，抽出来免得漏一条。 */
-    private void settleBusy(long startedAt) {
-        busy.set(false);
-        ObjectNode idle = Protocol.event("busy");
-        idle.put("busy", false);
-        idle.put("durationMs", System.currentTimeMillis() - startedAt);
-        publish(idle);
-    }
-
     private void handleCancel() {
         ReviewLoop loop = reviewing;
         if (loop != null) {
@@ -1014,11 +914,7 @@ public final class AgentServer extends WebSocketServer {
         if (agent != null) {
             agent.cancel();
         }
-        // 计划模式下要叫停的那三处（调度器、执行体、规划器）归编排层管了
-        if (planAgent != null) {
-            planAgent.cancel();
-        }
-        planConfirm.cancelPending();            // 卡在计划确认上的也要放行
+        planConfirm.cancelPending();            // 卡在 plan 模式确认上的也要放行
         approval.cancelPending();               // 卡在审批上的那轮也要放行
     }
 
@@ -1254,6 +1150,7 @@ public final class AgentServer extends WebSocketServer {
         sessionTitle = null;
         checkpoints.session(sessionId);
         meter.reset();      // 新会话新账本，和终端的 /clear 是同一条语义
+        toldPlanMode = false;   // 新对话里模型还没听说过 plan 模式；模式本身留着，和 Claude Code 一样
         // 授权规则**不清**。以前这里有一句 approval.reset()，清的是那个
         // 「本会话都同意」的全局开关——它本来就该跟着会话走。
         // 现在的授权是用户一条条挑定、并且存进了 ~/.myagent/policy.json 的东西，
@@ -1374,6 +1271,13 @@ public final class AgentServer extends WebSocketServer {
         // （myagent 仓库在 dev 上，状态栏却写 git:(myagent)），那不是简写，是错的
         n.put("branch", GitBranch.of(workspace.root()));
         n.put("planMode", options.readOnly());   // 线上字段名保持不变，前端认的是这个
+        // 会话眼下的模式（plan 模式是权限模式，见 PlanMode）。和上面那个只读启动不是一回事
+        n.put("mode", planMode.on() ? "plan" : "normal");
+        // 用户能用 /名字 点的技能，界面拿去补全斜杠菜单
+        ArrayNode skillList = n.putArray("skills");
+        for (Skill skill : skills.userInvocable()) {
+            skillList.addObject().put("id", skill.id()).put("description", skill.description());
+        }
         n.put("hasApiKey", config.hasApiKey());
         // /status 用。key 在这边打好码再发：首帧也会发给扫码连进来的手机、经过中继，
         // 完整的 key 不该离开这个进程
@@ -1396,15 +1300,6 @@ public final class AgentServer extends WebSocketServer {
             n.put("sentTokens", meter.snapshot().promptTokens());
             n.put("contextLimit", agent.contextLimit());
         }
-        // 上次没跑完的计划。放进首帧而不是让界面再问一次——
-        // 界面画第一屏时就该知道要不要摆出「接着跑」那个入口
-        savedPlan().ifPresent(checkpoint -> {
-            ObjectNode resumable = n.putObject("resumable");
-            resumable.put("goal", checkpoint.goal());
-            resumable.put("remaining", checkpoint.remaining());
-            resumable.put("total", checkpoint.tasks().size());
-            resumable.put("savedAt", checkpoint.savedAt());
-        });
         // 眼前这段断在了半路。晚连上来的界面（手机扫码进来时，终端那边早按过停了）
         // 没看见那条 failed，只能从首帧知道「说一句继续就能接上」。忙着的时候不发：
         // 那说明已经接上了，断点马上就要作废

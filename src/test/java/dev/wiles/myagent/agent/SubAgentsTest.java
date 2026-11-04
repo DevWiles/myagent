@@ -137,7 +137,7 @@ class SubAgentsTest {
         }
 
         Rig(Script... childScripts) {
-            this(SubAgents.Mode.EXPLICIT, childScripts);
+            this(SubAgents.Mode.ON, childScripts);
         }
 
         ToolResult exec(String tool, Map<String, ?> args) throws Exception {
@@ -380,34 +380,42 @@ class SubAgentsTest {
     }
 
     @Test
-    @DisplayName("触发方式：默认 explicit（用户没要求不派），proactive 换成能并行就派；off 不造")
-    void modeControlsSpawnGuidance() throws Exception {
-        assertEquals(SubAgents.Mode.EXPLICIT, SubAgents.Mode.parse(null));
+    @DisplayName("开关：默认开、只认 on/off；派不派由说明引导（什么时候用、什么时候别用），不再有许可或开局决策")
+    void modeIsOnOffAndGuidanceIsInDescription() {
+        assertEquals(SubAgents.Mode.ON, SubAgents.Mode.parse(null));
         assertEquals(SubAgents.Mode.OFF, SubAgents.Mode.parse("off"));
-        assertEquals(SubAgents.Mode.PROACTIVE, SubAgents.Mode.parse("Proactive"));
-        assertThrows(IllegalArgumentException.class, () -> SubAgents.Mode.parse("sometimes"));
+        assertEquals(SubAgents.Mode.ON, SubAgents.Mode.parse("On"));
+        assertThrows(IllegalArgumentException.class, () -> SubAgents.Mode.parse("proactive"));
 
-        String explicit = new Rig(SubAgents.Mode.EXPLICIT).subagents.spawnDescription();
-        String proactive = new Rig(SubAgents.Mode.PROACTIVE).subagents.spawnDescription();
-        assertTrue(explicit.contains("否则不要派子 agent"));
-        assertFalse(proactive.contains("否则不要派子 agent"));
-        assertTrue(proactive.contains("主动委派已开启"));
-        for (String d : List.of(explicit, proactive)) {
-            assertTrue(d.contains("关键路径"));
-            assertTrue(d.contains("写入集合互不相交"));
-            assertFalse(d.contains("{{"), "占位符都要替换掉");
-        }
+        String d = new Rig(SubAgents.Mode.ON).subagents.spawnDescription();
+        assertTrue(d.contains("### 什么时候用"));
+        assertTrue(d.contains("### 什么时候别用"));
+        assertTrue(d.contains("关键路径"));
+        assertTrue(d.contains("写入集合互不相交"));
+        assertFalse(d.contains("否则不要派子 agent"));
+        assertFalse(d.contains("{{"), "占位符都要替换掉");
     }
 
     @Test
-    @DisplayName("主动委派写进系统提示词（只放工具说明里模型不看），默认不写；在记忆索引之前，前缀缓存不受影响")
-    void proactiveModeIsInSystemPrompt() {
-        java.nio.file.Path root = java.nio.file.Path.of("/tmp/ws");
-        String plain = SystemPrompt.forWorkspace(root, null, false);
-        String proactive = SystemPrompt.forWorkspace(root, null, false, true);
-        assertFalse(plain.contains("## 主动委派"));
-        assertTrue(proactive.contains("## 主动委派"));
-        assertTrue(proactive.startsWith(plain), "只在尾部多一段，前面逐字不变");
+    @DisplayName("plan 模式下只能派 explorer：派 worker、给已有的 worker 发活都被挡回去；退出后照常")
+    void planModeOnlyAllowsExplorers() throws Exception {
+        boolean[] plan = {true};
+        Rig rig = new Rig(SubAgents.Mode.ON, new Script().reply("查完了"), new Script().reply("写完了"));
+        rig.subagents.readOnlyWhen(() -> plan[0]);
+
+        ToolResult worker = rig.exec("spawn_agent", Map.of("message", "改 a", "agent_type", "worker",
+                "owns", List.of("src/a.py")));
+        assertFalse(worker.ok());
+        assertTrue(worker.content().contains("plan 模式"), worker.content());
+        rig.spawn(Map.of("message", "查 a", "agent_type", "explorer"));
+
+        plan[0] = false;
+        String id = rig.spawn(Map.of("message", "改 a", "agent_type", "worker", "owns", List.of("src/a.py")));
+        awaitIdle(rig.subagents);
+        plan[0] = true;
+        ToolResult more = rig.exec("send_input", Map.of("target", id, "message", "再改一处"));
+        assertFalse(more.ok());
+        assertTrue(more.content().contains("plan 模式"), more.content());
     }
 
     @Test
@@ -462,7 +470,7 @@ class SubAgentsTest {
     void forcedConclusionStopsChildren() throws Exception {
         Script child = new Script();
         child.blockUntilCancelled = new CountDownLatch(1);
-        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 1, child);
+        Rig rig = new Rig(SubAgents.Mode.ON, 1, child);
         rig.parentLlm.call("spawn_agent", "{\"message\":\"慢活\"}");
         rig.parentLlm.reply("先写到这儿");
 
@@ -472,28 +480,6 @@ class SubAgentsTest {
         assertTrue(rig.subagents.stopAll(5_000), "收尾时已经叫停，stopAll 很快返回");
         assertFalse(rig.subagents.busy());
         assertFalse(rig.subagents.hasMail(), "主 agent 叫停的，不发通知");
-    }
-
-    @Test
-    @DisplayName("auto：计划排在用户原话之后、第一次请求前送到；spawn_agent 说明换成「照计划派」")
-    void autoPlanIsDeliveredAfterUserInput() {
-        assertEquals(SubAgents.Mode.AUTO, SubAgents.Mode.parse("auto"));
-        Rig rig = new Rig(SubAgents.Mode.AUTO);
-        rig.subagents.post(SubAgents.PLAN_TAG + "\n1. [worker] 写 a\n</delegation_plan>");
-        List<ChatMessage>[] first = new List[1];
-        rig.parentLlm.steps.add(m -> {
-            first[0] = m;
-            return ChatMessage.assistant("好");
-        });
-
-        rig.parent.run("原始需求");
-
-        List<ChatMessage> sent = first[0];
-        assertEquals("原始需求", sent.get(sent.size() - 2).content(), "用户原话仍在前");
-        assertTrue(sent.get(sent.size() - 1).content().startsWith(SubAgents.PLAN_TAG));
-        String desc = rig.subagents.spawnDescription();
-        assertTrue(desc.contains("按开局的委派计划派"));
-        assertFalse(desc.contains("否则不要派子 agent"));
     }
 
     /** 写 a.py、跑一次 pytest、交卷的子 agent。 */
@@ -622,7 +608,7 @@ class SubAgentsTest {
     @Test
     @DisplayName("只允许 explorer（对照组 B）：派 worker 被拒，说明里也只列 explorer")
     void rolesAreRestricted() throws Exception {
-        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0,
+        Rig rig = new Rig(SubAgents.Mode.ON, 0,
                 settings(Map.of("MYAGENT_SUBAGENT_ROLES", "explorer"), 0, null), new Script().reply("查完"));
         ToolResult worker = rig.exec("spawn_agent", Map.of("message", "写 a", "agent_type", "worker", "owns", List.of("a.py")));
         assertFalse(worker.ok());
@@ -641,7 +627,7 @@ class SubAgentsTest {
         child.blockUntilCancelled = new CountDownLatch(1);
         SubAgents.Settings quick = new SubAgents.Settings(3, java.util.Set.of("default", "explorer", "worker"),
                 0, 200, null);
-        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0, quick, child);
+        Rig rig = new Rig(SubAgents.Mode.ON, 0, quick, child);
         String id = rig.spawn(Map.of("message", "慢活"));
 
         awaitIdle(rig.subagents);
@@ -654,7 +640,7 @@ class SubAgentsTest {
     @DisplayName("共用步数预算：子 agent 的步数也从里面扣；用完时主 agent 收尾，文案说明是共用预算")
     void sharedStepBudget() throws Exception {
         StepBudget budget = new StepBudget(3);
-        Rig rig = new Rig(SubAgents.Mode.EXPLICIT, 0, settings(Map.of(), 0, budget), new Script().reply("子做完"));
+        Rig rig = new Rig(SubAgents.Mode.ON, 0, settings(Map.of(), 0, budget), new Script().reply("子做完"));
         rig.parentLlm.call("spawn_agent", "{\"message\":\"小活\"}");                 // 主 1 步，子 1 步
         rig.parentLlm.call("wait_agent", m -> "{\"targets\":[\"" + lastAgentId(m) + "\"]}"); // 主第 2 步
         rig.parentLlm.call("read_file", "{}");                                         // 第 4 步取不到

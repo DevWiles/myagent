@@ -6,9 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.plan.AgentRole;
 import dev.wiles.myagent.plan.AgentRoles;
-import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.PlanResult;
-import dev.wiles.myagent.plan.Task;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,25 +24,22 @@ import dev.wiles.myagent.context.Interruption;
  *   服务端 → 客户端   ready / thinking / text_delta / thought / tool_started
  *                     tool_finished / compacted / done / failed
  *                     approval_request / busy / error / pong
- *                     plan_created / plan_confirm_request / plan_task_started
- *                     plan_task_finished / plan_tasks_added / plan_revised / plan_finished
+ *                     mode / plan_confirm_request / plan_confirm_resolved
  *   客户端 → 服务端   prompt / cancel / approval_reply / reset / ping
- *                     plan / plan_confirm_reply</pre>
+ *                     set_mode / plan_confirm_reply</pre>
  *
- * <p>「先规划后执行」的一轮长这样:
+ * <p>plan 模式（照 Claude Code，是一种权限模式，不是另一条执行链路）的一轮长这样:
  * <pre>
- *   客户端 {"t":"plan","goal":"给 Task 加重试"}
- *   服务端 {"t":"busy","busy":true}
- *          {"t":"plan_created","goal":...,"tasks":[...],"layers":[["t1","t2"],["t3"]]}
- *          {"t":"plan_confirm_request","id":1}
+ *   客户端 {"t":"set_mode","mode":"plan"}              (或者模型调 enter_plan_mode、用户同意)
+ *   服务端 {"t":"mode","mode":"plan"}
+ *   客户端 {"t":"prompt","text":"给 Task 加重试"}
+ *   服务端 ...只读调研，照常发 thinking / tool_started 等事件...
+ *          {"t":"plan_confirm_request","id":1,"kind":"exit","plan":"## 计划
+..."}
  *   客户端 {"t":"plan_confirm_reply","id":1,"approved":true}
- *   服务端 {"t":"plan_task_started","taskId":"t1",...}
- *          ...执行期间照常发 thinking / text_delta / tool_started 等事件...
- *          {"t":"plan_task_finished","taskId":"t1","status":"SUCCEEDED",...}
- *          {"t":"plan_tasks_added",...}        (PLANNING 任务拆出子任务时才有)
- *          {"t":"plan_revised",...}            (某一步失败后补出救场任务时才有)
- *          {"t":"plan_finished","status":"COMPLETED","succeeded":5,...}
- *          {"t":"busy","busy":false}
+ *   服务端 {"t":"plan_confirm_resolved","id":1}
+ *          {"t":"mode","mode":"normal"}
+ *          ...同一个 agent 接着照计划改文件、跑测试...
  * </pre>
  */
 public final class Protocol {
@@ -67,7 +61,7 @@ public final class Protocol {
      * 能力清单让界面自己决定「这个按钮画不画」，两边可以各自独立演进。
      */
     public static final List<String> FEATURES =
-            List.of("plan", "replan", "resume", "resume_plan",
+            List.of("plan_mode", "skills",
                     "session", "sessions", "compact", "memory", "roles",
                     "events_resume", "user_echo", "undo", "rewind", "images");
 
@@ -270,6 +264,8 @@ public final class Protocol {
                         int end = content.indexOf(INTERRUPT_CLOSE);
                         content = end < 0 ? content : content.substring(end + INTERRUPT_CLOSE.length());
                     }
+                    // plan 模式规矩、hook 补的上下文、/技能 的正文：给模型看的，不是用户说的
+                    content = dev.wiles.myagent.context.SystemReminder.strip(content.stripLeading());
                     if (!content.isBlank()) {
                         out.addObject().put("kind", "user").put("text", content.strip());
                     }
@@ -296,106 +292,6 @@ public final class Protocol {
                 }
             }
         }
-    }
-
-    /**
-     * 一份新鲜出炉的计划。
-     *
-     * <p>{@code layers} 是拓扑分层的结果，直接把「哪几步互不依赖」算好给前端——
-     * 让前端自己按 dependsOn 推一遍，等于把同一套图算法在两种语言里各实现一次，
-     * 迟早会有一边算错。
-     */
-    public static ObjectNode encodePlan(Plan plan) {
-        ObjectNode n = event("plan_created");
-        n.put("goal", plan.goal());
-        ArrayNode tasks = n.putArray("tasks");
-        for (Task task : plan.graph().tasks()) {
-            tasks.add(encodeTask(task));
-        }
-        ArrayNode layers = n.putArray("layers");
-        for (List<Task> layer : plan.graph().layers()) {
-            ArrayNode ids = layers.addArray();
-            layer.forEach(task -> ids.add(task.id()));
-        }
-        return n;
-    }
-
-    /** PLANNING 任务拆出了新任务，图长大了。前端要能就地插进去，而不是重画整张图。 */
-    public static ObjectNode encodeAddedTasks(String parentId, List<Task> added) {
-        ObjectNode n = event("plan_tasks_added");
-        n.put("parentId", parentId);
-        ArrayNode tasks = n.putArray("tasks");
-        added.forEach(task -> tasks.add(encodeTask(task)));
-        return n;
-    }
-
-    public static ObjectNode encodeTaskStarted(Task task) {
-        ObjectNode n = event("plan_task_started");
-        n.put("taskId", task.id());
-        n.put("taskType", task.type().name());
-        n.put("role", task.role().id());
-        n.put("roleTitle", task.role().title());
-        n.put("description", task.description());
-        return n;
-    }
-
-    public static ObjectNode encodeTaskFinished(Task task) {
-        ObjectNode n = event("plan_task_finished");
-        n.put("taskId", task.id());
-        n.put("status", task.status().name());
-        n.put("durationMs", task.durationMillis());
-        n.put("result", task.result());
-        n.put("error", task.error());
-        return n;
-    }
-
-    public static ObjectNode encodePlanFinished(Plan plan, PlanResult result) {
-        ObjectNode n = event("plan_finished");
-        n.put("status", plan.status().name());
-        n.put("succeeded", result.succeeded());
-        n.put("failed", result.failed());
-        n.put("skipped", result.skipped());
-        n.put("replans", result.replans());
-        n.put("durationMs", plan.durationMillis());
-        return n;
-    }
-
-    /**
-     * 某一步失败之后补出了一批救场任务。
-     *
-     * <p>界面不知道这件事的话，用户看到的就是「某一步红了」，然后屏幕上莫名其妙
-     * 冒出几个计划里根本没有的任务在跑。
-     *
-     * <p>和 {@code plan_tasks_added} 分成两条消息而不是共用一条：前者是计划<b>按原样长大</b>
-     * （PLANNING 任务拆出下一层），后者是<b>原路走不通，换了条路</b>。
-     * 对用户的意义完全不同，界面该画得不一样。
-     */
-    public static ObjectNode encodeReplanned(Task failed, List<Task> recovery) {
-        ObjectNode n = event("plan_revised");
-        n.put("failedTaskId", failed.id());
-        ArrayNode tasks = n.putArray("tasks");
-        recovery.forEach(task -> tasks.add(encodeTask(task)));
-        return n;
-    }
-
-    private static ObjectNode encodeTask(Task task) {
-        ObjectNode item = MAPPER.createObjectNode();
-        item.put("id", task.id());
-        item.put("type", task.type().name());
-        // 派给谁。和 type 一起发而不是取代它：两者回答的不是同一个问题——
-        // type 是「这一步会对世界做什么」（界面上色、将来排并发靠它），
-        // role 是「派谁去、用什么姿势」。而且老界面只认 type，
-        // 换掉它就是一次破坏性改动，得升协议版本；新增一个字段不用
-        item.put("role", task.role().id());
-        item.put("roleTitle", task.role().title());
-        item.put("description", task.description());
-        // 新增字段不升协议版本：老界面照约定忽略不认识的字段，照跑不误
-        item.put("acceptance", task.acceptance());
-        item.put("status", task.status().name());
-        item.put("parentId", task.parentId());
-        ArrayNode deps = item.putArray("dependsOn");
-        task.dependencies().forEach(deps::add);
-        return item;
     }
 
     /** 取布尔字段。前端漏传或者传了别的类型，都退回默认值，不让服务端崩。 */

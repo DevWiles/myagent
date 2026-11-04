@@ -64,9 +64,6 @@ public final class AgentTaskRunner implements TaskRunner {
     private BiConsumer<Task, AgentEvent> listener = (task, event) -> {
     };
 
-    /** 给 PLANNING 任务拆子任务用。没配就退化成一次普通的只读调研。 */
-    private Planner planner;
-
     /**
      * 要不要执行角色的「结论行」契约（{@link AgentRole#requiresVerdict()}）。
      *
@@ -121,17 +118,6 @@ public final class AgentTaskRunner implements TaskRunner {
     /** 事件带着任务一起转发——界面得知道现在动的是哪个节点。 */
     public AgentTaskRunner onEvent(BiConsumer<Task, AgentEvent> listener) {
         this.listener = listener;
-        return this;
-    }
-
-    /**
-     * 配上规划器，{@link TaskType#PLANNING} 任务才能真的拆出子任务。
-     *
-     * <p>做成可选而不是构造参数：没有它整条链照样跑得通（PLANNING 退化成一次调研），
-     * 而测试调度逻辑时也不必每次都捏一个规划器出来。
-     */
-    public AgentTaskRunner withPlanner(Planner planner) {
-        this.planner = planner;
         return this;
     }
 
@@ -190,9 +176,6 @@ public final class AgentTaskRunner implements TaskRunner {
             // 记成「成功但其实没做」是最糟的——后面每一步都建立在一个假前提上。
             return TaskOutcome.failed(text);
         }
-        if (task.type() == TaskType.PLANNING && planner != null) {
-            return expand(task, text);
-        }
         return TaskOutcome.ok(text);
     }
 
@@ -234,26 +217,6 @@ public final class AgentTaskRunner implements TaskRunner {
      */
     private int stepsFor(AgentRole role) {
         return maxSteps > 0 ? maxSteps : role.maxSteps();
-    }
-
-    /**
-     * PLANNING 任务的第二幕：拿着刚摸到的情况，再问模型一次，拆出下一层子任务。
-     *
-     * <p>两次调用是刻意分开的——第一次带只读工具去<b>看</b>，第二次不带工具只<b>想</b>。
-     * 合成一次的话，模型得一边调工具一边惦记着输出 JSON，两头都做不好。
-     *
-     * <p>拆不出来就是这个任务失败：它存在的唯一意义就是产出子任务，
-     * 产不出来还报成功，下游会拿着一句空话往下跑。
-     */
-    private TaskOutcome expand(Task task, String findings) {
-        try {
-            List<Task> subTasks = planner.planSubTasks(task, findings, brief);
-            log.info("任务 {} 拆出 {} 个子任务", task.id(), subTasks.size());
-            return TaskOutcome.planned(findings, subTasks);
-        } catch (RuntimeException e) {
-            log.warn("任务 {} 拆子任务失败: {}", task.id(), e.getMessage());
-            return TaskOutcome.failed(compose("拆子任务失败: " + e.getMessage(), findings));
-        }
     }
 
     /**

@@ -11,6 +11,7 @@ import dev.wiles.myagent.tool.Args;
 import dev.wiles.myagent.tool.BuiltinTools;
 import dev.wiles.myagent.tool.Tool;
 import dev.wiles.myagent.tool.ToolRegistry;
+import dev.wiles.myagent.tool.ToolSearchTool;
 import dev.wiles.myagent.tool.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -48,9 +50,11 @@ import java.util.function.Supplier;
  *       {@link #DEFAULT_MAX_THREADS}），深度 1——子 agent 的菜单上没有这五个工具
  *       （Codex 是 {@code agent_max_threads = 6}、{@code agent_max_depth = 1}；并发先压到 3，
  *       cookiecutter 上几个 agent 同时请求就撞 429，再按实验调）。</li>
- *   <li><b>默认不主动派</b>：{@link Mode#EXPLICIT} 时工具描述里写明「用户没明确要求就不派」，
- *       这是 Codex 的默认；{@link Mode#PROACTIVE} 换成「能并行就派」；{@link Mode#AUTO} 是开工前由
- *       {@link DelegationDecider} 决定，不委派就不给这几个工具，委派就把计划放进主 agent 的对话。</li>
+ *   <li><b>派不派由模型按描述自己定</b>（照 Claude Code 的 Agent 工具）：工具常驻菜单，
+ *       {@code spawn_agent} 的说明里写清每种类型什么时候用、什么时候自己做更快。
+ *       不在开工前另跑一次决策，也不靠用户开口许可。</li>
+ *   <li><b>plan 模式下只能派 explorer</b>：那时主 agent 只许调研，派个 worker 出去改文件
+ *       等于从侧门绕过了这条规矩（见 {@link #readOnlyWhen}）。</li>
  * </ul>
  *
  * <h3>子 agent 的系统提示词就是主 agent 那一份</h3>
@@ -163,9 +167,6 @@ public final class SubAgents implements Mailbox {
     /** 通知的开头。界面按 user 消息数截转录时要跳过它——那不是人说的话。 */
     public static final String NOTICE_TAG = "<subagent_notification>";
 
-    /** 开局委派计划的开头（{@link DelegationDecider.Decision#render()}）。同样不是人说的话。 */
-    public static final String PLAN_TAG = "<delegation_plan>";
-
     /** 收尾前的验证提醒（{@link #beforeFinish()}）。同样不是人说的话。 */
     public static final String VERIFY_TAG = "<verify_reminder>";
 
@@ -183,22 +184,20 @@ public final class SubAgents implements Mailbox {
     /** bash / run_tests 输出末尾的「退出码: N」。 */
     private static final Pattern EXIT_CODE = Pattern.compile("退出码: (-?\\d+)\\s*$");
 
-    /** 什么时候派。见类注释。 */
+    /** 开不开。派不派、派几个由模型按工具说明自己定，见类注释。 */
     public enum Mode {
-        OFF, EXPLICIT, PROACTIVE, AUTO;
+        OFF, ON;
 
-        /** 环境变量 {@code MYAGENT_SUBAGENTS} 的值：off / explicit（默认）/ proactive / auto。 */
+        /** 环境变量 {@code MYAGENT_SUBAGENTS} 的值：on（默认）/ off。 */
         public static Mode parse(String value) {
             if (value == null || value.isBlank()) {
-                return EXPLICIT;
+                return ON;
             }
             return switch (value.strip().toLowerCase(Locale.ROOT)) {
                 case "off", "0", "false", "no" -> OFF;
-                case "proactive" -> PROACTIVE;
-                case "explicit" -> EXPLICIT;
-                case "auto" -> AUTO;
+                case "on", "1", "true", "yes" -> ON;
                 default -> throw new IllegalArgumentException(
-                        "MYAGENT_SUBAGENTS 只认 off / explicit / proactive / auto，收到: " + value);
+                        "MYAGENT_SUBAGENTS 只认 on / off，收到: " + value);
             };
         }
     }
@@ -226,8 +225,7 @@ public final class SubAgents implements Mailbox {
 
     static {
         // 提示词文件缺了不会有任何症状，只是子 agent 少了规矩。启动就读一遍
-        for (String path : List.of("subagents/spawn.md", "subagents/explicit.md",
-                "subagents/proactive.md", "subagents/auto.md", "subagents/child.md")) {
+        for (String path : List.of("subagents/spawn.md", "subagents/child.md")) {
             REPO.loadRequired(path);
         }
         ROLES.values().forEach(role -> REPO.loadRequired(role.rulesPath()));
@@ -310,9 +308,10 @@ public final class SubAgents implements Mailbox {
     private final Path root;
     private final Supplier<ContextManager> contexts;
     private final Settings settings;
-    private final Mode mode;
     private final BiConsumer<String, AgentEvent> events;
     private volatile Agent parent;
+    /** 主 agent 眼下是不是只许调研（plan 模式）。是的话只放 explorer 出去。 */
+    private volatile BooleanSupplier readOnly = () -> false;
 
     /**
      * @param clients       <b>每个子 agent 现造一个</b>客户端：{@code DeepSeekClient} 带可变状态，共用会互相踩取消
@@ -333,8 +332,15 @@ public final class SubAgents implements Mailbox {
         this.root = workspaceRoot.toAbsolutePath().normalize();
         this.contexts = contexts;
         this.settings = settings;
-        this.mode = mode;
         this.events = events == null ? (id, e) -> { } : events;
+    }
+
+    /**
+     * 什么时候只许派只读的 explorer。plan 模式由界面随时切换，所以给的是一个现查的开关。
+     */
+    public SubAgents readOnlyWhen(BooleanSupplier readOnly) {
+        this.readOnly = readOnly;
+        return this;
     }
 
     /**
@@ -442,8 +448,7 @@ public final class SubAgents implements Mailbox {
     }
 
     public static boolean isNotice(String content) {
-        return content != null && (content.startsWith(NOTICE_TAG) || content.startsWith(PLAN_TAG)
-                || content.startsWith(VERIFY_TAG));
+        return content != null && (content.startsWith(NOTICE_TAG) || content.startsWith(VERIFY_TAG));
     }
 
     /**
@@ -772,6 +777,11 @@ public final class SubAgents implements Mailbox {
             narrowed.register(tool instanceof OwnedWrite w ? new OwnedWrite(w.inner, id)
                     : tool instanceof MainTestWatch m ? m.inner : tool);
         }
+        // 延迟加载照搬；tool_search 换成搜它自己这张表的，免得拉到它菜单上没有的工具
+        narrowed.defer(allTools.deferredTools().stream().map(Tool::name).toList());
+        if (narrowed.get(ToolSearchTool.NAME) != null) {
+            narrowed.replace(new ToolSearchTool(narrowed));
+        }
         return narrowed;
     }
 
@@ -863,13 +873,7 @@ public final class SubAgents implements Mailbox {
             }
             roles.append("- ").append(role.id()).append("：").append(role.description().strip()).append('\n');
         }
-        String modeText = REPO.loadRequired(switch (mode) {
-            case PROACTIVE -> "subagents/proactive.md";
-            case AUTO -> "subagents/auto.md";
-            default -> "subagents/explicit.md";
-        }).strip();
         return REPO.loadRequired("subagents/spawn.md")
-                .replace("{{mode}}", modeText)
                 .replace("{{roles}}", roles.toString().strip())
                 .strip();
     }
@@ -910,6 +914,10 @@ public final class SubAgents implements Mailbox {
             Role role = ROLES.get(type.isEmpty() ? "default" : type);
             if (role == null) {
                 return ToolResult.error("agent_type 只认 default / explorer / worker，收到: " + type);
+            }
+            if (role != EXPLORER && readOnly.getAsBoolean()) {
+                return ToolResult.error("现在是 plan 模式，只许调研：只能派 explorer。"
+                        + "要动手的部分写进计划，用户批准、退出 plan 模式之后再派");
             }
             if (!settings.roles().contains(role.id())) {
                 return ToolResult.error("这次只允许派 " + String.join(" / ", settings.roles().stream().sorted().toList())
@@ -1027,6 +1035,10 @@ public final class SubAgents implements Mailbox {
                 }
                 if (child.closed) {
                     return ToolResult.error(target + " 已经关掉了，先 resume_agent 再发");
+                }
+                if (child.role != EXPLORER && readOnly.getAsBoolean()) {
+                    return ToolResult.error("现在是 plan 模式，只许调研：" + target + " 是 " + child.role.id()
+                            + "，不能给它派活。退出 plan 模式之后再发");
                 }
                 if (!child.running) {
                     notices.removeIf(n -> n.agentId().equals(target));   // 上一轮的结果它已经不需要了

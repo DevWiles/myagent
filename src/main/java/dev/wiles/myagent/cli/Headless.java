@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.wiles.myagent.agent.Agent;
 import dev.wiles.myagent.agent.AgentEvent;
-import dev.wiles.myagent.agent.DelegationDecider;
 import dev.wiles.myagent.agent.StepBudget;
 import dev.wiles.myagent.agent.SubAgents;
 import dev.wiles.myagent.agent.SystemPrompt;
@@ -108,26 +107,15 @@ public final class Headless {
         try {
             MemoryIndex index = memory.index(workspace.root(),
                     MemoryIndex.budgetFor(config.contextTokens()));
-            // 子 agent：照 Codex，spawn_agent 异步派出、结果以通知送回，worker 能直接改工作区。
-            // MYAGENT_SUBAGENTS=off/explicit（默认，用户没要求不派）/proactive（能并行就派）
-            // /auto（开工前由决策器定：不委派就不给派遣工具，委派就带着计划开工），评测做对照用
+            // 子 agent：spawn_agent 异步派出、结果以通知送回，worker 能直接改工作区。
+            // 派不派由模型按工具说明自己定（照 Claude Code）；MYAGENT_SUBAGENTS=off 关掉，评测做对照用
             AtomicInteger subagentSteps = new AtomicInteger();
             SubAgents.Mode subMode = SubAgents.Mode.parse(System.getenv("MYAGENT_SUBAGENTS"));
             // MYAGENT_TOTAL_STEPS：主 agent 和子 agent 共用的步数预算（算力对齐的对照用），不设就不共用
             int totalSteps = SubAgents.Settings.intOr(System.getenv("MYAGENT_TOTAL_STEPS"), 0);
             StepBudget budget = totalSteps > 0 ? new StepBudget(totalSteps) : null;
             SubAgents.Settings subSettings = SubAgents.Settings.fromEnv(System::getenv, maxSteps, budget);
-            DelegationDecider.Decision decision = null;
-            if (subMode == SubAgents.Mode.AUTO) {
-                decision = new DelegationDecider(clients.get(), workspace.root(), subSettings.maxThreads(),
-                        subSettings.roles())
-                        .decide(prompt, totalSteps > 0 ? totalSteps : maxSteps);
-                summary.set("delegation", decision.toJson());
-                System.err.println("[trace] decide " + (decision.delegate()
-                        ? "委派 " + decision.subtasks().size() + " 个子任务" : "不委派") + "：" + decision.reason());
-            }
-            boolean withSubagents = subMode != SubAgents.Mode.OFF
-                    && (subMode != SubAgents.Mode.AUTO || decision.delegate());
+            boolean withSubagents = subMode != SubAgents.Mode.OFF;
             SubAgents subagents = !withSubagents ? null
                     : new SubAgents(clients, tools, workspace.root(), () -> new ContextManager(config.contextTokens()),
                             subSettings, subMode, (id, event) -> {
@@ -140,8 +128,7 @@ public final class Headless {
                 tools.registerAll(subagents.tools());
             }
             Agent agent = new Agent(clients.get(), tools,
-                    SystemPrompt.forWorkspace(workspace.root(), index, false,
-                            subMode == SubAgents.Mode.PROACTIVE),
+                    SystemPrompt.forWorkspace(workspace.root(), index, false),
                     maxSteps, new ContextManager(config.contextTokens()))
                     .withWritingTools(BuiltinTools.WRITING_TOOLS)
                     .withStepBudget(budget);
@@ -150,9 +137,6 @@ public final class Headless {
             }
             if (subagents != null) {
                 subagents.attach(agent);
-                if (decision != null) {
-                    subagents.post(decision.render());     // 排在用户原话之后，第一步请求前送到
-                }
             }
             AtomicInteger steps = new AtomicInteger();
             AtomicReference<String> failed = new AtomicReference<>();

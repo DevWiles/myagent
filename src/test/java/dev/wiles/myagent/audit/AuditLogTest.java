@@ -2,9 +2,7 @@ package dev.wiles.myagent.audit;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.wiles.myagent.plan.Plan;
 import dev.wiles.myagent.plan.Task;
-import dev.wiles.myagent.plan.TaskGraph;
 import dev.wiles.myagent.plan.TaskType;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.safety.ApprovalRequest;
@@ -24,11 +22,12 @@ class AuditLogTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static Plan plan() {
-        TaskGraph graph = TaskGraph.of(List.of(
-                new Task("t1", "读 Task.java", TaskType.FILE_READ, List.of()),
-                new Task("t2", "改 Task.java", TaskType.FILE_WRITE, List.of("t1"))));
-        return new Plan("给 Task 加重试", graph);
+    private static Task read() {
+        return new Task("t1", "读 Task.java", TaskType.FILE_READ, List.of());
+    }
+
+    private static Task write() {
+        return new Task("t2", "改 Task.java", TaskType.FILE_WRITE, List.of("t1"));
     }
 
     private static List<JsonNode> read(Path file) throws IOException {
@@ -46,8 +45,8 @@ class AuditLogTest {
     void writesJsonLines(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("run.jsonl");
         try (AuditLog audit = new AuditLog(file)) {
-            audit.planCreated(plan());
-            audit.taskStarted(plan().graph().get("t1"));
+            audit.planReviewed("## 计划\n改 Task.java", true, "");
+            audit.taskStarted(read());
         }
 
         List<JsonNode> lines = read(file);
@@ -57,7 +56,7 @@ class AuditLogTest {
             assertTrue(line.hasNonNull("runId"), line.toString());
             assertTrue(line.hasNonNull("type"), line.toString());
         }
-        assertEquals("plan_created", lines.get(0).get("type").asText());
+        assertEquals("plan_reviewed", lines.get(0).get("type").asText());
         assertEquals("task_started", lines.get(1).get("type").asText());
     }
 
@@ -66,13 +65,12 @@ class AuditLogTest {
     void recordsWhichRoleRanEachStep(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("run.jsonl");
         try (AuditLog audit = new AuditLog(file)) {
-            audit.planCreated(plan());
-            audit.taskStarted(plan().graph().get("t2"));
+            audit.taskStarted(read());
+            audit.taskStarted(write());
         }
 
         List<JsonNode> lines = read(file);
-        assertEquals("explorer", lines.get(0).get("tasks").get(0).get("role").asText());
-        assertEquals("coder", lines.get(0).get("tasks").get(1).get("role").asText());
+        assertEquals("explorer", lines.get(0).get("role").asText());
         assertEquals("coder", lines.get(1).get("role").asText());
     }
 
@@ -81,8 +79,8 @@ class AuditLogTest {
     void sharesOneRunId(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("run.jsonl");
         try (AuditLog audit = new AuditLog(file)) {
-            audit.planCreated(plan());
-            audit.taskStarted(plan().graph().get("t1"));
+            audit.planReviewed("计划", false, "别动数据库");
+            audit.taskStarted(read());
             audit.note("something", "x", 1);
         }
 
@@ -91,21 +89,20 @@ class AuditLogTest {
     }
 
     @Test
-    @DisplayName("计划记录要把整张图存下来：事后复盘得知道当时是怎么拆的")
-    void planRecordCarriesTheWholeGraph(@TempDir Path dir) throws IOException {
+    @DisplayName("plan 模式交上来的计划全文和用户的批复都要留：事后复盘时被批准的那份就是当时的约定")
+    void planReviewCarriesPlanAndVerdict(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("run.jsonl");
         try (AuditLog audit = new AuditLog(file)) {
-            audit.planCreated(plan());
+            audit.planReviewed("## 计划\n1. 改 Task.java", false, "先别动接口");
+            audit.planReviewed("## 计划\n1. 只改实现", true, "");
         }
 
-        JsonNode line = read(file).get(0);
-        assertEquals("给 Task 加重试", line.get("goal").asText());
-        JsonNode tasks = line.get("tasks");
-        assertEquals(2, tasks.size());
-        assertEquals("t1", tasks.get(0).get("id").asText());
-        assertEquals("FILE_WRITE", tasks.get(1).get("type").asText());
-        assertEquals(List.of("t1"),
-                List.of(tasks.get(1).get("dependsOn").get(0).asText()));
+        List<JsonNode> lines = read(file);
+        assertFalse(lines.get(0).get("approved").asBoolean());
+        assertEquals("先别动接口", lines.get(0).get("feedback").asText());
+        assertTrue(lines.get(1).get("approved").asBoolean());
+        assertTrue(lines.get(1).get("plan").asText().contains("只改实现"));
+        assertFalse(lines.get(1).has("feedback"), "没附话就不写这个字段");
     }
 
     @Test

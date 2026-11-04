@@ -8,10 +8,6 @@ import dev.wiles.myagent.llm.ChatMessage;
 import dev.wiles.myagent.llm.ToolCall;
 import dev.wiles.myagent.context.Interruption;
 import dev.wiles.myagent.plan.AgentRoles;
-import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.Task;
-import dev.wiles.myagent.plan.TaskGraph;
-import dev.wiles.myagent.plan.TaskType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -148,69 +144,6 @@ class ProtocolTest {
         assertEquals(-1, Protocol.num(node, "id", -1));
     }
 
-    // ── 计划相关报文 ────────────────────────────────────────────
-
-    private static dev.wiles.myagent.plan.Plan samplePlan() {
-        dev.wiles.myagent.plan.TaskGraph graph = dev.wiles.myagent.plan.TaskGraph.of(java.util.List.of(
-                new dev.wiles.myagent.plan.Task("t1", "读 a",
-                        dev.wiles.myagent.plan.TaskType.FILE_READ, java.util.List.of()),
-                new dev.wiles.myagent.plan.Task("t2", "读 b",
-                        dev.wiles.myagent.plan.TaskType.FILE_READ, java.util.List.of()),
-                new dev.wiles.myagent.plan.Task("t3", "改 c",
-                        dev.wiles.myagent.plan.TaskType.FILE_WRITE, java.util.List.of("t1", "t2"))));
-        return new dev.wiles.myagent.plan.Plan("把 a 和 b 合进 c", graph);
-    }
-
-    @Test
-    @DisplayName("计划报文带上整张图，还有算好的分层——别让前端再实现一遍图算法")
-    void encodesPlan() {
-        ObjectNode n = Protocol.encodePlan(samplePlan());
-
-        assertEquals("plan_created", n.get("t").asText());
-        assertEquals("把 a 和 b 合进 c", n.get("goal").asText());
-        assertEquals(3, n.get("tasks").size());
-        assertEquals("FILE_WRITE", n.get("tasks").get(2).get("type").asText());
-        assertEquals(2, n.get("tasks").get(2).get("dependsOn").size());
-
-        assertEquals(2, n.get("layers").size(), "菱形收口：两层");
-        assertEquals(2, n.get("layers").get(0).size());
-        assertEquals("t3", n.get("layers").get(1).get(0).asText());
-    }
-
-    @Test
-    @DisplayName("任务开始和结束的报文字段齐全")
-    void encodesTaskLifecycle() {
-        dev.wiles.myagent.plan.Task task = new dev.wiles.myagent.plan.Task(
-                "t1", "读 a", dev.wiles.myagent.plan.TaskType.FILE_READ, java.util.List.of());
-
-        ObjectNode started = Protocol.encodeTaskStarted(task);
-        assertEquals("plan_task_started", started.get("t").asText());
-        assertEquals("t1", started.get("taskId").asText());
-        assertEquals("FILE_READ", started.get("taskType").asText());
-
-        task.start();
-        task.succeed("Java 17");
-        ObjectNode finished = Protocol.encodeTaskFinished(task);
-        assertEquals("SUCCEEDED", finished.get("status").asText());
-        assertEquals("Java 17", finished.get("result").asText());
-        assertTrue(finished.get("durationMs").asLong() >= 0);
-        assertTrue(finished.get("error").isNull(), "没出错时 error 要是 null，不是空串");
-    }
-
-    @Test
-    @DisplayName("动态扩图的报文标明是谁拆出来的，前端才能就地插进去")
-    void encodesAddedTasks() {
-        dev.wiles.myagent.plan.Task parent = new dev.wiles.myagent.plan.Task(
-                "t1", "探路", dev.wiles.myagent.plan.TaskType.PLANNING, java.util.List.of());
-        ObjectNode n = Protocol.encodeAddedTasks("t1", java.util.List.of(
-                parent.subTask("t1.1", "改 A",
-                        dev.wiles.myagent.plan.TaskType.FILE_WRITE, java.util.List.of())));
-
-        assertEquals("plan_tasks_added", n.get("t").asText());
-        assertEquals("t1", n.get("parentId").asText());
-        assertEquals("t1.1", n.get("tasks").get(0).get("id").asText());
-    }
-
     @Test
     @DisplayName("布尔字段漏传时退回默认值，不能让前端一个笔误把服务端搞崩")
     void readsBooleansDefensively() {
@@ -223,79 +156,16 @@ class ProtocolTest {
     // ── 新增字段与新事件 ────────────────────────────────────────
 
     @Test
-    @DisplayName("任务带上 acceptance——界面要让用户看到「做到什么算完」")
-    void taskCarriesAcceptance() {
-        Task t1 = new Task("t1", "读 pom.xml", TaskType.FILE_READ, List.of(), "说清 Java 版本");
-        Plan plan = new Plan("目标", TaskGraph.of(List.of(t1)));
-
-        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
-
-        assertEquals("说清 Java 版本", task.get("acceptance").asText());
-    }
-
-    @Test
-    @DisplayName("没写 acceptance 时字段是 null，不是漏掉——界面照约定自己判空")
-    void acceptanceIsNullNotMissing() {
-        Task t1 = new Task("t1", "干活", TaskType.FILE_READ, List.of());
-        Plan plan = new Plan("目标", TaskGraph.of(List.of(t1)));
-
-        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
-
-        assertTrue(task.has("acceptance"));
-        assertTrue(task.get("acceptance").isNull());
-    }
-
-    @Test
-    @DisplayName("plan_revised：说清哪一步倒了、补出了哪几步")
-    void encodesReplanned() {
-        Task failed = new Task("t2", "改文件", TaskType.FILE_WRITE, List.of());
-        Task recovery = new Task("r1", "换条路", TaskType.FILE_WRITE, List.of(), "改完了");
-
-        JsonNode n = Protocol.encodeReplanned(failed, List.of(recovery));
-
-        assertEquals("plan_revised", n.get("t").asText());
-        assertEquals("t2", n.get("failedTaskId").asText());
-        assertEquals(1, n.get("tasks").size());
-        assertEquals("r1", n.get("tasks").get(0).get("id").asText());
-        assertEquals("改完了", n.get("tasks").get(0).get("acceptance").asText());
-    }
-
-    @Test
-    @DisplayName("新能力要在 features 里宣告，界面才知道会有这些消息")
+    @DisplayName("新能力要在 features 里宣告；DAG 规划那几样撤了就别再宣告，界面会摆出点了没反应的入口")
     void announcesFeatures() {
-        assertTrue(Protocol.FEATURES.contains("replan"), Protocol.FEATURES.toString());
-        assertTrue(Protocol.FEATURES.contains("resume"), Protocol.FEATURES.toString());
-        assertFalse(Protocol.FEATURES.contains("auto_mode"), "自动改走规划已经撤了，再宣告界面会等一条永远不来的 mode_switched");
+        assertTrue(Protocol.FEATURES.contains("plan_mode"), Protocol.FEATURES.toString());
+        assertTrue(Protocol.FEATURES.contains("skills"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("roles"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("events_resume"), Protocol.FEATURES.toString());
         assertTrue(Protocol.FEATURES.contains("images"), "不宣告的话，新界面会以为后端收不了图、一律拦下");
-        assertTrue(Protocol.FEATURES.contains("plan"), "别把老能力弄丢了");
-        assertFalse(Protocol.FEATURES.contains("team"), "流水线已经撤了，再宣告界面会画出一个点了没反应的模式");
-    }
-
-    @Test
-    @DisplayName("每个任务都带上派了谁——type 也留着，老界面照样看得懂")
-    void encodesRoleAlongsideType() {
-        Plan plan = new Plan("挑毛病", TaskGraph.of(List.of(
-                new Task("t1", "审一遍", AgentRoles.REVIEWER, List.of(), "给出清单"))));
-
-        JsonNode task = Protocol.encodePlan(plan).get("tasks").get(0);
-
-        assertEquals("reviewer", task.get("role").asText());
-        assertEquals("审查", task.get("roleTitle").asText());
-        assertEquals("FILE_READ", task.get("type").asText(),
-                "type 不能因为有了 role 就消失——删字段是破坏性改动，得升协议版本");
-    }
-
-    @Test
-    @DisplayName("任务开始那条也带角色：界面画「正在做第几步」时就得知道是谁在做")
-    void taskStartedCarriesRole() {
-        ObjectNode started = Protocol.encodeTaskStarted(
-                new Task("t1", "跑测试", AgentRoles.VERIFIER, List.of(), "全绿"));
-
-        assertEquals("verifier", started.get("role").asText());
-        assertEquals("验证", started.get("roleTitle").asText());
-        assertEquals("VERIFICATION", started.get("taskType").asText());
+        for (String gone : List.of("plan", "replan", "resume", "resume_plan", "auto_mode", "team")) {
+            assertFalse(Protocol.FEATURES.contains(gone), gone + " 已经撤了");
+        }
     }
 
     @Test
@@ -351,6 +221,20 @@ class ProtocolTest {
         assertFalse(out.get(3).path("ok").asBoolean(), "错误: 开头的按失败算");
         assertEquals("继续", out.get(5).path("text").asText(), "断点说明是给模型的，界面只要原话");
         assertFalse(out.get(6).has("ok"), "没等到结果的调用不带 ok");
+    }
+
+    @Test
+    @DisplayName("给模型看的说明块（plan 模式规矩、hook 上下文、/技能 正文）剥掉，断点说明在前也剥得干净")
+    void transcriptStripsSystemReminders() {
+        String reminders = dev.wiles.myagent.context.SystemReminder.prepend("plan 模式规矩",
+                dev.wiles.myagent.context.SystemReminder.prepend("技能正文", "/deploy 生产"));
+        var out = new com.fasterxml.jackson.databind.ObjectMapper().createArrayNode();
+        Protocol.encodeTranscript(out, List.of(
+                ChatMessage.user(reminders),
+                ChatMessage.user("<turn_interrupted>\n断了\n</turn_interrupted>\n\n" + reminders)));
+
+        assertEquals("/deploy 生产", out.get(0).path("text").asText());
+        assertEquals("/deploy 生产", out.get(1).path("text").asText());
     }
 
     @Test

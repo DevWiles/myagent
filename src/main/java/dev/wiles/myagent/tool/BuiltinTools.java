@@ -35,6 +35,13 @@ public final class BuiltinTools {
     public static final java.util.Set<String> WRITING_TOOLS =
             java.util.Set.of("write_file", "edit_file", "create_project");
 
+    /**
+     * 延迟加载的内置工具：用得少、说明又长的那几个，平时只露名字（见 {@code ToolSearchTool}）。
+     * 读文件、搜索、bash 这些几乎每轮都用，延迟它们只会多一次往返。
+     */
+    public static final java.util.Set<String> DEFERRED_TOOLS =
+            java.util.Set.of("create_project", "web_search", "web_fetch");
+
     private BuiltinTools() {
     }
 

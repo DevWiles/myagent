@@ -3,8 +3,6 @@ package dev.wiles.myagent.audit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import dev.wiles.myagent.plan.Plan;
-import dev.wiles.myagent.plan.PlanResult;
 import dev.wiles.myagent.plan.Task;
 import dev.wiles.myagent.tool.safety.ApprovalPolicy;
 import dev.wiles.myagent.tool.safety.ApprovalRequest;
@@ -88,24 +86,16 @@ public final class AuditLog implements AutoCloseable {
         return file;
     }
 
-    /** 规划产出了一张图。整张图都存下来——事后复盘得知道当时是怎么拆的。 */
-    public void planCreated(Plan plan) {
-        ObjectNode node = event("plan_created");
-        node.put("goal", plan.goal());
-        ArrayNode tasks = node.putArray("tasks");
-        for (Task task : plan.graph().tasks()) {
-            ObjectNode item = tasks.addObject();
-            item.put("id", task.id());
-            item.put("type", task.type().name());
-            // 派了谁要记：角色决定了这一步手上有哪些工具，
-            // 事后查「它怎么会改到这个文件」时，第一个要看的就是这里
-            item.put("role", task.role().id());
-            item.put("description", clip(task.description()));
-            ArrayNode deps = item.putArray("dependsOn");
-            task.dependencies().forEach(deps::add);
-            if (task.parentId() != null) {
-                item.put("parentId", task.parentId());
-            }
+    /**
+     * plan 模式下模型交上来的计划，以及用户批没批。计划全文要留——
+     * 事后复盘「它为什么这么改」时，被批准的那份计划就是当时的约定。
+     */
+    public void planReviewed(String plan, boolean approved, String feedback) {
+        ObjectNode node = event("plan_reviewed");
+        node.put("approved", approved);
+        node.put("plan", clip(plan));
+        if (feedback != null && !feedback.isBlank()) {
+            node.put("feedback", clip(feedback));
         }
         write(node);
     }
@@ -130,16 +120,6 @@ public final class AuditLog implements AutoCloseable {
         if (task.error() != null) {
             node.put("error", clip(task.error()));
         }
-        write(node);
-    }
-
-    public void planFinished(Plan plan, PlanResult result) {
-        ObjectNode node = event("plan_finished");
-        node.put("status", plan.status().name());
-        node.put("succeeded", result.succeeded());
-        node.put("failed", result.failed());
-        node.put("skipped", result.skipped());
-        node.put("durationMs", plan.durationMillis());
         write(node);
     }
 

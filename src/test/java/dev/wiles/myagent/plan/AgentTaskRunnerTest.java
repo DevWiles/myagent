@@ -448,50 +448,6 @@ class AgentTaskRunnerTest {
     // ── PLANNING 任务拆子任务 ───────────────────────────────────
 
     @Test
-    @DisplayName("配上规划器，PLANNING 任务先调研再拆出子任务")
-    void planningTaskSpawnsSubTasks() {
-        FakeLlm llm = new FakeLlm();
-        llm.reply = messages -> isSubPlanRequest(messages)
-                ? """
-                {"tasks": [
-                  {"id": "t1.1", "type": "FILE_WRITE", "description": "改 A", "acceptance": "改 A——做完了", "dependsOn": []},
-                  {"id": "t1.2", "type": "VERIFICATION", "description": "跑测试", "acceptance": "跑测试——做完了", "dependsOn": ["t1.1"]}
-                ]}
-                """
-                : "看下来要改两处";
-
-        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
-                .withPlanner(new Planner(llm))
-                .run(task("t1", TaskType.PLANNING), List.of());
-
-        assertTrue(outcome.ok());
-        assertEquals("看下来要改两处", outcome.output(), "产出仍是它调研出来的结论");
-        assertEquals(2, outcome.subTasks().size());
-        assertEquals(1, outcome.subTasks().get(0).depth());
-        assertEquals("t1", outcome.subTasks().get(0).parentId());
-    }
-
-    @Test
-    @DisplayName("拆不出子任务就是这个任务失败——它存在的意义就是产出子任务")
-    void planningTaskFailsWhenItCannotSplit() {
-        FakeLlm llm = new FakeLlm();
-        llm.reply = messages -> isSubPlanRequest(messages) ? "我觉得不用拆" : "看完了";
-
-        TaskOutcome outcome = new AgentTaskRunner(llm, fullSet(), ROOT)
-                .withPlanner(new Planner(llm, 0))
-                .run(task("t1", TaskType.PLANNING), List.of());
-
-        assertFalse(outcome.ok());
-        assertTrue(outcome.output().contains("拆子任务失败"), outcome.output());
-        assertTrue(outcome.output().contains("看完了"), "调研到的东西不该丢");
-    }
-
-    /** 子规划那次调用的系统提示词认得出来，假模型靠它区分是哪一幕。 */
-    private static boolean isSubPlanRequest(List<ChatMessage> messages) {
-        return messages.get(0).content().contains("拆成几个具体可执行的步骤");
-    }
-
-    @Test
     @DisplayName("没配规划器时，PLANNING 任务退化成一次普通调研，不能报错")
     void planningTaskRunsWithoutSubTasksForNow() {
         FakeLlm llm = new FakeLlm();

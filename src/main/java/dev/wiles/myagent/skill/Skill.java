@@ -169,6 +169,11 @@ public record Skill(String id, String title, String description, String body,
                 : merged.substring(0, MAX_DESCRIPTION) + "…";
     }
 
+    /** 用户能不能用 {@code /名字} 点它。写了 {@code user-invocable: false} 的只给模型用，斜杠菜单里不列。 */
+    public boolean userInvocable() {
+        return !"false".equalsIgnoreCase(frontMatter().getOrDefault("user-invocable", ""));
+    }
+
     /** 模型能不能自己选它。写了 {@code disable-model-invocation: true} 的只能由人点名。 */
     public boolean modelInvocable() {
         return !"true".equalsIgnoreCase(frontMatter().getOrDefault("disable-model-invocation", ""));

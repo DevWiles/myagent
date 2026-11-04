@@ -1,6 +1,8 @@
 package dev.wiles.myagent.server;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.wiles.myagent.agent.PlanModeTools.Answer;
+import dev.wiles.myagent.agent.PlanModeTools.Ask;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -24,30 +26,55 @@ class PlanConfirmationTest {
     void rejectsWhenNobodyIsWatching() {
         PlanConfirmation confirm = new PlanConfirmation(published::add, () -> false);
 
-        assertFalse(confirm.confirm());
+        assertFalse(confirm.review(Ask.EXIT, "计划").approved());
         assertTrue(published.isEmpty(), "没人能答就别发问了");
     }
 
     @Test
-    @DisplayName("界面回同意，执行线程就放行")
+    @DisplayName("交计划：请求里带着 kind=exit 和计划全文；界面回同意，执行线程就放行")
     void approves() throws InterruptedException {
         PlanConfirmation confirm = withClients();
-        boolean[] result = new boolean[1];
+        Answer[] result = new Answer[1];
         CountDownLatch done = new CountDownLatch(1);
 
         Thread worker = new Thread(() -> {
-            result[0] = confirm.confirm();
+            result[0] = confirm.review(Ask.EXIT, "## 计划\n改 a.py");
             done.countDown();
         });
         worker.start();
 
         waitUntilPending(confirm);
-        assertEquals("plan_confirm_request", published.get(0).get("t").asText());
-        assertTrue(confirm.reply(published.get(0).get("id").asInt(), true));
+        ObjectNode request = published.get(0);
+        assertEquals("plan_confirm_request", request.get("t").asText());
+        assertEquals("exit", request.get("kind").asText());
+        assertEquals("## 计划\n改 a.py", request.get("plan").asText());
+        assertTrue(confirm.reply(request.get("id").asInt(), true, ""));
 
-        assertTrue(done.await(2, TimeUnit.SECONDS), "confirm() 没醒过来");
-        assertTrue(result[0]);
+        assertTrue(done.await(2, TimeUnit.SECONDS), "review() 没醒过来");
+        assertTrue(result[0].approved());
         assertFalse(confirm.isPending());
+    }
+
+    @Test
+    @DisplayName("提议进 plan 模式：kind=enter、不带计划；否决时附的话原样带回去")
+    void rejectionCarriesFeedback() throws InterruptedException {
+        PlanConfirmation confirm = withClients();
+        Answer[] result = new Answer[1];
+        CountDownLatch done = new CountDownLatch(1);
+
+        new Thread(() -> {
+            result[0] = confirm.review(Ask.ENTER, "");
+            done.countDown();
+        }).start();
+        waitUntilPending(confirm);
+        ObjectNode request = published.get(0);
+        assertEquals("enter", request.get("kind").asText());
+        assertFalse(request.has("plan"));
+        assertTrue(confirm.reply(request.get("id").asInt(), false, "  直接改就行  "));
+
+        assertTrue(done.await(2, TimeUnit.SECONDS));
+        assertFalse(result[0].approved());
+        assertEquals("直接改就行", result[0].feedback());
     }
 
     @Test
@@ -55,21 +82,21 @@ class PlanConfirmationTest {
     void ignoresStaleReply() throws InterruptedException {
         PlanConfirmation confirm = withClients();
         CountDownLatch done = new CountDownLatch(1);
-        boolean[] result = {true};
+        Answer[] result = {new Answer(true, "")};
 
         Thread worker = new Thread(() -> {
-            result[0] = confirm.confirm();
+            result[0] = confirm.review(Ask.EXIT, "计划");
             done.countDown();
         });
         worker.start();
         waitUntilPending(confirm);
 
-        assertFalse(confirm.reply(999, true), "过期回答不该被接受");
+        assertFalse(confirm.reply(999, true, ""), "过期回答不该被接受");
         assertFalse(done.await(200, TimeUnit.MILLISECONDS), "它应该还在等真正的回答");
 
         confirm.cancelPending();
         assertTrue(done.await(2, TimeUnit.SECONDS));
-        assertFalse(result[0]);
+        assertFalse(result[0].approved());
     }
 
     @Test
@@ -77,10 +104,10 @@ class PlanConfirmationTest {
     void cancelReleasesTheWaiter() throws InterruptedException {
         PlanConfirmation confirm = withClients();
         CountDownLatch done = new CountDownLatch(1);
-        boolean[] result = {true};
+        Answer[] result = {new Answer(true, "")};
 
         new Thread(() -> {
-            result[0] = confirm.confirm();
+            result[0] = confirm.review(Ask.EXIT, "计划");
             done.countDown();
         }).start();
         waitUntilPending(confirm);
@@ -88,7 +115,7 @@ class PlanConfirmationTest {
         confirm.cancelPending();
 
         assertTrue(done.await(2, TimeUnit.SECONDS));
-        assertFalse(result[0]);
+        assertFalse(result[0].approved());
     }
 
     @Test

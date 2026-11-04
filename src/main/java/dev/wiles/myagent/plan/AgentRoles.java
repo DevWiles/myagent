@@ -196,7 +196,7 @@ public final class AgentRoles {
      * 按 id 取角色，没有就抛。
      *
      * <p>错误信息里要带上<b>全部可用角色</b>：这条消息的第一读者是模型——
-     * 解析失败会被回灌回去让它改（见 {@code Planner#attempt}），
+     * 解析失败会被回灌回去让它改（DAG 规划器还在时的做法，已下线），
      * 只说「没有 xxx 这个角色」它只能再猜一次。
      */
     public static AgentRole require(String id) {

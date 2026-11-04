@@ -25,17 +25,8 @@ public enum PromptMode {
     /** 主循环：用户直接对话的那个。 */
     AGENT("modes/agent.md", true, List.of("## 身份", "## 语言", "## 工作区")),
 
-    /** 计划里的一步：只干这一步，不越界。 */
-    TASK("modes/task.md", true, List.of("## 身份", "## 语言", "## 工作区")),
-
-    /** 规划器：把目标拆成任务依赖图。不动手。 */
-    PLANNER("modes/planner.md", false, List.of("只输出一个 JSON 对象")),
-
-    /** 子规划：PLANNING 任务跑完后再拆一层。 */
-    PLANNER_SUB("modes/planner-sub.md", false, List.of("只输出一个 JSON 对象")),
-
-    /** 重规划：某一步失败之后补一条别的路。 */
-    PLANNER_REPLAN("modes/planner-replan.md", false, List.of("只输出一个 JSON 对象"));
+    /** 单独派出去的一步（收尾审查）：只干这一步，不越界。 */
+    TASK("modes/task.md", true, List.of("## 身份", "## 语言", "## 工作区"));
 
     private final String resourcePath;
     private final boolean includesBase;

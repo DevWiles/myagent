@@ -10,8 +10,11 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * 工具注册表：一边向模型提供菜单，一边负责把模型的点单派发给对应工具。
@@ -28,6 +31,11 @@ public final class ToolRegistry {
     private final ObjectMapper mapper = new ObjectMapper();
     /** 用 LinkedHashMap 保证发给模型的工具顺序稳定，便于调试和缓存命中。 */
     private final Map<String, Tool> tools = new LinkedHashMap<>();
+    /**
+     * 延迟加载的工具：平时菜单上只露名字（列在 {@code tool_search} 的说明里），
+     * 模型用 {@code tool_search} 拉到完整说明之后才进菜单。见 {@link ToolSearchTool}。
+     */
+    private final Set<String> deferred = new LinkedHashSet<>();
 
     public ToolRegistry register(Tool tool) {
         Tool old = tools.put(tool.name(), tool);
@@ -46,6 +54,40 @@ public final class ToolRegistry {
     public ToolRegistry registerAll(Collection<Tool> list) {
         list.forEach(this::register);
         return this;
+    }
+
+    /**
+     * 把这些工具改成延迟加载。照 Claude Code 的 deferred tools：MCP 工具和不常用的内置工具
+     * 每一轮都整份发 schema，是每一步都要付的常驻税，而大多数对话一次都用不上它们。
+     * 没注册的名字忽略。
+     */
+    public ToolRegistry defer(Collection<String> names) {
+        for (String name : names) {
+            if (tools.containsKey(name)) {
+                deferred.add(name);
+            }
+        }
+        return this;
+    }
+
+    public boolean isDeferred(String name) {
+        return deferred.contains(name);
+    }
+
+    /** 延迟加载的那些，按注册顺序。 */
+    public List<Tool> deferredTools() {
+        List<Tool> out = new ArrayList<>();
+        for (String name : deferred) {
+            Tool tool = tools.get(name);
+            if (tool != null) {
+                out.add(tool);
+            }
+        }
+        return out;
+    }
+
+    public Tool get(String name) {
+        return tools.get(name);
     }
 
     public boolean isEmpty() {
@@ -67,11 +109,18 @@ public final class ToolRegistry {
         return tool != null && tool.parallelSafe();
     }
 
-    /** 发给模型的完整菜单。 */
+    /** 发给模型的完整菜单，延迟加载的也在内。 */
     public List<ToolSpec> specs() {
+        return specs(name -> true);
+    }
+
+    /** 只发 {@code visible} 放行的那些。哪些可见由 agent 定（plan 模式、延迟加载的拉没拉过）。 */
+    public List<ToolSpec> specs(Predicate<String> visible) {
         List<ToolSpec> specs = new ArrayList<>(tools.size());
         for (Tool tool : tools.values()) {
-            specs.add(tool.toSpec());
+            if (visible.test(tool.name())) {
+                specs.add(tool.toSpec());
+            }
         }
         return specs;
     }

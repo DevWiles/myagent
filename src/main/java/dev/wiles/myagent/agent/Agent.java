@@ -15,6 +15,7 @@ import dev.wiles.myagent.context.PinnedFacts;
 import dev.wiles.myagent.context.Precompute;
 import dev.wiles.myagent.context.SummarySegment;
 import dev.wiles.myagent.tool.ToolRegistry;
+import dev.wiles.myagent.tool.ToolSearchTool;
 import dev.wiles.myagent.tool.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -142,6 +143,8 @@ public final class Agent {
     private int coversUpTo;
     /** 哪些工具算「改了文件」，用来算钉住块。由外面传——context 包不该认识工具。 */
     private Set<String> writingTools = Set.of();
+    /** 眼下哪些工具能用，见 {@link #withToolGate}。 */
+    private java.util.function.Predicate<String> toolGate = name -> true;
     /** 后台预压缩。默认是关掉的那一版，行为退化成「到硬线才同步压」。 */
     private Precompute precompute;
     /** 跑循环之外送进来的话（子 agent 的结果、追加的指示）。null 表示没有这条通道。 */
@@ -277,6 +280,42 @@ public final class Agent {
     /** 系统提示词。子 agent 原样沿用主 agent 的这一份，前缀缓存才命中得上。 */
     public String systemPrompt() {
         return systemPrompt;
+    }
+
+    /**
+     * 眼下哪些工具能用。每一步现查：plan 模式由用户和模型在对话中途切换，
+     * 菜单得跟着变（见 {@link PlanMode#allows}）。被挡住的工具既不上菜单，
+     * 模型硬点也不执行——它可能照着之前某一步的菜单点单。
+     */
+    public Agent withToolGate(java.util.function.Predicate<String> gate) {
+        this.toolGate = gate == null ? name -> true : gate;
+        return this;
+    }
+
+    /**
+     * 这一步的菜单：闸门放行的，再去掉还没拉取过的延迟加载工具（{@link ToolSearchTool}）。
+     */
+    private List<ToolSpec> menu() {
+        Set<String> loaded = ToolSearchTool.loadedIn(history);
+        return tools.specs(name -> toolGate.test(name) && (!tools.isDeferred(name) || loaded.contains(name)));
+    }
+
+    /** 执行前再过一遍菜单的两道条件。理由见 {@link #withToolGate}。 */
+    private ToolResult execute(ToolCall call) {
+        String name = call.name();
+        if (tools.get(name) == null) {
+            return tools.execute(call);         // 不存在的名字由注册表回那条带全部工具名的错误
+        }
+        if (!toolGate.test(name)) {
+            return ToolResult.error(name + " 眼下不能用"
+                    + (PlanMode.READ_ONLY_TOOLS.contains(name) ? ""
+                            : "：现在是 plan 模式，只许调研。要动手先把计划交给 " + PlanMode.EXIT_TOOL + "，用户批准后再做"));
+        }
+        if (tools.isDeferred(name) && !ToolSearchTool.loadedIn(history).contains(name)) {
+            return ToolResult.error(name + " 是延迟加载的工具，还没拉取过它的参数说明。先调 "
+                    + ToolSearchTool.NAME + "(query=\"select:" + name + "\")，再调它");
+        }
+        return tools.execute(call);
     }
 
     /** 告诉它哪些工具算「改了文件」，钉住块要用。 */
@@ -496,7 +535,7 @@ public final class Agent {
                 }
                 emit(new AgentEvent.Thinking(step));
 
-                List<ToolSpec> specs = tools.specs();
+                List<ToolSpec> specs = menu();
                 // 窗口在请求之前现场组装。此刻记录是自洽的（上一轮的工具结果都已回填），
                 // 所以尾巴从哪一条 user 消息切都不会留下无主的 tool 消息
                 ContextManager.Result prepared = prepareWindow(specs);
@@ -657,7 +696,7 @@ public final class Agent {
         java.util.concurrent.CompletableFuture<ToolResult> result = new java.util.concurrent.CompletableFuture<>();
         Thread worker = new Thread(() -> {
             try {
-                result.complete(tools.execute(call));   // 它保证不抛异常，兜的是 Error
+                result.complete(execute(call));   // 它保证不抛异常，兜的是 Error
             } catch (Throwable t) {
                 result.completeExceptionally(t);
             }
@@ -737,7 +776,7 @@ public final class Agent {
                 ids.add(id);
                 futures.add(pool.submit(() -> {
                     emit(new AgentEvent.ToolStarted(id, call.name(), call.argumentsJson()));
-                    ToolResult result = tools.execute(call);
+                    ToolResult result = execute(call);
                     if (settled.add(id)) {
                         emit(new AgentEvent.ToolFinished(
                                 id, call.name(), result.ok(), result.content(), result.diff()));
@@ -813,7 +852,7 @@ public final class Agent {
 
     /** 当前窗口占用（含每轮都要重发的工具菜单）。拿到过实测值就按实测校准。 */
     public int estimatedTokens() {
-        return calibrated(buildWindow(tools.specs()).tokensAfter());
+        return calibrated(buildWindow(menu()).tokensAfter());
     }
 
     /** 上下文窗口上限。 */
@@ -863,7 +902,7 @@ public final class Agent {
      * @return 压了返回结果，没压返回 null
      */
     public ContextManager.Result compactNow() {
-        List<ToolSpec> specs = tools.specs();
+        List<ToolSpec> specs = menu();
         ContextManager.Result before = buildWindow(specs);
         if (precompute.ready()) {
             ContextManager.Compaction ready = precompute.take();

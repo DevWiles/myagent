@@ -117,6 +117,11 @@ public final class SkillLibrary {
         return byId.values().stream().filter(Skill::modelInvocable).toList();
     }
 
+    /** 用户能用 {@code /名字} 点的那些，斜杠菜单里列的就是它们。 */
+    public List<Skill> userInvocable() {
+        return byId.values().stream().filter(Skill::userInvocable).toList();
+    }
+
     public Optional<Skill> find(String id) {
         return id == null ? Optional.empty() : Optional.ofNullable(byId.get(id.strip()));
     }

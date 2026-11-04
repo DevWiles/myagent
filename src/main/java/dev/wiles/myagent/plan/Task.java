@@ -59,7 +59,7 @@ public class Task {
      * 这一步会新建或修改的文件（相对工作区）。规划器填的，可以为空。
      *
      * <p>它是并行的钥匙：两个会动手的任务，声明的文件集合不相交就可以同时进场
-     * （见 {@code PlanExecutor.launchReady}）。没声明的仍按老规矩独占——
+     * （DAG 调度器还在时用来排并发，已下线）。没声明的仍按老规矩独占——
      * 不知道它要碰什么，只能当它什么都可能碰。
      */
     private final List<String> files;
@@ -69,7 +69,10 @@ public class Task {
     /** 谁把我拆出来的；根任务没有爹，是 null。 */
     private final String parentId;
 
-    /** 0 = 规划直接产出，1 = PLANNING 任务再拆出来的。上限见 {@link PlanLimits#MAX_DEPTH}。 */
+    /** 子任务最多拆几层。 */
+    public static final int MAX_DEPTH = 1;
+
+    /** 0 = 规划直接产出，1 = PLANNING 任务再拆出来的。上限见 {@link #MAX_DEPTH}。 */
     private final int depth;
 
     private TaskStatus status = TaskStatus.PENDING;
@@ -126,9 +129,9 @@ public class Task {
         if (role == null) {
             throw new IllegalArgumentException("任务 " + id + " 缺少角色");
         }
-        if (depth < 0 || depth > PlanLimits.MAX_DEPTH) {
+        if (depth < 0 || depth > MAX_DEPTH) {
             throw new IllegalArgumentException(
-                    "任务 " + id + " 的深度 " + depth + " 越界，只允许 0.." + PlanLimits.MAX_DEPTH);
+                    "任务 " + id + " 的深度 " + depth + " 越界，只允许 0.." + MAX_DEPTH);
         }
         this.id = id;
         this.description = description;
@@ -209,9 +212,9 @@ public class Task {
         return depth;
     }
 
-    /** 还能不能再往下拆一层。到了 {@link PlanLimits#MAX_DEPTH} 就不行了。 */
+    /** 还能不能再往下拆一层。到了 {@link #MAX_DEPTH} 就不行了。 */
     public boolean canSpawnSubtasks() {
-        return depth < PlanLimits.MAX_DEPTH;
+        return depth < MAX_DEPTH;
     }
 
     /**
@@ -241,7 +244,7 @@ public class Task {
                         String acceptance, List<String> files) {
         if (!canSpawnSubtasks()) {
             throw new IllegalStateException("任务 " + this.id + " 已经在第 " + depth
-                    + " 层，不能再拆子任务（最深 " + PlanLimits.MAX_DEPTH + " 层）");
+                    + " 层，不能再拆子任务（最深 " + MAX_DEPTH + " 层）");
         }
         return new Task(id, description, role, dependencies, acceptance, files, this.id, depth + 1);
     }

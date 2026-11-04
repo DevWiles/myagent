@@ -134,59 +134,9 @@ class PromptAssemblerTest {
     }
 
     @Test
-    @DisplayName("任务引用 {{t1}} 不是装配器的占位符——两种语法证明性地不相交")
-    void taskReferencesAreNotPlaceholders() {
-        // 规划提示词正文里本来就有 {{t1}}，那是模型要**输出**的东西。
-        // 装配器的占位符带 @，而 TaskRefs 认的 id 是 [A-Za-z0-9_.-]，不含 @
-        String planner = assembler().assemble(PromptMode.PLANNER, PromptContext.builder()
-                .variable("minTasks", "3")
-                .variable("maxTasks", "12")
-                .variable("roles", "- `explorer`（调研）查清某件事")
-                .build());
-
-        assertTrue(planner.contains("{{t1}}"), "任务引用要原样留给模型看");
-        assertTrue(planner.contains("{{任务id}}"));
-        assertTrue(planner.contains("3 到 12 个任务"), "常量该填的填了");
-        assertFalse(planner.contains("{{@"), "装配器的占位符一个都不该剩");
-    }
-
-    @Test
-    @DisplayName("规划器不拼 base：它不动手，「改完用 bash 跑测试」对它是噪音")
-    void plannerDoesNotCarryAgentBase() {
-        String planner = assembler().assemble(PromptMode.PLANNER, PromptContext.builder()
-                .variable("minTasks", "3").variable("maxTasks", "12")
-                .variable("roles", "- `explorer`（调研）查清某件事").build());
-
-        assertFalse(planner.contains("## 工作方式"),
-                "带上主循环的工作方式会勾着规划器自己动手");
-        assertFalse(planner.contains("## 身份"));
-        assertTrue(planner.contains("只输出一个 JSON 对象"));
-    }
-
-    @Test
-    @DisplayName("每个模式各有各的命门，不是拿同一张清单卡所有人")
+    @DisplayName("每个模式各有各的命门：主循环少了语言那段会改说英文")
     void requiredMarkersArePerMode() {
-        assertTrue(PromptMode.AGENT.requiredMarkers().contains("## 语言"),
-                "主循环少了语言那段会改说英文");
-        assertTrue(PromptMode.PLANNER.requiredMarkers().contains("只输出一个 JSON 对象"),
-                "规划器少了输出格式那段会吐一段散文，而下游按 JSON 解析");
-        assertFalse(PromptMode.PLANNER.requiredMarkers().contains("## 语言"),
-                "拿主循环的清单去卡规划器，等于逼它写上用不着的小标题");
-    }
-
-    @Test
-    @DisplayName("三份规划提示词都带着输出格式那句——少了它下游解析必炸")
-    void everyPlannerModeDeclaresItsOutputFormat() {
-        record Case(PromptMode mode, String var, String value) { }
-        for (Case c : List.of(
-                new Case(PromptMode.PLANNER_SUB, "maxSubTasks", "6"),
-                new Case(PromptMode.PLANNER_REPLAN, "maxReplanTasks", "4"))) {
-            String p = assembler().assemble(c.mode(), PromptContext.builder()
-                    .variable(c.var(), c.value())
-                    .variable("roles", "- `coder`（编码）改文件")
-                    .build());
-            assertTrue(p.contains("只输出一个 JSON 对象"), c.mode() + " 缺了输出格式");
-            assertTrue(p.contains(c.value()), c.mode() + " 的上限没填进去");
-        }
+        assertTrue(PromptMode.AGENT.requiredMarkers().contains("## 语言"));
+        assertTrue(PromptMode.TASK.requiredMarkers().contains("## 语言"));
     }
 }

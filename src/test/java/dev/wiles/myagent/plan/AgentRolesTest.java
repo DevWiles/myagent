@@ -197,8 +197,6 @@ class AgentRolesTest {
     void coderCanRunTestsButHasNoShell() {
         assertTrue(AgentRoles.CODER.matches("run_tests"));
         assertFalse(AgentRoles.CODER.matches("bash"));
-        Task coder = new Task("c", "改", AgentRoles.CODER, List.of(), null, List.of("src/a.py"));
-        assertTrue(PlanExecutor.scoped(coder), "有了 run_tests 仍然算划了范围的写任务");
     }
 
     @Test

@@ -3,7 +3,7 @@ package dev.wiles.myagent.plan;
 import java.util.List;
 
 /**
- * 真正干活的那一端。{@link PlanExecutor} 只管「谁什么时候跑」，怎么跑是这里的事。
+ * 真正干活的那一端：交给它一步，它跑完交回结果。眼下的调用方是收尾审查（{@code ReviewLoop}）。
  *
  * <p>抽成接口是为了把<b>调度</b>和<b>执行</b>切开：调度逻辑（拓扑顺序、失败扩散、
  * 动态扩图、取消）全部可以用假执行体测干净，一次模型调用都不用发。

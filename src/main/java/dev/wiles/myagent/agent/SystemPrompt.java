@@ -28,7 +28,7 @@ public final class SystemPrompt {
     /**
      * 不带记忆功能的版本——<b>一个字都不提记忆</b>。
      *
-     * <p>走这条路的是计划任务（{@code TaskPrompt}），而角色（{@code AgentRole}）的白名单里
+     * <p>走这条路的是单独派出去的一步（{@code TaskPrompt}），而角色（{@code AgentRole}）的白名单里
      * 没有 {@code recall}：工具不在菜单上，还要交代「你没有记忆」纯属噪音，
      * 甚至会勾着模型去找一个它根本调不到的工具。
      *
@@ -65,17 +65,10 @@ public final class SystemPrompt {
      * 能力被裁剪时要交代一句，别留给模型猜。
      */
     public static String forWorkspace(Path workspaceRoot, MemoryIndex memory, boolean readOnly) {
-        return forWorkspace(workspaceRoot, memory, readOnly, false);
-    }
-
-    /** 再带上「主动委派」：{@code MYAGENT_SUBAGENTS=proactive} 时，能并行就派子 agent。 */
-    public static String forWorkspace(Path workspaceRoot, MemoryIndex memory, boolean readOnly,
-                                      boolean proactiveSubagents) {
         return ASSEMBLER.assemble(PromptMode.AGENT, PromptContext.builder()
                 .variable("workspace", String.valueOf(workspaceRoot))
                 .memoryIndex(memory == null ? null : memory.render())
                 .readOnly(readOnly)
-                .proactiveSubagents(proactiveSubagents)
                 .build());
     }
 }

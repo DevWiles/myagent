@@ -23,7 +23,7 @@ import java.util.Set;
  *
  * <p>它不受审批策略约束：能跑的东西本身就是安全的。也不算"会动世界"的工具——
  * 测试可能写缓存，但不会改任何源文件，所以持有它的角色仍然可以按文件集合并行
- * （见 {@code PlanExecutor.scoped}）。
+ * （DAG 调度器还在时按它排并发，已下线）。
  */
 public final class RunTestsTool implements Tool {
 

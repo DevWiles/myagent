@@ -28,10 +28,6 @@ public record TaskBrief(String request, List<String> requirements) {
         requirements = requirements == null ? List.of() : List.copyOf(requirements);
     }
 
-    public static TaskBrief of(Plan plan) {
-        return plan == null ? NONE : new TaskBrief(plan.request(), plan.requirements());
-    }
-
     public boolean isEmpty() {
         return request == null && requirements.isEmpty();
     }
