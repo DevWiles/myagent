@@ -10,9 +10,21 @@ myagent 是一个跑在终端里的 coding agent：读懂你的代码库，改�
 
 **[使用指南 →](docs/guide.md)**
 
+myagent 按端分仓库，都在 [wiles-agent](https://github.com/wiles-agent) 组织下：
+
+| 仓库 | 是什么 |
+|---|---|
+| **myagent-server**（本仓库） | Java 后端：agent 循环、工具、上下文、协议定义（[docs/protocol.md](docs/protocol.md)） |
+| [myagent-tui](https://github.com/wiles-agent/myagent-tui) | 终端界面，日常用的入口 |
+| [myagent-android](https://github.com/wiles-agent/myagent-android) | 手机端，离开电脑时看进度、批准操作 |
+
 ## 快速开始
 
-1. 准备 JDK 17+、Maven、[Bun](https://bun.sh) 和一个 DeepSeek API key。
+1. 准备 JDK 17+、[Bun](https://bun.sh) 和一个 DeepSeek API key，把终端界面拉下来：
+
+   ```bash
+   git clone https://github.com/wiles-agent/myagent-tui
+   ```
 
 2. 把 key 交给它：
 
@@ -24,10 +36,11 @@ myagent 是一个跑在终端里的 coding agent：读懂你的代码库，改�
 
    ```bash
    cd your-project
-   /路径/到/myagent/myagent-tui
+   /路径/到/myagent-tui/myagent-tui
    ```
 
-第一次启动会先问你信不信任这个目录，然后在后台把后端 build 好，界面马上就能打字。
+第一次启动会先问你信不信任这个目录，然后在后台下载配套版本的后端（本仓库 Releases 里的 `myagent.jar`），界面马上就能打字。
+想边改后端边用，把本仓库检出到本地，启动时带上 `MYAGENT_SERVER_DIR=<本仓库路径>`，界面会就地 build。
 想在任何目录直接敲 `myagent`，把 `myagent-tui` 软链进 PATH 就行。换模型、换服务地址、调上下文窗口，见[使用指南的配置一节](docs/guide.md#快速开始)。
 
 ## 能做什么
@@ -62,7 +75,7 @@ tests/test_paginate.py 有测试挂了，修好 src/paginate.py，别改测试
 
 ### 离开电脑也能接着管
 
-任务跑了十分钟、卡在等你授权，而你已经不在电脑前。装上 [`android/`](android/) 里的手机端，界面里敲 `/qr` 扫码，就能在手机上看进度、批准操作。走中继时任何网络都能连，中继只看得见密文。
+任务跑了十分钟、卡在等你授权，而你已经不在电脑前。装上 [myagent-android](https://github.com/wiles-agent/myagent-android) 手机端，界面里敲 `/qr` 扫码，就能在手机上看进度、批准操作。走中继时任何网络都能连，中继只看得见密文。
 
 ### 写进脚本和评测
 
@@ -79,7 +92,7 @@ java -jar target/myagent.jar --once prompt.txt -d ~/proj --once-out summary.json
 | 我想 | 用什么 |
 |---|---|
 | 在终端里交代事情、看它干活 | `myagent-tui` |
-| 离开电脑后用手机看进度、批准操作 | [`android/`](android/) 手机端，`--relay` 或 `--lan` 启动后敲 `/qr` |
+| 离开电脑后用手机看进度、批准操作 | [myagent-android](https://github.com/wiles-agent/myagent-android) 手机端，`--relay` 或 `--lan` 启动后敲 `/qr` |
 | 后端跑在服务器上，本机只开界面 | 服务器上 `java -jar myagent.jar --serve --lan`，本机 `myagent-tui --connect ws://…` |
 | 在脚本、CI 或评测里跑一次 | `java -jar myagent.jar --once` |
 | 自己写一个界面接上来 | 照 [`docs/protocol.md`](docs/protocol.md) 实现 |

@@ -26,25 +26,34 @@ Claude Code 早期就是 embedding + 本地向量库，后来整套拆掉换成�
 - **前后端是真的分开的。** 后端 `--serve` 起一个 WebSocket 服务，界面是个纯客户端。
   两边照 [`docs/protocol.md`](protocol.md) 各自开工——那份文档是契约，改协议先改它。
 
-界面现在有两块屏：终端里的 TUI，和 [`android/`](../android/) 里的手机端。
+界面现在有两块屏：终端里的 [myagent-tui](https://github.com/wiles-agent/myagent-tui)，和手机端
+[myagent-android](https://github.com/wiles-agent/myagent-android)。三端各一个仓库，都在
+[wiles-agent](https://github.com/wiles-agent) 组织下，本仓库（myagent-server）是后端，也放协议和这份指南。
 **agent 始终跑在电脑上**，手机连的是同一个后端、同一份会话——
 它存在的理由是那个最常见的场景：任务跑了十分钟、卡在等你授权，而你早就不在电脑前了。
 
 ## 快速开始
 
-需要 JDK 17+、Maven、[Bun](https://bun.sh)，以及一个 DeepSeek API key。
+需要 JDK 17+、[Bun](https://bun.sh)，以及一个 DeepSeek API key。
 
 ```bash
+git clone https://github.com/wiles-agent/myagent-tui
 export DEEPSEEK_API_KEY=sk-xxx        # 或写进 ~/.myagent/config.json
 cd 你要让它干活的目录
-/路径/到/myagent/myagent-tui
+/路径/到/myagent-tui/myagent-tui
 ```
 
 `myagent-tui` 一条命令把整套拉起来：按需装界面依赖，然后立刻起界面。
-后端 jar 的按需 build 发生在界面**里面**（改过 Java 源码的下一次启动才触发）：
-界面亚秒级出现，mvn 在后台跑，进度打在状态栏上——这期间就可以把第一句话
-敲好，连上的瞬间自动发出。
-两件事都带新鲜度判断，没改动就直接跳过，启动和裸跑界面一样快。
+后端 jar 由界面准备，发生在界面**里面**：界面亚秒级出现，进度打在状态栏上——
+这期间就可以把第一句话敲好，连上的瞬间自动发出。jar 有三个来源，优先级从高到低：
+
+| 来源 | 怎么给 | 说明 |
+|---|---|---|
+| 钉死的 jar | `MYAGENT_JAR=<jar>` | 不存在就报错，不替你编译 |
+| 后端检出 | `MYAGENT_SERVER_DIR=<本仓库路径>` | 开发用。没 build 或改过 Java 源码就地 `mvn package`，`--rebuild` 强制重来 |
+| 发布版 | 都不给 | 下载界面钉住的版本（myagent-tui 的 `SERVER_VERSION`），缓存在 `~/.myagent/server/` |
+
+界面钉版本、不追 latest：协议是两边的契约，后端发了不兼容的新版时，追 latest 的界面会在用户毫不知情时连不上。
 敲命令时所在的目录就是 agent 的工作区。
 后端是界面拉起的子进程，界面怎么退出（`Ctrl-C`、直接关掉终端窗口、被强杀）它都跟着退，
 不会留下一个没人看着、还在花 token 的后端。
@@ -52,12 +61,12 @@ cd 你要让它干活的目录
 想在任何目录直接敲 `myagent`，把它软链进 PATH 里的某个目录就行（脚本会解开软链找回仓库）：
 
 ```bash
-ln -s "$PWD/myagent-tui" ~/.local/bin/myagent    # 在仓库根目录执行
+ln -s "$PWD/myagent-tui" ~/.local/bin/myagent    # 在 myagent-tui 仓库根目录执行
 ```
 
 ### 用手机连
 
-装 [`android/`](../android/) 那个 app（`cd android && ./gradlew installDebug`），
+装 [myagent-android](https://github.com/wiles-agent/myagent-android) 那个 app（在那个仓库里 `./gradlew installDebug`），
 界面里敲 `/qr` 出配对二维码，扫一下就连上了。两种走法：
 
 ```bash
@@ -406,7 +415,7 @@ agent 不按关键词猜你的意图，但总有确定性的规则想加——�
 ./myagent-tui -d ~/proj          # 指定工作区
 ./myagent-tui -m deepseek-v4-pro # 换模型
 ./myagent-tui --readonly         # 只读：写文件和执行命令的工具压根不注册
-./myagent-tui --rebuild          # 强制重新 build 后端
+./myagent-tui --rebuild          # 强制重新 build 后端（只对 MYAGENT_SERVER_DIR 有效）
 ```
 
 后端自己不画任何界面：`java -jar target/myagent.jar --serve` 起一个只听本机的
@@ -504,29 +513,40 @@ src/main/java/dev/wiles/myagent/
   snapshot/   影子仓库：检查点快照、/rewind 和 /undo
   audit/      审计日志
   server/     --serve 的 WebSocket 服务端
-  cli/        命令行参数解析（界面在 tui/，这里只剩 Cli / CliOptions）
-tui/src/
+  cli/        命令行参数解析（界面在 myagent-tui 仓库，这里只剩 Cli / CliOptions）
+docs/protocol.md   前后端契约
+.github/workflows/ CI（每次推送跑测试）和发版（打 v* tag 发 myagent.jar 到 Releases）
+```
+
+界面在 [myagent-tui](https://github.com/wiles-agent/myagent-tui)：
+
+```
+src/
   main.tsx    入口：renderer、信号、退出收尾
   session.ts  Solid 适配层（33ms 尾沿节流）
   store.ts    与框架无关的会话状态机
-  backend.ts  拉起 java 子进程、连 WebSocket
+  backend.ts  准备后端 jar（server-release.ts 下载发布版）、拉起 java 子进程、连 WebSocket
   terminal-title.ts  标签页标题的状态图标
   scroll.ts / paste-fold.ts  滚轮速度、大段粘贴折叠
   components/ 界面组件（ModeLine 是左下角那行模式标识）
-docs/protocol.md   前后端契约
 ```
 
 ## 开发
 
 ```bash
-mvn test                       # 后端（约 1200 个测试）
-cd tui && bun test             # 界面（约 450 个测试）
-cd tui && bun run typecheck
-cd tui && bun run cover        # 重新生成上面那张封面图
+mvn test                       # 后端（本仓库，约 1000 个测试）
+# 下面在 myagent-tui 仓库里跑
+bun test                       # 界面（约 450 个测试）
+bun run typecheck
+bun run cover ../myagent-server/docs/cover.svg   # 重新生成 README 的封面图
 ```
 
+发版：改 `pom.xml` 和 `Cli.VERSION` 的版本号，提交后打 `v<版本>` 的 tag 推上去，
+GitHub Actions 会跑测试、build、把 `myagent.jar` 挂到 Releases。界面那边再把
+`SERVER_VERSION` 改成新版本。
+
 封面图是**从界面代码里生成**的——招牌字模、字标排版、配色都直接 import
-`tui/src/` 里的真东西，所以界面改了重跑一次就同步，不会和实际画面对不上。
+myagent-tui 的 `src/` 里的真东西，所以界面改了重跑一次就同步，不会和实际画面对不上。
 图里没有一个 `<text>`，全是矩形和线段：那些 `█ ║ ═ ╔ ╗` 在不同机器上宽高比不一样，
 用文字渲染等于把版式交给看图人装了什么字体。
 

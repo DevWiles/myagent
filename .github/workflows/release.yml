@@ -1,0 +1,36 @@
+# 打 v<版本> 的 tag 就发一版：跑测试、build、把 myagent.jar 挂到 Releases。
+# 终端界面（wiles-agent/myagent-tui）按它钉住的 SERVER_VERSION 从这里下载 jar，
+# 所以资产名必须一直叫 myagent.jar，tag 必须是 v 加版本号。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: tag 和代码里的版本号要对得上
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pom=$(mvn -B -q help:evaluate -Dexpression=project.version -DforceStdout)
+          cli=$(grep -oP 'VERSION = "\K[^"]+' src/main/java/dev/wiles/myagent/cli/Cli.java)
+          if [ "$tag" != "$pom" ] || [ "$tag" != "$cli" ]; then
+            echo "tag v$tag、pom.xml 的 $pom、Cli.VERSION 的 $cli 三个要一致" >&2
+            exit 1
+          fi
+      - run: mvn -B package
+      - name: 发到 Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" target/myagent.jar --title "$GITHUB_REF_NAME" --generate-notes
