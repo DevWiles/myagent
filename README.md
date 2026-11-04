@@ -14,7 +14,7 @@ myagent 按端分仓库，都在 [wiles-agent](https://github.com/wiles-agent) �
 
 | 仓库 | 是什么 |
 |---|---|
-| **myagent-Harness**（本仓库） | Java 后端，也就是 agent 的 harness：包在模型外面的 ReAct 循环、工具调用、审批、上下文压缩、子 agent，以及协议定义（[docs/protocol.md](docs/protocol.md)） |
+| **myagent-harness**（本仓库） | Java 后端，也就是 agent 的 harness：包在模型外面的 ReAct 循环、工具调用、审批、上下文压缩、子 agent，以及协议定义（[docs/protocol.md](docs/protocol.md)） |
 | [myagent-tui](https://github.com/wiles-agent/myagent-tui) | 终端界面，日常用的入口 |
 | [myagent-android](https://github.com/wiles-agent/myagent-android) | 手机端，离开电脑时看进度、批准操作 |
 

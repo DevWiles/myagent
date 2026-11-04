@@ -28,7 +28,7 @@ Claude Code 早期就是 embedding + 本地向量库，后来整套拆掉换成�
 
 界面现在有两块屏：终端里的 [myagent-tui](https://github.com/wiles-agent/myagent-tui)，和手机端
 [myagent-android](https://github.com/wiles-agent/myagent-android)。三端各一个仓库，都在
-[wiles-agent](https://github.com/wiles-agent) 组织下，本仓库（myagent-Harness）是后端，也放协议和这份指南。
+[wiles-agent](https://github.com/wiles-agent) 组织下，本仓库（myagent-harness）是后端，也放协议和这份指南。
 **agent 始终跑在电脑上**，手机连的是同一个后端、同一份会话——
 它存在的理由是那个最常见的场景：任务跑了十分钟、卡在等你授权，而你早就不在电脑前了。
 
@@ -538,7 +538,7 @@ mvn test                       # 后端（本仓库，约 1000 个测试）
 # 下面在 myagent-tui 仓库里跑
 bun test                       # 界面（约 450 个测试）
 bun run typecheck
-bun run cover ../myagent-Harness/docs/cover.svg   # 重新生成 README 的封面图
+bun run cover ../myagent-harness/docs/cover.svg   # 重新生成 README 的封面图
 ```
 
 发版：改 `pom.xml` 和 `Cli.VERSION` 的版本号，提交后打 `v<版本>` 的 tag 推上去，
