@@ -5,10 +5,12 @@
 
 ## 设计取舍
 
-一个能读写文件、跑命令、先规划后执行的命令行 coding agent。ReAct 循环、工具调用、
+一个能读写文件、跑命令、需要时先出计划再动手的命令行 coding agent。ReAct 循环、工具调用、
 流式渲染、权限审批、审计落盘这些东西全部自己实现，为的是把 agent 到底是怎么转起来的搞清楚。
 
-多步的活可以走**计划**：拆一张任务图逐个跑完就收工，由 `Shift+Tab` 切到 plan 模式进入。
+大一点的活可以先走 **plan 模式**（照 Claude Code）：只读调研、写出计划、你批准之后同一个 agent 接着做。
+以前的 plan 模式是另一条链路——拆一张任务图、按角色逐个派、能并行、失败了补救场步骤，
+跟着撤了：同一个 agent 照着批准的计划做，调研时摸到的情况不会在转述里丢。
 以前还有一条「拟方案 → 并行施工 → 验收」的**流水线**，评测上没比单 agent 做得更好
 （cookiecutter 上单 agent 180/202、流水线 143/202），已经撤掉。
 
@@ -127,14 +129,20 @@ MYAGENT_CONTEXT_TOKENS=12000 ./myagent-tui
 | 模式 | 这一句话会怎么跑 |
 |---|---|
 | `normal` | 直接对话，一轮 ReAct |
-| `plan` | 先出计划、确认之后逐个跑 |
+| `plan` | 只读调研、写出计划，你批准了才动手 |
 
 模式是**状态**不是命令——它写在屏幕上，不用每句话都重敲一遍，也不会出现「我刚才到底加没加
-`/plan`」这种事。后端没宣告的模式会被跳过，切不进去。
+`/plan`」这种事。模式由后端持有，手机和终端看到的是同一个；后端没宣告的模式会被跳过，切不进去。
 
-normal 模式下**不会**替你自动改走计划。以前会按字面猜「这句话像不像好几步的活」，评测里
+plan 模式下 agent 手上只剩看的工具（读、搜、联网读、读技能），要派子 agent 也只能派 explorer；
+bash 和 MCP 工具一律不给——它们会不会改东西没法从名字上判断。调研完它调 `exit_plan_mode`
+把计划交上来，框里有三个选项：**批准**（退回 normal，同一个 agent 接着照计划改）、
+**不批准并说说要改什么**（这句话原样交给它，它改了再交）、**不批准**。
+
+normal 模式下**不按字面猜**「这句话该不该先规划」。以前猜过，评测里
 （deepseek-v4.1-flash，10~20 条要求分散在多个文件的长任务）不转走计划也全部做对，
-转走的那几次只是慢了 3~6 倍，于是撤了。Claude Code 和 Codex 也都不替用户切。
+转走的那几次只是慢了 3~6 倍，于是撤了。现在照 Claude Code：模型看着任务觉得该先摸清楚
+（几种做法要选、改动面大、需求不清），会调 `enter_plan_mode` **提议**，你同意才切进去。
 
 agent 自己找代码用两件工具，不走 shell：
 
@@ -184,14 +192,22 @@ agent 自己找代码用两件工具，不走 shell：
 chrome-devtools 一家 29 个工具就把基线窗口从 3.3k 顶到 9.9k token，
 这笔钱不管这一轮用不用得上浏览器都得付。名字写 server 那边的原名。
 
+现在这笔钱默认就省掉了：**MCP 工具和 `create_project` / `web_search` / `web_fetch` 是延迟加载的**
+（照 Claude Code 的 deferred tools）。平时菜单上只有它们的名字，列在 `tool_search` 的说明里；
+模型要用时先调 `tool_search` 拉完整说明——`select:名字1,名字2` 精确拉，或者给关键词搜
+（`+chrome 截图` 表示名字里必须有 chrome）——拉到之后从下一步起它们就和别的工具一样能调。
+没拉就硬点会被挡回去，并告诉它怎么拉。「拉过哪些」从对话记录里读，所以接回老会话照样认得；
+而压缩把那条结果摘要掉之后它们也跟着退回延迟状态——那时模型手上已经没有参数说明了。
+读文件、搜索、bash 这些几乎每轮都用，不延迟，延迟它们只会多一次往返。
+
 ### 操作浏览器
 
 接上 `chrome-devtools-mcp` 之后，agent 能打开页面、点按钮、填表单、读 JS 动态生成的内容——
-`curl` 和读源码看不到的那部分。规划模式下这类活会派给 **`browser` 角色**：
-它的工具白名单是 `mcp__chrome*`（server 那一截是你在 mcp.json 里自己起的 key，
-所以 chrome / chromium / chrome-devtools 都认），提示词教的是浏览器的姿势——
-先取快照拿 uid 再动手、页面一变快照就作废。**没配浏览器 server 的机器上，
-这个角色会从规划菜单里整个消失**，不会被派出去然后两手空空。
+`curl` 和读源码看不到的那部分。主 agent 直接拿这些 MCP 工具用（延迟加载，要用时先 `tool_search`）。
+名册里还有个 **`browser` 角色**给单独派出去的一步用：工具白名单是 `mcp__chrome*`
+（server 那一截是你在 mcp.json 里自己起的 key，所以 chrome / chromium / chrome-devtools 都认），
+提示词教的是浏览器的姿势——先取快照拿 uid 再动手、页面一变快照就作废。
+审批层认浏览器工具用的也是这条白名单。
 
 **浏览器活得比 agent 长（CDP 复用）。** 把 `--isolated` 换成 `--browserUrl`：
 
@@ -256,7 +272,7 @@ chrome-devtools 一家 29 个工具就把基线窗口从 3.3k 顶到 9.9k token�
 （不写 `--browserUrl` 的话一切照旧：chrome-devtools-mcp 自己管浏览器，
 myagent 一步都不插手。`--isolated` 每次开临时 profile，进程一死浏览器跟着死。）
 
-### 子 agent（照 Codex）
+### 子 agent（照 Codex 的工具，照 Claude Code 的派法）
 
 主 agent 有五个工具：`spawn_agent` / `send_input` / `wait_agent` / `close_agent` / `resume_agent`。
 
@@ -268,9 +284,12 @@ myagent 一步都不插手。`--isolated` 每次开临时 profile，进程一死
 - 派 worker 必须写明 `owns`（它负责的文件或目录）：它跑着时别人写不了这些路径，它也只能写这些路径。
 - 子 agent 交回的通知里带 `observed`——框架记录的实际写了哪些文件、跑了哪些命令和退出码，不靠它自述。
   子 agent 改过的文件主 agent 没跑过测试就想交卷，会被提醒一次。
-- 什么时候派由 `MYAGENT_SUBAGENTS` 决定：`explicit`（默认，和 Codex 一样——你说了「用子 agent」「并行做」
-  才派）、`proactive`（能并行就派）、`auto`（开工前由委派决策器判断，不委派就不给派遣工具；
-  目前只在 `--once` 里生效）、`off`（不给这几个工具）。
+- **派不派由模型自己定**，照 Claude Code 的 Agent 工具：这几个工具常驻菜单，`spawn_agent` 的说明里
+  写清楚「什么时候用」（对得上某种类型、有几件能并行的活、要翻好几个文件才答得上的问题）和
+  「什么时候别用」（只查一个已知的东西、改一两处、用户说了不要派）。不再等你开口许可，
+  也不在开工前另跑一次委派决策——以前的 `explicit` / `proactive` / `auto` 三档和那个决策器都撤了。
+- plan 模式下只能派 `explorer`，已经开着的 worker 也收不到新活——不然等于从侧门绕过「先别动手」。
+- `MYAGENT_SUBAGENTS=off` 关掉（不给这几个工具），默认 `on`。
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
@@ -308,7 +327,8 @@ markdown 正文，旁边可以带脚本和素材。用的就是 Agent Skills 那
 - **身份是目录名，不是 `name` 字段**（后者只影响显示）。拿 `name` 当 id 的话，
   两份技能写了同名就会互相盖掉，而用户看着明明是两个目录。
 - `description` + `when_to_use` 合成一句进清单，超过 1536 字符截断。
-- 写了 `disable-model-invocation: true` 的不进模型清单。
+- 写了 `disable-model-invocation: true` 的不进模型清单，只能由你用 `/名字` 点。
+- 写了 `user-invocable: false` 的反过来：只给模型用，斜杠菜单里不列。
 - 读出来的正文**带着技能目录的绝对路径**——正文里提到的 `scripts/convert.py`
   是相对它的，不给这一行，模型只能拿着相对路径在工作区里瞎找。
 - 声明了 `allowed-tools` 会原样转达给模型，但**myagent 不强制**，这点会一并说明——
@@ -317,10 +337,40 @@ markdown 正文，旁边可以带脚本和素材。用的就是 Agent Skills 那
   让模型自己用 `bash` 补。不说的话它读到的是一句空指令，
   会以为「这里本来就没内容」，然后基于不存在的材料往下编。
 
+**你也可以直接点名**（照 Claude Code 的技能斜杠命令）：输入框敲 `/`，技能排在内置命令后面，
+`/deploy 生产环境` 发出去，后端把那份正文拼在这句话前面交给模型，不用等它自己从清单里认出来。
+展开在后端做，手机上敲的也一样。和内置命令撞名时内置的优先。
+
+### hook：每句话提交前先跑你的脚本
+
+agent 不按关键词猜你的意图，但总有确定性的规则想加——「提到发版就先把 CHANGELOG 规矩贴给它」
+「消息里有密钥就拦下」。这种规则交给你自己写，照 Claude Code 的 `UserPromptSubmit` hook，
+配置格式一样，那边写好的直接搬过来：
+
+```json
+// ~/.myagent/settings.json，或工作区的 .myagent/settings.json（两处都读，先用户级后工作区）
+{"hooks": {"UserPromptSubmit": [
+  {"hooks": [{"type": "command", "command": "python ~/.myagent/hooks/guard.py", "timeout": 30}]}
+]}}
+```
+
+命令在工作区根目录用 `sh` 跑，stdin 收到 `{"hook_event_name","session_id","cwd","prompt"}`：
+
+| 结果 | 效果 |
+|---|---|
+| 退出码 0，stdout 是普通文本 | 当作补充上下文拼给模型 |
+| 退出码 0，stdout 是 JSON | `{"decision":"block","reason":…}` 拦下；`hookSpecificOutput.additionalContext` 当上下文 |
+| 退出码 2 | 拦下，stderr 作为理由显示给你，模型看不到这句话 |
+| 别的退出码、超时（默认 60 秒） | 不拦，显示一条警告——hook 自己坏了不该把人卡住 |
+
+补的上下文、plan 模式的规矩、`/技能` 的正文，都以 `<system-reminder>` 块拼在你那句话前面，
+只给模型看；`/resume` 摊回来的对话里会剥掉。工作区里的 `.myagent/settings.json` 跟着仓库走，
+所以第一次进一个目录时的信任确认也管着它。
+
 ### 界面
 
 - **标签页标题**：状态图标加上模型概括的会话摘要，比如 `💠 排查登录接口 500`。
-  图标的颜色就是状态：💠 蓝色正常（在跑时 💠🔷🔹🔷 一明一暗）、🔶 橙色卡在审批或计划确认上等你、
+  图标的颜色就是状态：💠 蓝色正常（在跑时 💠🔷🔹🔷 一明一暗）、🔶 橙色卡在审批或 plan 确认上等你、
   🔺 红色断线或上一轮失败。开着好几个 myagent 时，不切过去也看得出哪个在等你。
 - **接着聊**：`/continue`（接最近那段）和 `/resume`（挑一段）会把上次的对话原样摆回屏幕，
   你说过的话、回答、工具调用组都在，和当时跑出来的一样。
@@ -328,7 +378,7 @@ markdown 正文，旁边可以带脚本和素材。用的就是 Agent Skills 那
   输入框里多一个 `[图片 #1]`，发出去时图跟着走。也可以把图片文件从访达、资源管理器拖进终端，
   认出是图片路径就直接附上。读剪贴板用的都是系统自带的东西：Windows 是 PowerShell，
   macOS 是 osascript，Linux 要装 `wl-paste`（Wayland）或 `xclip`（X11）。
-  格式认 png / jpeg / gif / webp，单张 10 MB 以内；占位符删掉就当不要这张图；计划模式下不能带图。
+  格式认 png / jpeg / gif / webp，单张 10 MB 以内；占位符删掉就当不要这张图。
 - **粘贴大段文字**：三行以上（或超过 800 字）折成一个占位符 `[粘贴的文本 #1 +20 行]`，
   输入框和对话里都只显示它，发给模型的是全文。占位符删掉一个字就当你不要这段了。
 - **滚轮**：每格 3 行，连着快搓会加速。`/scroll-speed` 开一个调速框，开着时滚一下就是新手感，
@@ -339,7 +389,8 @@ markdown 正文，旁边可以带脚本和素材。用的就是 Agent Skills 那
 |---|---|
 | `Shift+Tab` | 切换模式 |
 | `/continue` | 接最近那段会话，不用挑 |
-| `/resume` | 从会话历史里挑一段接着聊（`/resume-plan` 接着跑没跑完的计划） |
+| `/resume` | 从会话历史里挑一段接着聊 |
+| `/技能名 参数` | 点名一份技能，见上面「技能」 |
 | `/rewind` | 列出检查点；`/rewind 2` 把文件回到第 2 个点，`/rewind 2 conversation` 只回对话，`both` 都回 |
 | `/undo` | 撤销上一轮对文件的改动 |
 | `/scroll-speed` | 调滚轮速度 |
@@ -439,12 +490,15 @@ WebSocket 服务，握手信息（端口 + 一次性 token）打在 stdout。照
 
 ```
 src/main/java/dev/wiles/myagent/
-  agent/      ReAct 主循环、系统提示词
+  agent/      ReAct 主循环、系统提示词、子 agent、plan 模式（PlanMode / PlanModeTools）
   llm/        DeepSeek 客户端、流式累积、工具协议
-  tool/       工具注册表 + 内置工具（读/写/列目录/跑命令/建项目）
+  tool/       工具注册表 + 内置工具（读/写/列目录/跑命令/建项目）+ tool_search 延迟加载
+  skill/      技能库、skill 工具、/技能名 的展开
+  hooks/      UserPromptSubmit hook
     safety/   工作区/命令/写文件三道守卫 + 审批规则、策略落盘、diff
     search/   grep/glob 共用的遍历、.gitignore 解析、二进制探测
-  plan/       规划 → 任务图 → 执行 → 重规划；角色名册（谁拿什么工具、按什么规矩干）
+  plan/       单独派一步的执行体（收尾审查在用）：角色名册、AgentTaskRunner、Task、TaskPrompt
+              ——DAG 规划和调度撤了，plan 模式本身在 agent/PlanMode*
   review/     收尾独立审查：改完文件后另起一个 agent 对着原话和 diff 审，有问题交回主 agent 修
   context/    上下文窗口管理、token 估算、会话存档和标题
   snapshot/   影子仓库：检查点快照、/rewind 和 /undo
@@ -495,19 +549,18 @@ cd tui && bun run cover        # 重新生成上面那张封面图
 
 - **工具调用**：模型一次点几个工具时，连续的只读调用（`Tool.parallelSafe()`）凑批同时执行，
   写文件和 bash 保持串行且是批的边界；结果仍按点单顺序回填历史
-- **计划任务**：`PlanExecutor` 里互不依赖的只读任务并行跑（默认宽度 3），
-  `AgentRole.mutates()` 的任务独占运行——那道闸果然是为这一天准备的
+- **子 agent**：explorer 可以同时派好几个；worker 靠 `owns` 划开写入范围才能并行，
+  范围重叠的直接拒派（以前 DAG 计划里「只读并行、写独占」的调度跟着计划撤了）
 - 协议那只拦路虎的解法：工具事件的流水号改由<b>源头（Agent）在发起调用时编</b>，
   进程内全局唯一；子任务的事件多带一个 `task` 字段，界面按它多路复用。
   界面侧的「同时画几个跑着的子任务」还没做——事件里信息已经够了，等界面来认领
 
 整批并行的工具调用有 60 秒的**止损时限**，超时按「这一步失败」落账。
-计划里的单个任务和主 agent 的步数**默认都不设上限**（照 Claude Code / Codex）：
+子 agent 和主 agent 的步数**默认都不设上限**（照 Claude Code / Codex）：
 撞线的代价是整道工序作废、下游全跳，比多跑一会儿贵得多。真卡死的情况由读超时、
 bash 超时这些更近的闸兜住；要止损线就由调用方显式传（`--max-steps`、`taskTimeout`）。
 
-并发的前提是状态纪律：`Task`/`TaskGraph` 的状态迁移全部收在调度线程上，
-工作线程只跑子循环；每个子循环用独立的模型客户端（`Supplier<LlmClient>`），
+并发的前提是状态纪律：每个子循环用独立的模型客户端（`Supplier<LlmClient>`），
 否则 `cancel()` 只掐得断最后发请求的那一个。
 
 **语义簇查询**是检索这边唯一真正的缺口：问句里没有任何具体符号名时

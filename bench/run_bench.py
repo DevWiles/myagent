@@ -5,7 +5,7 @@
   python3 bench/run_bench.py --agent myagent --mode react [--tasks a,b] [--label L] [--timeout 3600]
   python3 bench/run_bench.py --agent claude                 # Claude Code 无头模式，接同一个 DeepSeek 模型
 agent：myagent（WebSocket 协议驱动）/ claude（`claude -p` + stream-json）
-mode（仅 myagent）：react / react+review（单写者 + 收尾独立审查）/ plan
+mode（仅 myagent）：react / react+review（单写者 + 收尾独立审查）/ plan（先进 plan 模式：只读调研→交计划→自动批准→同一个 agent 照做）
 结果：bench/results/<label>/<task>.json + summary.json；沙盒镜像 myagent-sandbox:v2（非 root 用户 bench）。
 """
 import argparse
@@ -25,7 +25,7 @@ PROJECT = os.path.dirname(BENCH)
 JAR = os.path.join(PROJECT, "target", "myagent.jar")
 TASKS = os.path.join(BENCH, "tasks")
 IMAGE = "myagent-sandbox:v2"
-SUBAGENTS = "explicit"   # --subagents：off / explicit / proactive，做「有无子 agent」的对照
+SUBAGENTS = "on"   # --subagents：on / off，做「有无子 agent」的对照
 IGNORE = ("__pycache__", ".pytest_cache", ".claude", "hidden_tests")
 
 
@@ -74,7 +74,7 @@ def docker_base(name, work, home, extra_env=()):
     return cmd
 
 
-def start_myagent(name, work, home, final_review=False, subagents="explicit"):
+def start_myagent(name, work, home, final_review=False, subagents="on"):
     cmd = docker_base(name, work, home, [f"MYAGENT_FINAL_REVIEW={'1' if final_review else '0'}",
                                          f"MYAGENT_SUBAGENTS={subagents}"])
     cmd += ["-p", "127.0.0.1::7777", IMAGE, "java", "-jar", "/opt/myagent.jar", "--serve", "--lan", "--port", "7777", "-d", "/work"]
@@ -102,8 +102,9 @@ def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
     rec["model"] = ready.get("model")
     if not ready.get("hasApiKey"):
         raise RuntimeError("no api key in sandbox")
-    ws.send(json.dumps({"t": "prompt", "text": prompt} if mode in ("react", "react+review") else
-                       {"t": "plan", "goal": prompt}))
+    if mode == "plan":
+        ws.send(json.dumps({"t": "set_mode", "mode": "plan"}))
+    ws.send(json.dumps({"t": "prompt", "text": prompt}))
     t0 = time.time()
     deadline = t0 + timeout
     approvals = tools_n = writes = steps = 0
@@ -136,6 +137,8 @@ def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
             approvals += 1
             ws.send(json.dumps({"t": "approval_reply", "id": ev["id"], "decision": "yes"}))
         elif t == "plan_confirm_request":
+            if ev.get("kind") == "exit":
+                rec["plan_chars"] = len(ev.get("plan") or "")
             ws.send(json.dumps({"t": "plan_confirm_reply", "id": ev["id"], "approved": True}))
         elif t == "tool_started":
             tools_n += 1
@@ -152,10 +155,8 @@ def run_myagent(task, prompt, mode, work, home, name, timeout, rec, events):
             steps += 1
         elif t == "text_delta":
             text.append(ev.get("text", ""))
-        elif t == "plan_created":
-            rec["plan_tasks"] = len(ev.get("tasks") or [])
-        elif t in ("done", "failed", "plan_finished", "mode_switched"):
-            rec.setdefault("terminal_events", []).append({k: v for k, v in ev.items() if k in ("t", "status", "reason", "steps", "succeeded", "failed", "skipped", "replans", "rounds", "mode")})
+        elif t in ("done", "failed", "mode"):
+            rec.setdefault("terminal_events", []).append({k: v for k, v in ev.items() if k in ("t", "status", "reason", "steps", "rounds", "mode")})
         elif t == "busy" and ev.get("busy") is False:
             final = ev
             break
@@ -308,8 +309,8 @@ def main():
     ap.add_argument("--only-source", default="", help="hand / exercism")
     ap.add_argument("--timeout", type=int, default=3600, help="单题上限（秒）。默认一小时：规划/流水线一题要跑好几道工序，15 分钟偏紧")
     ap.add_argument("--jar", default=None, help="换一个后端 jar（默认 target/myagent.jar），用来做同模型的新旧版本对照")
-    ap.add_argument("--subagents", choices=["off", "explicit", "proactive"], default="explicit",
-                    help="子 agent（MYAGENT_SUBAGENTS）：off 关掉；explicit 用户没要求不派（Codex 默认）；proactive 能并行就派")
+    ap.add_argument("--subagents", choices=["on", "off"], default="on",
+                    help="子 agent（MYAGENT_SUBAGENTS）：on 由模型按工具说明自己决定派不派（照 Claude Code）；off 关掉")
     args = ap.parse_args()
     global SUBAGENTS
     SUBAGENTS = args.subagents

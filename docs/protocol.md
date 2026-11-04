@@ -222,7 +222,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 新能力靠 `ready.features` 宣告，不靠版本号：
 
 ```json
-"features": ["plan", "replan", "resume", "resume_plan", "session", "sessions",
+"features": ["plan_mode", "skills", "session", "sessions",
              "compact", "memory", "roles", "undo", "rewind"]
 ```
 
@@ -248,6 +248,8 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `reset_done` | — | `/clear` 成功。**不删存档**，见 3.9 |
 | `session_list` | `sessions[]` `currentId` | 会话历史，只回给问的那个连接，见 3.9 |
 | `user_message` | `text` `mode` `cid` | **用户说了一句话**。广播给所有界面，见 3.15 |
+| `mode` | `mode`（`normal` / `plan`） | 会话模式变了，见 3.4 |
+| `hook` | `blocked` `message` | 用户提交 hook 拦下了这句话，或 hook 自己出了问题，见 3.5 |
 
 `ready` 的完整字段：
 
@@ -260,6 +262,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "branch": "dev",
   "model": "deepseek-chat",
   "planMode": false,
+  "mode": "normal",
   "hasApiKey": true,
   "baseUrl": "https://api.deepseek.com",
   "apiKeyMasked": "sk-****abcd",
@@ -267,14 +270,10 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
   "tokens": 1234,
   "sentTokens": 156800,
   "contextLimit": 1000000,
-  "features": ["plan", "replan", "resume", "resume_plan", "session", "sessions",
-               "compact"],
+  "features": ["plan_mode", "skills", "session", "sessions", "compact"],
   "tools": [{"name": "read_file", "description": "…"}],
+  "skills": [{"id": "deploy", "description": "发版。"}],
   "auditLog": "/Users/x/.myagent/logs/run-2026-09-17T08-09-44Z.jsonl",
-  "resumable": {
-    "goal": "上次那份没跑完的计划的目标",
-    "remaining": 3, "total": 7, "savedAt": 1758067200000
-  },
   "interrupted": {"reason": "已取消", "prompt": "把 Main 改了", "steps": 3, "at": 1758100000000}
 }
 ```
@@ -288,12 +287,15 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 划不来，而要的东西就写在一个小文本文件里。detached HEAD 给短 sha，worktree 会
 跟着 `gitdir:` 指过去。
 
-**`resumable` 只在「这个工作区确实有没跑完的计划」时才出现**，见 3.7。
-界面据此决定第一屏要不要摆出「接着跑」那个入口——放在首帧而不是让界面再问一次，
-是因为画第一屏的时候就得知道。
+`mode` 是会话**眼下的模式**（`normal` / `plan`，见 3.4）。晚连上来的界面靠它把模式行画对。
+
+`skills` 是用户能用 `/名字` 点的技能（写了 `user-invocable: false` 的不列），界面拿去补全斜杠菜单。
+`/名字 参数` 照普通 `prompt` 发，展开在服务端做——终端和手机走的是同一条路。
+
+> `resumable`（上次没跑完的计划）**不再发送**：DAG 计划连同存档一起撤了，见 3.6。
 
 > ⚠️ `planMode` 是**只读模式**的历史字段名（对应 CLI 的 `--readonly`），
-> 和「先规划后执行」没有任何关系。名字保留是为了不破坏已有界面。
+> 和 plan 模式没有任何关系——会话模式看 `mode`。名字保留是为了不破坏已有界面。
 
 > `workspaceWarning` **不再发送**。以前后端在家目录这类地方拒绝启动、`--unsafe` 放行时
 > 用它补一句警告；现在改成界面在拉起后端之前问用户信不信任这个目录，风险写在那个确认框里。
@@ -354,16 +356,16 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 
 - 续了也白续的失败**不带**这个字段。比如最近几轮本身就撑破了上下文窗口——
   说「继续」只会原地再撞一次同一堵墙，提示续做就是在骗人。
-- 子任务（带 `task` 的）的 `failed` **不带**：计划有自己的续跑（3.7），「继续」接的是主对话。
+- 子任务（带 `task` 的）的 `failed` **不带**：「继续」接的是主对话。
 - 提示该一直留到用户下一次发话；那一轮正常说完（`done`）后，断点就作废了。
 - 晚连上来的界面没看见这条 `failed`，从 `ready.interrupted` 拿同一份东西（3.1）。
 - 断点之后的第一句话，服务端会在**发给模型的那份**前面拼一段 `<turn_interrupted>` 说明
   （断在第几步、「没有执行」怎么读、执行到一半的先检查、隔久了先核对文件）。
   界面上显示的、`user_message` 广播的仍是用户原话——那段说明是写给模型的，不是给人看的。
 
-计划执行期间，子任务发出的 `text_delta` / `thought` / `tool_started` /
-`tool_finished` 会多带一个 **`task`** 字段（任务或工序的 id，如 `"t3"`、`"work"`）。
-并行的任务各自在发事件，界面靠它把动静归到正确的那条线上；不认识这个字段的老界面
+子任务发出的 `text_delta` / `thought` / `tool_started` /
+`tool_finished` 会多带一个 **`task`** 字段（如收尾审查的 `"final-review"`）。
+几条线同时在发事件时，界面靠它把动静归到正确的那条线上；不认识这个字段的老界面
 忽略即可，所以协议版本不升。主对话自己的事件没有这个字段；但主对话用 `spawn_agent` 派出的
 子 agent（照 Codex：后台异步跑、结果以 `<subagent_notification>` 注入主对话）发的事件带
 `"agent-N"`，走的是同一条通道。
@@ -402,7 +404,7 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 | `detail` | 命令原文、工作区相对路径，或站点主机名（`browse`） |
 | `reason` | 为什么要问。同时给用户和模型看 |
 | `preview` | 写文件时是 unified diff 正文，没有就是空串 |
-| `origin` | 计划里是「编码者 · t3」，单轮对话里是空串 |
+| `origin` | 由子任务（如收尾审查）发起时是「角色 · 任务号」，主对话里是空串 |
 | `suggestions` | 「以后都同意」可以存成哪几条规则，**从紧到松**。空数组表示这次记不成规则 |
 | `preferred` | 默认选中第几档 |
 
@@ -443,134 +445,68 @@ relay 要过一趟公网，同一屋檐下反而绕远。两种模式**同时可
 却挂到整轮结束，看起来就是「问题还在等我」。id 对不上的静默忽略
 （自己刚答过的那块屏，框早就本地收掉了）。
 
-### 3.4 先规划后执行（feature: `plan`）
+### 3.4 plan 模式（feature: `plan_mode`）
 
-| `t` | 字段 | 说明 |
+照 Claude Code：**plan 模式是会话的一种权限模式，不是另一条执行链路**。模式由服务端持有，
+界面只负责切和画。
+
+| `t` | 方向 | 字段 | 说明 |
+|---|---|---|---|
+| `set_mode` | 界面 → 服务端 | `mode`（`normal` / `plan`） | Shift+Tab。忙的时候也能切，正在跑的那一轮下一步请求时菜单就换了 |
+| `mode` | 服务端 → 界面 | `mode` | 模式变了，广播；和眼下一样时只回给发命令的那个，让它的显示对上 |
+| `plan_confirm_request` | 服务端 → 界面 | `id` `kind` `plan?` | 等用户拍板，必须回 `plan_confirm_reply`，900 秒不回按否决 |
+| `plan_confirm_reply` | 界面 → 服务端 | `id` `approved` `feedback?` | 否决时可以附一句话，原话交还给模型 |
+
+plan 模式下主 agent 的菜单只剩**看的**工具（读、搜、联网读、读记忆、读技能、`tool_search`），
+外加派子 agent——但只能派 `explorer`。bash 和 MCP 工具不在里面：它们会不会改东西没法从名字上判断。
+`prompt` 照常发，不再有单独的 `plan` 命令；`user_message.mode` 是那一刻的模式。
+
+`plan_confirm_request.kind` 两种：
+
+| `kind` | 什么时候 | 界面该给什么 |
 |---|---|---|
-| `plan_created` | `goal` `tasks[]` `layers[][]` | 规划产出，见下 |
-| `plan_confirm_request` | `id` | 等界面确认，必须回 `plan_confirm_reply` |
-| `plan_task_started` | `taskId` `taskType` `role` `roleTitle` `description` | `role` 见 3.13 |
-| `plan_task_finished` | `taskId` `status` `durationMs` `result` `error` | `result`/`error` 可能是 `null` |
-| `plan_tasks_added` | `parentId` `tasks[]` | 图长大了，见 3.5 |
-| `plan_revised` | `failedTaskId` `tasks[]` | 某一步失败后补出了救场任务，见 3.6 |
-| `plan_finished` | `status` `succeeded` `failed` `skipped` `replans` `durationMs` | 用户否决时只有 `status` |
+| `enter` | 普通模式下模型调了 `enter_plan_mode`，**提议**先规划 | 是 / 否。同意才切进 plan 模式 |
+| `exit` | plan 模式下模型调研完，调 `exit_plan_mode` 交上计划，`plan` 是 Markdown 全文 | 批准 / 不批准并说说要改什么 / 不批准 |
 
-`plan_created`：
+批准 `exit` 之后服务端发 `mode: normal`，**还是同一个 agent、同一段对话接着照计划动手**——
+调研时读过的东西都在上下文里，不用转述给谁。否决不是失败：模型留在 plan 模式里按意见改了再交。
+没有界面连着时按否决：照一份没人看过的计划动手，正是这个特性想避免的事。
 
-```json
-{
-  "t": "plan_created",
-  "goal": "模型用自己的话复述的目标，界面要显眼地展示——用户靠它判断有没有理解偏",
-  "tasks": [
-    {"id": "t1", "type": "FILE_READ", "role": "explorer", "roleTitle": "调研",
-     "description": "读 pom.xml",
-     "acceptance": "说清 Java 版本是多少",
-     "status": "PENDING", "parentId": null, "dependsOn": []},
-    {"id": "t3", "type": "FILE_WRITE", "role": "coder", "roleTitle": "编码",
-     "description": "按 {{t1}} 查到的版本改 X",
-     "acceptance": "X 里的版本号和 pom 一致",
-     "status": "PENDING", "parentId": null, "dependsOn": ["t1", "t2"]}
-  ],
-  "layers": [["t1", "t2"], ["t3"]]
-}
-```
+模式规矩、hook 补的上下文、`/技能` 的正文，都以 `<system-reminder>…</system-reminder>` 块拼在
+那句用户消息前面发给模型。会话恢复时摊回来的 `transcript`（3.9）会把这些块剥掉，只留用户原话。
 
-**`layers` 是服务端算好的拓扑分层**，同一层内部互不依赖。界面直接照着画，
-不要自己按 `dependsOn` 再推一遍——那等于把同一套图算法在两种语言里各实现一次，
-迟早有一边算错。
+### 3.5 用户提交 hook
 
-**`acceptance` 是这一步的完成标准**，可能是 `null`（老计划、或模型没给）。
-它回答的是「做到什么算完」，和 `description` 的「做什么」是两件事，值得单独显示——
-用户看一眼就知道这一步的验收线划在哪儿。
-
-**`description` 和 `acceptance` 里可能出现 `{{t1}}` 这样的占位符**，表示「这里要填上
-t1 的产出」。**界面原样显示就行**，不要试图自己替换——真正的产出要等 t1 跑完才有，
-替换发生在服务端执行那一步之前。占位符引用的任务一定在 `dependsOn` 里，这条由服务端保证。
-
-**`role` 是派给这一步的角色**，`roleTitle` 是它的中文名（见 3.13）。
-`type` 仍然照发，两者回答的不是同一个问题：`type` 说「这一步会对世界做什么」，
-`role` 说「派谁去、用什么姿势」。同一个 `FILE_READ` 底下既可能是 `explorer` 也可能是
-`reviewer`——**只认 type 的界面会把这两件事画成一样的**。
-
-`taskType` 六种：`PLANNING` `FILE_READ` `FILE_WRITE` `COMMAND` `ANALYSIS` `VERIFICATION`
-`status` 五种：`PENDING` `RUNNING` `SUCCEEDED` `FAILED` `SKIPPED`
-计划 `status` 五种：`CREATED` `RUNNING` `COMPLETED` `FAILED` `CANCELLED`
-
-### 3.5 执行期间图会长大
-
-`PLANNING` 类型的任务跑完会**拆出一批子任务插进图里**，这时发 `plan_tasks_added`：
+用户在 `~/.myagent/settings.json` 或工作区 `.myagent/settings.json` 里配的 `UserPromptSubmit` hook
+（格式和 Claude Code 一样）每句话都会先跑一遍。出事了才发：
 
 ```json
-{"t":"plan_tasks_added","parentId":"t1",
- "tasks":[{"id":"t1.1","type":"FILE_WRITE","role":"coder","roleTitle":"编码",
-           "description":"改 A",
-           "status":"PENDING","parentId":"t1","dependsOn":[]}]}
+{"t":"hook","blocked":true,"message":"消息里有密钥，没发出去"}
 ```
 
-界面要把它们**就地插到父任务下面**，而不是重画整张图。
-子任务最多再拆一层（不会有「孙子任务」），单批最多 5 个。
+`blocked: true` 是这句话被拦下了，模型看不到它，紧接着就是 `busy:false`；
+`blocked: false` 是 hook 自己出了问题（非 0/2 的退出码、超时），这句话照常发出，`message` 当警告显示。
 
-### 3.6 失败之后会重规划（feature: `replan`）
+### 3.6 DAG 计划（已移除）
 
-一步失败时，服务端**不一定就此收摊**。它会把「原目标 + 已经做成的产出 + 失败原因 +
-被连累跳过的活」交回模型，让它补出接下来该走的几步，然后发 `plan_revised`：
+以前的 plan 模式是另一条链路：规划器把目标拆成任务图，确认后按角色逐个派、能并行，
+失败了还会补救场任务。`plan_created` `plan_task_started` `plan_task_finished` `plan_tasks_added`
+`plan_revised` `plan_finished` 这几条事件和 feature `plan` `replan` **都不再发**，
+命令 `plan` 也不再认。界面收到老后端发来的这些，照旧画或者忽略都行。
 
-```json
-{"t":"plan_revised","failedTaskId":"t3",
- "tasks":[{"id":"r1","type":"FILE_READ","role":"explorer","roleTitle":"调研",
-           "description":"查清 App.java 的真实位置",
-           "acceptance":"给出实际路径","status":"PENDING","parentId":null,"dependsOn":[]}]}
-```
+换成 3.4 的理由：同一个 agent 照着批准的计划做，调研时摸到的情况不会在转述里丢；
+拆图、派角色、合并产出这几道交接，评测里不提升完成率，只让过程慢、出了错难查。
 
-三条规矩：
+### 3.7 断点续跑（已移除）
 
-| 规矩 | 说明 |
-|---|---|
-| **一份计划只重规划一次** | 补救又失败就如实收场，不会没完没了 |
-| **补救任务的 id 以 `r` 开头**，且只依赖这批新任务内部 | 不会连回原计划里已经废掉的节点 |
-| **模型可以交白卷** | 判断这事儿做不成时不发 `plan_revised`，直接按原样收场 |
-
-**和 `plan_tasks_added` 的区别要画出来**：后者是计划**按原样长大**（PLANNING 任务拆下一层），
-前者是**原路走不通、换了条路**。混成一种显示，用户就看不出计划中途拐过弯。
-
-`plan_finished` 里的 `replans` 是这一轮重规划了几次。**注意它和 `status` 的组合**：
-
-| 组合 | 含义 | 界面该怎么说 |
-|---|---|---|
-| `COMPLETED` + `replans: 0` | 一次跑通 | 计划完成 |
-| `COMPLETED` + `replans: 1` | **中途换过路，最后还是达成了** | 计划完成，但值得提一句绕过弯 |
-| `FAILED` + `replans: 1` | 补救也没救回来 | 计划未完成 |
-
-中间那种最容易报错：`failed` 计数大于 0（确实有一步红过），但目标达成了。
-**别按「failed > 0 就是失败」去显示**——服务端已经在 `status` 里下好结论了，照着它说。
-
-### 3.7 断点续跑（feature: `resume`）
-
-计划**每了结一个任务就存一次盘**（`~/.myagent/plans/`，一个工作区一份）。
-进程没了——崩溃、关终端、机器重启——下次连上来，`ready.resumable` 会带上那份存档的摘要。
-
-界面发 `{"t":"resume"}`，服务端把计划立回来，**走和新计划完全一样的那条路**：
-`plan_created` → `plan_confirm_request` → 确认后逐个任务跑。
-
-| 规矩 | 说明 |
-|---|---|
-| **续跑也要确认** | 隔了一段时间用户未必还记得当初让它干什么，代码也可能变了 |
-| **做成的步骤不重跑** | 它们在 `plan_created` 里就是 `SUCCEEDED`，产出也还在 |
-| **上次跑到一半的那一步会重跑** | 它没跑完，状态退回 `PENDING` |
-| **计划跑完（不管成没成）就删档** | 只有「被叫停」才留着 |
-
-**`cancel` 之后存档是留着的**：用户按停止多半是想先去干别的，不是不要了。
-所以一次 `cancel` 之后，下次 `ready` 里照样会有 `resumable`——
-界面该把「接着跑」一直摆在那儿，而不是只在启动时看一眼。
-
-存档认工作区：在别的目录连上来，哪怕文件名撞了也不会给你续——
-一份计划里的任务描述全是针对某个仓库写的。
+跟着 DAG 计划一起撤了：`resume` / `resume_plan` 命令、feature `resume` `resume_plan`、
+首帧的 `resumable` 都没有了。对话本身照样能接着做——断在半路的那一轮说一句「继续」就行，见 3.9。
 
 ### 3.8 简单任务不规划（已移除）
 
 以前服务端收到 `prompt` 时会先按字面判断「这句话该不该先拆计划」，判为该规划就发
 `mode_switched` 再转走 3.4 的流程（feature `auto_mode`）。**这套判断已经删掉**：`prompt` 一律直接对话，
-要先规划就由用户切到 plan 模式、发 `plan` 命令。
+要先规划，要么用户切到 plan 模式，要么模型调 `enter_plan_mode` 提议、用户同意（见 3.4）。
 
 删的理由是评测：同一个模型在 10~20 条要求的长任务上，不转走规划也全部做对；转走规划的那几次
 只是慢了 3~6 倍。这和 Claude Code、Codex 的做法一致——两家都不替用户自动切进计划模式。
@@ -645,7 +581,7 @@ t1 的产出」。**界面原样显示就行**，不要试图自己替换——�
 
 | 规矩 | 说明 |
 |---|---|
-| **不自动恢复** | 和计划续跑同理：隔了不知道多久，代码可能变了，用户也未必还记得当时在聊什么 |
+| **不自动恢复** | 隔了不知道多久，代码可能变了，用户也未必还记得当时在聊什么 |
 | **当前已经有对话时拒绝** | 恢复会把眼前这段冲掉，这个决定该由用户做。先 `reset` 再 `continue` / `session_resume` |
 | **`reset` 不删存档** | 清空的意思是「眼前这段我不要了」，不是「这段从来没发生过」。旧的留在历史里还能挑回来，`reset` 只是换一个新会话 id 从头记 |
 | **`session_resume` 的 id 可能已经失效** | 列出来到挑中之间隔着用户的思考时间，那段会话可能被另一个界面清掉了。回 `error`，不要静默失败 |
@@ -798,7 +734,9 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ### 3.13 角色（feature: `roles`）
 
-计划里的每一步都**派给一个角色**。角色决定三件事：执行这一步的子循环拿得到哪些工具、
+收尾审查（`MYAGENT_FINAL_REVIEW=1`）这类单独派出去的一步**派给一个角色**。
+DAG 计划撤了之后，名册只剩这一个用处，界面靠它给带 `task` 的事件标出是谁在做。
+角色决定三件事：执行这一步的子循环拿得到哪些工具、
 系统提示词里那段行事规矩是什么、最多跑几轮。所以「派了谁」是执行层的事实，
 不是显示用的标签。
 
@@ -818,7 +756,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 ]
 ```
 
-**为什么把名册整份发过去，而不是让界面自己写一张表**：和 `layers` 由服务端算好是
+**为什么把名册整份发过去，而不是让界面自己写一张表**：和协议里别的服务端算好的东西是
 同一个理由——同一份事实在两种语言里各写一遍，迟早有一边过期。这里过期的症状还特别隐蔽：
 后端加了个角色，界面不认得它的 id，那一步就显示成一个空标签，而其它一切正常。
 
@@ -831,14 +769,9 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 3. **`type` 和 `role` 都要用**。同一个 `FILE_READ` 底下既有 `explorer` 也有 `reviewer`，
    只画 type 的界面会把「去查清楚」和「去挑毛病」显示成同一件事。
 
-只读模式（`--readonly`）下，`mutates` 为 true 的角色一个都不会出现在计划里——
-规划提示词里就没有它们，产出还要再校验一遍。
-
 **名册上有，不等于这台机器上派得出去。** `browser` 角色的工具来自 MCP
-（`~/.myagent/mcp.json` 里配的浏览器 server），没配的机器上它手里一件工具都没有，
-规划提示词会把它整个藏起来，于是计划里永远不会出现 `role: "browser"`。
-`ready.roles` 仍然照发整份名册——界面不该按名册去猜「这台机器能干什么」，
-那是执行层的事实，只有计划里真出现过的 `role` 才算数。
+（`~/.myagent/mcp.json` 里配的浏览器 server），没配的机器上它手里一件工具都没有。
+`ready.roles` 仍然照发整份名册——界面不该按名册去猜「这台机器能干什么」。
 
 ---
 
@@ -855,7 +788,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 ### 3.15 检查点与回退（feature: `rewind`，兼容 `undo`）
 
-形状照 Claude Code：**每条会动手的命令（`prompt` / `plan` / `continue`）开跑前**拍一个检查点，
+形状照 Claude Code：**每条会动手的命令（`prompt` / `continue`）开跑前**拍一个检查点，
 绑在会话和那一刻的对话长度上；`/rewind` 可以只回代码、只回对话、或者都回。
 
 快照存在影子 git 仓库（`~/.myagent/snapshot/<工作区哈希>/`，裸仓库，只产生 tree 对象，
@@ -880,7 +813,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 ```
 
 - `kind`：`turn` 是一轮开跑前拍的；`tool` 是一次**会动手**的工具调用（写文件、bash、MCP 等，
-  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和计划的子任务都拍。
+  只读工具不拍）执行前拍的，`label` 是工具名加路径/命令。主对话和子 agent 都拍。
   工具级的点如果和清单里上一个点的文件内容完全相同（比如中间只跑了测试），不进清单。
   老界面不认这个字段也无妨：清单照样能用，只是长了。`undo` 和 `id` 为 0 的 `rewind` 撤销的是**上一轮整轮**，不是上一步。
 - 回对话到工具级的点：记录截在「模型点了这个工具、结果还没回来」处，后端把没有结果的调用补成
@@ -900,7 +833,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 两个界面各自把「我刚说的那句」写进自己的转录，然后发一条 `prompt` 给后端——
 于是手机上说的话，终端里只会凭空冒出一段回答；反过来也一样。
 
-所以后端在接受 `prompt` / `plan` 时**广播一条 `user_message`**：
+所以后端在接受 `prompt` 时**广播一条 `user_message`**：
 
 ```json
 {"t":"user_message","seq":42,"text":"把 README 补全","mode":"plan","cid":"a3f9"}
@@ -909,7 +842,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | 字段 | 说明 |
 |---|---|
 | `text` | 用户原话 |
-| `mode` | `normal` / `plan`，这句话是按哪种方式跑的 |
+| `mode` | `normal` / `plan`，说这句话时会话处在哪种模式（见 3.4） |
 | `cid` | **发起方的连接 id**（客户端连上时自己生成的随机串） |
 
 #### `cid` 是干什么的
@@ -923,7 +856,7 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 持久化的话，客户端重启后会把自己以前说过的每一句话都当成「本地已经有了」而跳过，
 转录就缺一半，而且缺得毫无征兆。
 
-客户端发 `prompt` / `plan` 时带上自己的 `cid`；不带也能用，
+客户端发 `prompt` 时带上自己的 `cid`；不带也能用，
 只是发起方会看到自己那句话显示两遍（一次本地、一次回显）。
 
 ### 3.17 带图（feature: `images`）
@@ -942,7 +875,6 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `data` | 原图的 base64，不带 `data:` 前缀 |
 | 上限 | 一句最多 10 张，单张解码后 10 MB。超了回 `error`，这一轮不开跑 |
 | 只有图没有字 | 允许，`text` 可以是空串 |
-| `plan` | 不收图。界面在计划模式下拦住带图的提交 |
 
 图跟着那条 user 消息进对话记录和会话存档，之后每一步请求都会连同历史再发一遍，和文字一样。
 存档里用的是 OpenAI 的写法：带图的消息 `content` 是 `[{type:"text"}, {type:"image_url"}...]` 数组，
@@ -958,12 +890,10 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `t` | 字段 | 说明 |
 |---|---|---|
 | `prompt` | `text` `cid?` `images?` | 普通一轮对话。`cid` 见 3.16，`images` 见 3.17 |
-| `plan` | `goal` `cid?` | 先规划后执行 |
-| `plan_confirm_reply` | `id` `approved`(bool) | 回应 `plan_confirm_request` |
+| `set_mode` | `mode`: `normal` \| `plan` | 切会话模式（feature: `plan_mode`），见 3.4。只读启动时回 `error` |
+| `plan_confirm_reply` | `id` `approved`(bool) `feedback?` | 回应 `plan_confirm_request`。否决时附的话原样交给模型，见 3.4 |
 | `approval_reply` | `id` `decision`: `yes` \| `no` \| `always`，`rules[]`（可选），`feedback`（可选） | 回应 `approval_request`。见 3.3 |
 | `cancel` | — | 中断当前这一轮 |
-| `resume_plan` | — | 接着跑上次没跑完的计划，见 3.7。没有存档时回 `error` |
-| `resume` | — | `resume_plan` 的老名字，仍然接受。那会儿只有计划能续，现在 `/resume` 在终端里指的是挑会话，所以协议这边改叫 `resume_plan`；改名不该让还没更新的界面连不上 |
 | `continue` | — | 接**最近**那段会话，见 3.9。没有存档、或当前已有对话时回 `error` |
 | `sessions` | — | 要会话历史列表，回 `session_list`。见 3.9 |
 | `session_resume` | `id` | 按 id 接一段历史会话，见 3.9。id 认不出、找不到、或当前已有对话时回 `error` |
@@ -972,44 +902,49 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 | `reset` | — | 清空对话历史、换一段新会话。**不删旧存档**。忙的时候会被拒 |
 | `ping` | — | 保活 |
 
-字段缺失或类型不对一律退回默认值，不会让服务端崩。未知 `t` 回一条 `error`。
+字段缺失或类型不对一律退回默认值，不会让服务端崩。未知 `t` 回一条 `error`——
+已经撤掉的 `plan` / `resume` / `resume_plan` 也是（见 3.6、3.7）。
+
+`/技能名 参数` 不是单独的命令，照 `prompt` 发，服务端认出来再展开（见 3.1 的 `skills`）。
 
 ---
 
-## 5. 一轮完整的计划时序
+## 5. 一轮完整的 plan 模式时序
 
 ```
-界面 → {"t":"plan","goal":"给 Task 加上重试能力"}
-后端 → {"t":"busy","busy":true}
-       {"t":"plan_created","goal":"…","tasks":[…],"layers":[["t1","t2"],["t3"]]}
-       {"t":"plan_confirm_request","id":1}
+界面 → {"t":"set_mode","mode":"plan"}
+后端 → {"t":"mode","mode":"plan"}
+界面 → {"t":"prompt","text":"给 Task 加上重试能力"}
+后端 → {"t":"user_message","text":"给 Task 加上重试能力","mode":"plan",…}
+       {"t":"busy","busy":true}
+       {"t":"thinking","step":1}                 ← 只读调研，照常发 ReAct 事件
+       {"t":"tool_started","id":7,"tool":"read_file",…}
+       {"t":"tool_finished","id":7,…}
+       …
+       {"t":"tool_started","id":12,"tool":"exit_plan_mode",…}
+       {"t":"plan_confirm_request","id":1,"kind":"exit","plan":"## 计划\n1. …"}
 
 界面 → {"t":"plan_confirm_reply","id":1,"approved":true}
 
-后端 → {"t":"plan_task_started","taskId":"t1",…}
-       {"t":"thinking","step":1}                 ← 执行期间照常发 ReAct 事件
-       {"t":"tool_started","id":7,"tool":"read_file",…}
-       {"t":"tool_finished","id":7,…}
-       {"t":"plan_task_finished","taskId":"t1","status":"SUCCEEDED",…}
-       {"t":"plan_tasks_added","parentId":"t1","tasks":[…]}   ← 仅 PLANNING 任务
+后端 → {"t":"plan_confirm_resolved","id":1}
+       {"t":"mode","mode":"normal"}
+       {"t":"tool_finished","id":12,"ok":true,…}
+       {"t":"tool_started","id":13,"tool":"edit_file",…}   ← 同一个 agent 接着照计划改
        …
-       {"t":"plan_task_finished","taskId":"t3","status":"FAILED",…}
-       {"t":"plan_revised","failedTaskId":"t3","tasks":[…]}   ← 某步失败且补得回来时才有
-       …
-       {"t":"plan_finished","status":"COMPLETED","succeeded":7,"failed":1,"skipped":0,"replans":1,…}
+       {"t":"done",…}
        {"t":"busy","busy":false,"durationMs":42627}
 ```
 
-**执行期间的 ReAct 事件按 `task` 字段归属**（见 3.2）。互不依赖的只读任务会并行执行，
-几条线的事件交错到达，「最近一条 `plan_task_started`」不再可靠；会动世界的任务
-（`FILE_WRITE` / `COMMAND` / `VERIFICATION` 角色）独占运行，同一时刻只有它一个在动。
+不先切模式也能走到这一步：普通模式下模型觉得该先规划，会调 `enter_plan_mode`，
+后端发 `plan_confirm_request`（`kind:"enter"`），用户同意后发 `mode: plan`，接下来同上。
 
-用户否决时：
+用户否决计划时：
 
 ```
-界面 → {"t":"plan_confirm_reply","id":1,"approved":false}
-后端 → {"t":"plan_finished","status":"CANCELLED"}      ← 注意：没有那三个计数字段
-       {"t":"busy","busy":false,…}
+界面 → {"t":"plan_confirm_reply","id":1,"approved":false,"feedback":"别动数据库那层"}
+后端 → {"t":"plan_confirm_resolved","id":1}
+       {"t":"tool_finished","id":12,"ok":true,…}     ← 结果里是用户的意见，模型改了再交
+       …
 ```
 
 ---
@@ -1018,50 +953,32 @@ system 是每轮请求的第 0 条，里面有工作区路径**以及长期记�
 
 | 情况 | 后端行为 | 界面该怎么办 |
 |---|---|---|
-| 正忙时又发 `prompt`/`plan` | 回 `error`，不排队 | 提示用户，或先发 `cancel` |
+| 正忙时又发 `prompt` | 回 `error`，不排队 | 提示用户，或先发 `cancel` |
 | `plan_confirm_reply` 的 `id` 对不上 | 静默丢弃（过期回答） | 用最近一次 `plan_confirm_request` 的 id |
-| 计划确认超过 900 秒没回 | 按否决处理，发 `plan_finished` | — |
-| 没有任何连接时需要确认 | 直接否决，不执行 | — |
-| `cancel` | 调度器不再开新任务、掐断正在跑的子循环和规划请求 | 正在跑的那个任务会变 `FAILED`，其余 `SKIPPED` |
-| 某个任务超时（默认不限时；调用方显式设了时限才会发生） | 按这一步失败处理，发 `plan_task_finished`（`status:FAILED`、`error` 里写明超时） | 和别的失败一样显示；下游会收到 `SKIPPED` |
+| plan 确认超过 900 秒没回 | 按否决处理，模型收到「没有批准」 | — |
+| 没有任何连接时需要确认 | 直接否决，不切模式、不动手 | — |
+| `cancel` 时正卡在 plan 确认上 | 按否决放行，这一轮随即收尾 | 收掉确认框 |
 | 并行工具调用整批超时（默认 60 秒） | 超时那个发 `tool_finished`（`ok:false`），其余照常收 | 那一行标失败，别继续转圈 |
-| 规划失败（模型连 3 次给不出可用计划） | 发 `failed`，带原因 | 照常显示错误 |
-| 某步失败、且补得回来 | 发 `plan_revised`，补救任务接着跑 | 把新任务插进去，标明这是改道 |
-| 某步失败、但模型判断补不了 | 不发 `plan_revised`，照原样收场 | 照常显示失败 |
-| 重规划本身挂了（调用失败、给的图不合法） | 静默忽略，照原样收场 | 界面无感，和没配重规划一样 |
-| `resume_plan` 但没有存档 | 回 `error` | `ready.resumable` 不存在时就别放出这个入口 |
+| hook 拦下了这句话 | 发 `hook`（`blocked:true`），不发给模型 | 把理由显示出来 |
 | `session_resume` 的 id 已经没了 | 回 `error` | 列表和挑中之间隔着用户的思考时间，别假设它还在 |
 | 存档读不出来 / 格式过期 | 当作没有存档 | 同上 |
-| 存不下（磁盘满、只读） | 计划照跑，只是断了续不上 | 界面无感 |
-| 没配 API key | `plan`/`prompt` 回 `error` | `ready.hasApiKey` 为 false 时就该禁用输入 |
-
-**取消的语义要分清**：计划整体是 `CANCELLED`（用户叫停），不是 `FAILED`（跑砸了）。
-界面上这两种应该长得不一样——前者不是错误。
+| 没配 API key | `prompt` 回 `error` | `ready.hasApiKey` 为 false 时就该禁用输入 |
 
 ---
 
 ## 7. 给界面实现者的几条提醒
 
-1. **`goal` 要显眼**。它是模型用自己的话复述的理解，用户看一眼就能判断方向对不对，
-   在这儿毙掉只花一次规划的钱，跑完再发现代价是十倍。
-2. **同层任务要能看出是并列的**。后端已经按层并行执行（只读任务同时跑，
-   写任务独占），`layers` 表达的「这几步互不依赖」如今就是实际的执行形状。
-3. **`plan_task_finished` 的 `error` 要露出来**。`SKIPPED` 的 error 写的是
-   「上游 xx 失败」，用户靠它知道该去看谁。
-4. **别缓存任务列表当不可变**。`plan_tasks_added` 会往里插。
-5. **确认框不要做「本次都同意」**。每份计划都不一样，一次性授权掉后面所有计划
-   是危险的——审批（`approval_request`）有 `always`，计划确认刻意没有。
-6. **`acceptance` 值得单独显示**。用户在确认计划那一刻，看的不只是「要做什么」，
-   更是「做到什么算完」——验收线划歪了，比步骤拆错更难在事后发现。
-7. **`{{t1}}` 原样显示**，别自己替换，理由见 3.4。
-8. **改道要和长大画得不一样**。`plan_revised` 说明原路走不通，
-   这是用户最该注意的一刻；`plan_tasks_added` 只是计划照常展开。
-9. **「接着跑」要常驻，不是只在启动时提一句**。`cancel` 之后存档还在，
-   用户随时可能回来接着跑；只在首帧提示的话，他中断一次就再也找不到入口了。
-10. **确认框的交互态别放在组件里**。矮终端上那个框可能压根不渲染，而后端还等着。
+1. **计划全文要能读完**。`exit` 的 `plan` 是用户决定批不批的唯一依据，
+   框里放不下就提示往哪儿看全文，别截了之后不说。
+2. **否决要能附一句话**。「不批准」只告诉模型不行，「别动数据库那层」才告诉它怎么改。
+3. **模式以服务端为准**。本地可以先切过去显示，但最后照 `mode` 事件画——
+   模型提议、用户在另一块屏上同意，模式也会变。
+4. **确认框不要做「本次都同意」**。每份计划都不一样，一次性授权掉后面所有计划
+   是危险的——审批（`approval_request`）有 `always`，plan 确认刻意没有。
+5. **确认框的交互态别放在组件里**。矮终端上那个框可能压根不渲染，而后端还等着。
     状态跟着组件走的话，那种终端上按 `a` 会没有任何反应，用户不知道为什么。
     按键处理也是同一条纪律——这两件事从 Ink 版起就吃过亏。
-11. **`preview` 有多长就画多长是不行的**，它会把上面的对话顶出屏幕。
+6. **`preview` 有多长就画多长是不行的**，它会把上面的对话顶出屏幕。
     裁了要说「还有 N 行没显示」：悄悄少给的时候，人以为自己看到了全部，然后按了同意。
-12. **`suggestions` 为空时别画「以后都同意」那个键**。空数组是后端在说
+7. **`suggestions` 为空时别画「以后都同意」那个键**。空数组是后端在说
     「这次记不成规则」，画出来只会让用户按一个没有反应的键。
