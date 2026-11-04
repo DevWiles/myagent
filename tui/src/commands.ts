@@ -8,6 +8,10 @@
  * 而且 agent 可能当场动手改仓库——`/resume` 打上去，它会一本正经地
  * 去读仓库、翻提交记录，试图搞懂你要它「恢复」什么。
  *
+ * <h3>技能也在菜单里</h3>
+ * 后端在首帧里给出用户能点的技能（`ready.skills`），`/技能名 参数` 照原样当一句话发出去，
+ * 由后端把技能正文展开给模型（照 Claude Code 的 skill 斜杠命令）。名字和内置命令撞了时内置的赢。
+ *
  * <h3>规划为什么不在这张表里</h3>
  * 它不是命令，是<b>模式</b>（Shift+Tab 切，左下角常驻显示）。
  * 同一句话在哪个模式下跑，是一个**看得见的状态**；而命令是转瞬即逝的动作——
@@ -15,7 +19,7 @@
  * 两套入口并存的话还有个更糟的：屏幕左下角写着 normal，实际却跑了一份计划。
  *
  * <h3>纯函数，不碰渲染</h3>
- * 和 `plan-layout`、`markdown-blocks` 同一个路子：命令能不能用取决于
+ * 和 `markdown-blocks` 同一个路子：命令能不能用取决于
  * 后端宣告了什么能力、有没有存档，这些组合用断言测比手动敲一遍可靠得多。
  */
 
@@ -25,15 +29,14 @@ export type CommandContext = {
   features: string[]
   /** 有没有可以接着聊的会话（`ready.continuable`）。 */
   hasContinuable: boolean
-  /** 有没有没跑完的计划（`ready.resumable`）。 */
-  hasResumablePlan: boolean
+  /** 用户能用 `/名字` 点的技能（`ready.skills`）。 */
+  skills: readonly { id: string; description: string }[]
 }
 
 export type CommandId =
   | "help"
   | "continue"
   | "resume"
-  | "resume-plan"
   | "compact"
   | "undo"
   | "rewind"
@@ -70,10 +73,9 @@ type CommandSpec = {
   /**
    * 名字先占下来，功能还没做。这里写「为什么现在不行、该用什么替代」。
    *
-   * <p>为什么要占：`/resume` 是 `/resume-plan` 的唯一前缀，不占的话
-   * 敲 `/resume` 会被前缀规则<b>悄悄解析成「续跑计划」</b>——
-   * 而这个名字在终端里指的是「挑一段会话」。用户以为在挑会话，
-   * 实际上启动了一份旧计划，这种错比「没这个命令」严重得多。
+   * <p>为什么要占：一个名字只要是另一条命令的唯一前缀，不占的话
+   * 敲它会被前缀规则<b>悄悄解析成那一条</b>——用户以为在干这件事，
+   * 实际上干了另一件，这种错比「没这个命令」严重得多。
    */
   pending?: string
 }
@@ -100,15 +102,6 @@ const SPECS: CommandSpec[] = [
     anyFeature: ["sessions"],
     // 不要求「有存档」：没有存档时面板会自己说这个工作区还没有会话，
     // 那比让命令灰着更容易懂——用户想知道的是「我有没有历史」，而这正是答案
-  },
-  {
-    id: "resume-plan",
-    name: "/resume-plan",
-    description: "接着跑上次没跑完的计划（做成的步骤不重来）",
-    // resume 是老名字。后端两个都认，界面也就都接受——连的可能是个旧后端
-    anyFeature: ["resume_plan", "resume"],
-    ready: (ctx) => ctx.hasResumablePlan,
-    notReady: "上次没有留下没跑完的计划",
   },
   {
     id: "compact",
@@ -196,7 +189,8 @@ export function statusLines(ready: {
 }
 
 export type CommandEntry = {
-  id: CommandId
+  /** 内置命令的 id；`skill` 表示这是一份技能，回车时整句当提示词发出去 */
+  id: CommandId | "skill"
   name: string
   args?: string
   description: string
@@ -217,7 +211,7 @@ export type CommandEntry = {
  * <p>斜杠后面允许是空的：光敲下一个 `/` 的那一刻菜单就该弹出来，
  * 那时候还没有任何字母可匹配。
  */
-const COMMAND_SHAPE = /^\/[A-Za-z0-9-]*$/
+const COMMAND_SHAPE = /^\/[A-Za-z0-9_.:-]*$/
 
 /** 这条命令此刻可用吗，不可用的话理由是什么。 */
 function assess(spec: CommandSpec, ctx: CommandContext): CommandEntry {
@@ -241,9 +235,18 @@ function assess(spec: CommandSpec, ctx: CommandContext): CommandEntry {
   return { ...base, available: true }
 }
 
-/** 全部命令，带上「此刻能不能用」。给 `/help` 和菜单用。 */
+/** 全部命令，带上「此刻能不能用」，技能排在内置命令后面。给 `/help` 和菜单用。 */
 export function listCommands(ctx: CommandContext): CommandEntry[] {
-  return SPECS.map((spec) => assess(spec, ctx))
+  const builtin = SPECS.map((spec) => assess(spec, ctx))
+  const taken = new Set(builtin.map((entry) => entry.name))
+  const skills: CommandEntry[] = []
+  for (const skill of ctx.skills) {
+    const name = `/${skill.id}`
+    if (taken.has(name) || !COMMAND_SHAPE.test(name)) continue
+    taken.add(name)
+    skills.push({ id: "skill", name, description: skill.description || "（技能）", available: true })
+  }
+  return [...builtin, ...skills]
 }
 
 /** 输入的第一个词。 */
@@ -280,7 +283,7 @@ export function filterCommands(text: string, ctx: CommandContext): CommandEntry[
     return []
   }
   const head = firstWord(text).toLowerCase()
-  return listCommands(ctx).filter((entry) => entry.name.startsWith(head))
+  return listCommands(ctx).filter((entry) => entry.name.toLowerCase().startsWith(head))
 }
 
 /**
@@ -296,11 +299,11 @@ export function matchCommand(text: string, ctx: CommandContext): CommandEntry | 
   }
   const head = firstWord(text).toLowerCase()
   const all = listCommands(ctx)
-  const exact = all.find((entry) => entry.name === head)
+  const exact = all.find((entry) => entry.name.toLowerCase() === head)
   if (exact) {
     return exact
   }
-  const prefixed = all.filter((entry) => entry.name.startsWith(head))
+  const prefixed = all.filter((entry) => entry.name.toLowerCase().startsWith(head))
   return prefixed.length === 1 ? prefixed[0]! : null
 }
 

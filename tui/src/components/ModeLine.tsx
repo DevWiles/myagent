@@ -12,7 +12,7 @@ import type { Mode } from "../store.ts"
  * <p>所以 normal 那行画得很淡（`inactive`），存在感低到不碍事，但一直在。
  *
  * <h3>为什么颜色要跟着模式变</h3>
- * 「我以为我在 normal，结果它拆了一份计划」和「我以为在 plan，结果它直接动手改了文件」
+ * 「我以为我在 normal，结果它只调研不动手」和「我以为在 plan，结果它直接动手改了文件」
  * 是这个交互最容易出的两种事故，而且<b>都要等到结果出来才发现</b>。
  * 颜色是眼睛在打字时唯一会顺带扫到的信号——比多一行字管用。
  */
@@ -21,7 +21,7 @@ type Descriptor = { label: string; hint: string; marker: string }
 
 const MODES: Record<Mode, Descriptor> = {
   normal: { label: "normal", hint: "直接对话", marker: "·" },
-  plan: { label: "plan", hint: "先拆计划，确认后逐个跑", marker: "⏵⏵" },
+  plan: { label: "plan", hint: "只调研、出计划，批准了才动手", marker: "⏸" },
 }
 
 export function ModeLine(props: { mode: Mode; columns: number }) {

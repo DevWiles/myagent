@@ -1,7 +1,7 @@
 /**
  * 顶层界面。
  *
- * 布局自上而下：欢迎框 → 对话区 → 输入框 → 计划面板 → 状态栏。
+ * 布局自上而下：欢迎框 → 对话区 → 输入框 → 状态栏。
  * 伸缩交给 Yoga 算，不自己数行数——自己算视口高度是 Ink 版早期踩过的坑，
  * 终端一缩放就错位。
  *
@@ -41,7 +41,7 @@ import {
   type CommandContext,
   type CommandEntry,
 } from "../commands.ts"
-import { askChoices, digitIndex, PLAN_CHOICES, type AskChoice } from "../approval.ts"
+import { askChoices, digitIndex, planChoices, type AskChoice, type PlanChoice } from "../approval.ts"
 import { qrText } from "../qr.ts"
 import { copyToClipboard } from "../clipboard.ts"
 import { clampSelection, filterSessions, type PickerFilter } from "../session-picker.ts"
@@ -49,7 +49,6 @@ import { ApprovalDialog } from "./ApprovalDialog.tsx"
 import { CommandMenu } from "./CommandMenu.tsx"
 import { EntryView } from "./EntryView.tsx"
 import { PlanConfirmDialog } from "./PlanConfirmDialog.tsx"
-import { PlanPanel } from "./PlanPanel.tsx"
 import { ModeLine } from "./ModeLine.tsx"
 import { isNewlineKey, PromptInput } from "./PromptInput.tsx"
 import { SessionPicker } from "./SessionPicker.tsx"
@@ -123,45 +122,9 @@ export function App(props: AppProps) {
   }
 
   /**
-   * 底部面板要显示的那份计划。
-   *
-   * <p>从 transcript 里按 key 取，而不是另存一份——两份状态各更新各的，
-   * 迟早出现「面板上还是 PENDING，滚上去那份已经打勾了」。
-   */
-  const activePlan = () => {
-    const key = state().activePlanKey
-    if (!key) return null
-    const entry = state().entries.find(item => item.key === key)
-    return entry && entry.kind === "plan" ? entry.plan : null
-  }
-
-  /**
-   * 分给计划面板的行数。
-   *
-   * <p>面板占的每一行都是从对话区身上抢的，所以给它一个**硬预算**：屏幕的四成，
-   * 再多也不超过 16 行。没有上限的话，一份十几步的计划能把对话区挤到只剩一条缝——
-   * 而用户这时候想看的恰恰是正在跑的那一步的输出。
-   */
-  const planRows = () => Math.max(4, Math.min(16, Math.floor(dimensions().height * 0.4)))
-
-  /**
-   * 后端说这个工作区有没跑完的计划，而且它确实支持续跑。
-   *
-   * <p>两个条件都要查：老后端没有 resume 能力，这时候放出入口只会让用户敲了没反应。
-   */
-  const canResume = () =>
-    Boolean(state().ready?.resumable) &&
-    // resume_plan 是新名字，resume 是老的。连的可能是个旧后端，两个都认
-    Boolean(
-      state().ready?.features.includes("resume_plan") ||
-        state().ready?.features.includes("resume"),
-    )
-
-  /**
    * 后端说这个工作区有没聊完的对话，而且它确实支持恢复。
    *
-   * <p>两个条件都要查，理由同 canResume。和它是两件独立的事——
-   * 一个续计划、一个续对话，可能同时有，也可能只有一个。
+   * <p>两个条件都要查：老后端没有这个能力，这时候放出入口只会让用户敲了没反应。
    */
   const canContinue = () =>
     Boolean(state().ready?.continuable) && Boolean(state().ready?.features.includes("session"))
@@ -229,7 +192,9 @@ export function App(props: AppProps) {
 
   onCleanup(() => clearTimeout(copyHintTimer))
   /** Tab 补全要改输入框的内容，这只手由 PromptInput 挂载时交过来。 */
-  let inputControls: { setValue: (value: string) => void; pasteImage: () => void } | undefined
+  let inputControls:
+    | { setValue: (value: string) => void; pasteImage: () => void; submitText: (value: string) => void }
+    | undefined
 
   /** 对话区的滚动容器。展开/收起工具明细时要按住它的滚动位置（见 toggleToolEntry）。 */
   let transcriptScroll: ScrollBoxRenderable | undefined
@@ -285,7 +250,7 @@ export function App(props: AppProps) {
   const commandContext = (): CommandContext => ({
     features: state().ready?.features ?? [],
     hasContinuable: Boolean(state().ready?.continuable),
-    hasResumablePlan: Boolean(state().ready?.resumable),
+    skills: state().ready?.skills ?? [],
   })
 
   /**
@@ -315,22 +280,6 @@ export function App(props: AppProps) {
    * 在这之前，认不出来的命令会被当提示词发给模型——打错一个字的代价是
    * 一次真实的模型调用，加上一个可能开始改文件的 agent。
    */
-  /**
-   * 一句话按当前模式发出去。
-   *
-   * <p>模式在**提交这一刻**才起作用，不是打字时。所以用户可以先写完一长段，
-   * 再想起来「这该走规划」，Shift+Tab 一下再回车——不用重打。
-   */
-  /** 图只有 normal 能带：plan 模式下输入框会先拦住（见 PromptInput 的 allowImages） */
-  const sendByMode = (text: string, display?: string, images: ClipImage[] = []): void => {
-    switch (state().mode) {
-      case "plan":
-        session.plan(text, display)
-        return
-      default:
-        session.prompt(text, display, images)
-    }
-  }
 
   /** `display` 是输入框里看到的样子：大段粘贴还折在占位符里，转录照这个画。 */
   const submit = (value: string, display?: string, images: ClipImage[] = []): void => {
@@ -338,7 +287,8 @@ export function App(props: AppProps) {
     const decision = resolve(value, commandContext())
     switch (decision.kind) {
       case "prompt":
-        sendByMode(decision.text, display, images)
+        // plan 模式也是一句普通的话：模式在后端，它自己按模式收窄菜单（照 Claude Code）
+        session.prompt(decision.text, display, images)
         return
       case "unknown":
         session.notice("warn", `没有 ${decision.typed} 这个命令。敲一个 / 看有哪些，或者 /help。`)
@@ -353,7 +303,7 @@ export function App(props: AppProps) {
         )
         return
       case "command":
-        run(decision.entry.id, decision.args)
+        run(decision.entry, decision.args, display, images)
     }
   }
 
@@ -377,15 +327,27 @@ export function App(props: AppProps) {
         inputControls?.setValue(decision.text)
         return
       case "run":
+        if (decision.entry.id === "skill") {
+          // 技能会带着用户贴的长文和图发出去，不能像别的命令那样先清空输入框（图就跟着清没了）：
+          // 把整行换成「补全的名字 + 用户敲的参数」，走一遍正常提交，回到上面的 submit
+          inputControls?.submitText(decision.args ? `${decision.entry.name} ${decision.args}` : decision.entry.name)
+          return
+        }
         // 回车被我消费掉了，输入框不会自己清，这里得清
         inputControls?.setValue("")
-        run(decision.entry.id, decision.args)
+        run(decision.entry, decision.args)
     }
   }
 
-  /** 真正执行一条命令。 */
-  const run = (id: string, args: string): void => {
-    switch (id) {
+  /**
+   * 真正执行一条命令。技能不在本地执行：整句照原样发给后端，由它把技能正文展开给模型。
+   * `display` 和 `images` 只有技能用得上——它是唯一会作为一句话发出去的命令
+   */
+  const run = (entry: CommandEntry, args: string, display?: string, images: ClipImage[] = []): void => {
+    switch (entry.id) {
+      case "skill":
+        session.prompt(args ? `${entry.name} ${args}` : entry.name, display, images)
+        return
       case "help":
         session.notice("info", ["可以用的命令：", ...helpLines(commandContext())].join("\n"))
         return
@@ -404,9 +366,6 @@ export function App(props: AppProps) {
       case "resume":
         // 每次都重新问一次后端，不缓存：另一个界面可能刚聊了一轮、刚清过一段
         session.requestSessions()
-        return
-      case "resume-plan":
-        session.resumePlan()
         return
       case "compact":
         session.compact()
@@ -562,7 +521,7 @@ export function App(props: AppProps) {
       }
       case "decline-plan": {
         const confirm = state().planConfirm
-        if (confirm) session.confirmPlan(confirm.id, false)
+        if (confirm) session.confirmPlan(confirm.id, false, confirm.feedback ?? undefined)
         return
       }
       case "close-picker":
@@ -671,13 +630,28 @@ export function App(props: AppProps) {
     const confirm = state().planConfirm
     if (confirm) {
       consume()
+      // 补话那一步：回车带着这句话否决，Esc 不带话否决（和审批框一样）
+      if (confirm.feedback !== null) {
+        if (key.name === "return") return session.confirmPlan(confirm.id, false, confirm.feedback)
+        if (key.name === "escape") return session.confirmPlan(confirm.id, false)
+        session.typePlanFeedback(key)
+        return
+      }
+      const choices = planChoices(confirm.ask)
+      const commit = (choice: PlanChoice | undefined) => {
+        if (!choice) return
+        if (choice.key === "approve") return session.confirmPlan(confirm.id, true)
+        if (choice.key === "feedback") return session.askPlanFeedback()
+        return session.confirmPlan(confirm.id, false)
+      }
       if (key.name === "up") return session.movePlanChoice(-1)
       if (key.name === "down") return session.movePlanChoice(1)
-      if (key.name === "return") return session.confirmPlan(confirm.id, confirm.choice === 0)
+      if (key.name === "return") return commit(choices[confirm.choice])
       if (key.name === "escape") return session.confirmPlan(confirm.id, false)
       const picked = digitIndex(key)
-      if (picked !== null && picked < PLAN_CHOICES.length) {
-        return session.confirmPlan(confirm.id, picked === 0)
+      if (picked !== null && picked < choices.length) {
+        session.pickPlanChoice(picked)
+        return commit(choices[picked])
       }
       return
     }
@@ -859,22 +833,8 @@ export function App(props: AppProps) {
           </scrollbox>
         </box>
 
-        {/* 上次没跑完的计划。摆在输入框上方而不是塞进欢迎框里——
-            欢迎框会被对话顶上去滚走，而这条得一直看得见：
-            后端在「被叫停」之后是留着存档的，用户随时可能回来接着跑 */}
-        <Show when={canResume() && !state().busy}>
-          <box flexShrink={0} paddingLeft={1} flexDirection="row">
-            <text fg={dark.warning}>⏸ 上次有一份计划没跑完：</text>
-            <text fg={dark.text}>{state().ready!.resumable!.goal}</text>
-            <text fg={dark.subtle}>
-              （还剩 {state().ready!.resumable!.remaining} /{" "}
-              {state().ready!.resumable!.total} 步，输入 /resume-plan 接着跑）
-            </text>
-          </box>
-        </Show>
-
-        {/* 上次没聊完的对话，摆在计划那条下边。两条可能同时在——
-            一个续计划、一个续对话，各说各的，不该互相顶掉 */}
+        {/* 上次没聊完的对话。摆在输入框上方而不是塞进欢迎框里——
+            欢迎框会被对话顶上去滚走，而这条得一直看得见 */}
         <Show when={canContinue() && !state().busy}>
           <box flexShrink={0} paddingLeft={1} flexDirection="row">
             {/* 报总数而不是只说「上次聊过」：存档已经是一次会话一份，
@@ -920,7 +880,11 @@ export function App(props: AppProps) {
         <Show when={!state().approval && state().planConfirm}>
           {(confirm) => (
             <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <PlanConfirmDialog choice={confirm().choice} />
+              <PlanConfirmDialog
+                confirm={confirm()}
+                columns={dimensions().width - 2}
+                rows={dimensions().height}
+              />
             </box>
           )}
         </Show>
@@ -971,9 +935,7 @@ export function App(props: AppProps) {
           matched={matched()}
           controls={(api) => (inputControls = api)}
           imagesBlocked={
-            state().mode === "plan"
-              ? "计划模式还不支持带图。Shift+Tab 切回 normal 再发，或者删掉图片占位符"
-              : !(state().ready?.features ?? []).includes("images")
+            !(state().ready?.features ?? []).includes("images")
                 ? "连着的后端太老，收不了图（图会被丢掉、模型只看到占位符）。重启 myagent 升级后端，或者删掉图片占位符"
                 : undefined
           }
@@ -995,20 +957,6 @@ export function App(props: AppProps) {
           {(hint) => (
             <box flexShrink={0} paddingLeft={1} paddingRight={1}>
               <text fg={hint().ok ? dark.inactive : dark.warning}>{hint().text}</text>
-            </box>
-          )}
-        </Show>
-
-        {/* 计划面板钉在输入框下边：出现时把输入框往上顶，
-            执行完不收走——用户说下一句话才让位（见 store 的 activePlanKey） */}
-        <Show when={activePlan()}>
-          {(plan) => (
-            <box flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <PlanPanel
-                plan={plan()}
-                columns={dimensions().width - 2}
-                maxRows={planRows()}
-              />
             </box>
           )}
         </Show>

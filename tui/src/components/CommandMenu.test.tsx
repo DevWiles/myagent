@@ -11,11 +11,11 @@ import { testRender } from "@opentui/solid"
 import { CommandMenu } from "./CommandMenu.tsx"
 import { listCommands, type CommandContext } from "../commands.ts"
 
-/** 后端什么都支持，但只有没跑完的计划、没有存下来的会话。 */
+/** 后端什么都支持，但没有存下来的会话。 */
 const ctx: CommandContext = {
-  features: ["plan", "resume_plan", "session", "sessions"],
+  features: ["plan_mode", "session", "sessions"],
   hasContinuable: false,
-  hasResumablePlan: true,
+  skills: [],
 }
 
 async function frameOf(selected: number, columns = 80): Promise<string> {
@@ -31,7 +31,7 @@ async function frameOf(selected: number, columns = 80): Promise<string> {
 describe("命令菜单", () => {
   test("每条命令都画出来，带说明", async () => {
     const frame = await frameOf(0)
-    for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/compact", "/clear"]) {
+    for (const name of ["/help", "/continue", "/resume", "/scroll-speed", "/compact", "/clear"]) {
       expect(frame).toContain(name)
     }
     expect(frame).toContain("从会话历史里挑一段接着聊")
@@ -53,7 +53,7 @@ describe("命令菜单", () => {
 
   test("用不了的行只说原因，不把说明和原因套成两层括号", async () => {
     const frame = await frameOf(0, 120)
-    // 这个 fixture 里没有存档，所以 /continue 是灰的；/resume-plan 反倒是可用的
+    // 这个 fixture 里没有存档，所以 /continue 是灰的
     const row = frame.split("\n").find((l) => l.includes("/continue"))!
     expect(row).toContain("⊘")
     expect(row).toContain("还没有存下来的会话")
@@ -62,7 +62,7 @@ describe("命令菜单", () => {
 
   test("名字和说明之间一定有空格——最长那条曾经正好顶满列宽，挤成一团", async () => {
     const frame = await frameOf(0, 120)
-    for (const name of ["/resume-plan", "/compact", "/help", "/clear"]) {
+    for (const name of ["/scroll-speed", "/compact", "/help", "/clear"]) {
       const row = frame.split("\n").find((l) => l.includes(name))!
       const after = row.slice(row.indexOf(name) + name.length)
       expect(after.startsWith("  ")).toBe(true)
@@ -73,14 +73,26 @@ describe("命令菜单", () => {
     const frame = await frameOf(0, 46)
     const rows = frame.split("\n").filter((l) => l.trim())
 
-    // 每条命令都得在**同一行**上完整出现。折行的表现是 /resume-plan 被劈成
-    // 「/resume-」和「plan」两行，而按列数断言是抓不到的——折行之后每行反而更短了
-    for (const name of ["/help", "/continue", "/resume", "/resume-plan", "/memory", "/clear"]) {
+    // 每条命令都得在**同一行**上完整出现。折行的表现是 /scroll-speed 被劈成
+    // 「/scroll-」和「speed」两行，而按列数断言是抓不到的——折行之后每行反而更短了
+    for (const name of ["/help", "/continue", "/resume", "/scroll-speed", "/memory", "/clear"]) {
       expect(rows.filter((l) => l.includes(name)).length).toBeGreaterThan(0)
     }
-    // 十二条命令 + 一行键位提示 = 十三行，多出来的行就是折行折出来的
-    expect(rows).toHaveLength(13)
+    // 十一条命令 + 一行键位提示 = 十二行，多出来的行就是折行折出来的
+    expect(rows).toHaveLength(12)
     expect(frame).toContain("…")
+  })
+
+  test("技能和内置命令画在同一张菜单里，带它的说明", async () => {
+    const entries = listCommands({ ...ctx, skills: [{ id: "baguwen", description: "记八股文" }] })
+    const { renderOnce, captureCharFrame } = await testRender(
+      () => <CommandMenu entries={entries} selected={entries.length - 1} columns={80} />,
+      { width: 80, height: 16 },
+    )
+    await renderOnce()
+    const row = captureCharFrame().split("\n").find((l) => l.includes("/baguwen"))!
+    expect(row).toContain("❯")
+    expect(row).toContain("记八股文")
   })
 
   test("没有候选时一个字都不画", async () => {

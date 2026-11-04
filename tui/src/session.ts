@@ -5,7 +5,7 @@
  * 当初为 React 的 useSyncExternalStore 设计，但那个形状对 Solid 一样好使——
  * 订阅它，每次变更把新快照塞进一个 signal 就行。
  *
- * 这么做的价值不只是省事：协议有 20 多种事件、计划图还会中途长大，
+ * 这么做的价值不只是省事：协议有 20 多种事件，
  * 那套规约逻辑已经被 Ink 版的测试覆盖过了。迁移期最不该干的事就是
  * 把它按新框架重写一遍，然后用两套实现去追同一个后端。
  */
@@ -22,12 +22,8 @@ export type Session = {
   state: Accessor<SessionState>
   /** 发一轮普通对话。`display` 是转录里画的样子（大段粘贴折成占位符），不给就画 text */
   prompt: (text: string, display?: string, images?: ClipImage[]) => void
-  /** 先规划后执行。后端没宣告 plan 能力时不要调。 */
-  plan: (goal: string, display?: string) => void
-  /** 切到下一个模式（Shift+Tab）。后端没宣告的模式会被跳过。 */
+  /** 切到下一个模式（Shift+Tab），请后端照办。后端没宣告的模式会被跳过。 */
   cycleMode: () => void
-  /** 接着跑上次没跑完的计划。后端没宣告 resume_plan / resume 能力、或没有存档时不要调。 */
-  resumePlan: () => void
   /** 接着聊上次没聊完的对话。后端没宣告 session 能力、或没有存档时不要调。 */
   continueSession: () => void
   /** 要会话历史列表（打开选择器）。后端回 session_list。 */
@@ -58,13 +54,20 @@ export type Session = {
   pickChoice: (index: number) => void
   /** 计划确认框里挪光标 */
   movePlanChoice: (delta: number) => void
+  /** 计划确认框里数字键直选 */
+  pickPlanChoice: (index: number) => void
+  /** 计划确认框选了「我说说要改什么」 */
+  askPlanFeedback: () => void
+  /** 计划确认框补话那一步敲了个键。返回 true 表示这个键被吃掉了 */
+  typePlanFeedback: (key: { name?: string; sequence?: string }) => boolean
   /** 选了拒绝：进「补一句话」那一步 */
   askFeedback: () => void
   /** 在补话那一步敲了个键。返回 true 表示这个键被吃掉了 */
   typeFeedback: (key: { name?: string; sequence?: string }) => boolean
   /** 退回表态那一步 */
   resetApprovalStage: () => void
-  confirmPlan: (id: number, approved: boolean) => void
+  /** 回答 plan 模式确认。`feedback` 只在否决时有意义，原样交给模型 */
+  confirmPlan: (id: number, approved: boolean, feedback?: string) => void
   /** 现在就压一次上下文。原文留在存档里，压的只是发给模型的那份窗口。 */
   compact: () => void
   undo: () => void
@@ -246,22 +249,10 @@ export function createSession(options: BackendOptions): Session {
       store.submitPrompt(text, display)
       send({ t: "prompt", text, cid: store.clientId, ...(images && images.length > 0 ? { images } : {}) })
     },
-    plan(goal, display) {
-      // 记原话，不再伪造一个 `/plan ` 前缀：现在「走的是规划」这件事由左下角那行
-      // 常驻模式标识回答，而转录里紧跟着就是计划面板。
-      // 往用户说过的话里塞他没打过的字，是最容易让人怀疑「我刚才到底输了什么」的做法
-      store.submitPrompt(goal, display)
-      send({ t: "plan", goal, cid: store.clientId })
-    },
     cycleMode() {
-      store.cycleMode()
-    },
-    resumePlan() {
-      // 和 prompt 一样先记一条：从按回车到后端把计划捞回来有肉眼可见的停顿，
-      // 屏幕上什么都不留的话像是按键丢了
-      store.submitPrompt("/resume-plan")
-      // 发新名字。后端两个都认（老名字 resume 还留着），但界面该说新的那个
-      send({ t: "resume_plan" })
+      // 本地先切过去，按键当场有反应；后端回的 mode 事件是最终结果
+      const next = store.cycleMode()
+      if (next) send({ t: "set_mode", mode: next })
     },
     continueSession() {
       store.submitPrompt("/continue")
@@ -297,6 +288,15 @@ export function createSession(options: BackendOptions): Session {
     movePlanChoice(delta) {
       store.movePlanChoice(delta)
     },
+    pickPlanChoice(index) {
+      store.pickPlanChoice(index)
+    },
+    askPlanFeedback() {
+      store.beginPlanFeedback()
+    },
+    typePlanFeedback(key) {
+      return store.typePlanFeedback(key)
+    },
     askFeedback() {
       store.beginFeedback()
     },
@@ -306,9 +306,10 @@ export function createSession(options: BackendOptions): Session {
     resetApprovalStage() {
       store.resetApprovalStage()
     },
-    confirmPlan(id, approved) {
+    confirmPlan(id, approved, feedback) {
       store.clearPlanConfirm()
-      send({ t: "plan_confirm_reply", id, approved })
+      const said = feedback?.trim()
+      send({ t: "plan_confirm_reply", id, approved, ...(said ? { feedback: said } : {}) })
     },
     compact() {
       // 记一条：压缩要发模型调用，有肉眼可见的停顿，屏幕上不留痕像是按键丢了

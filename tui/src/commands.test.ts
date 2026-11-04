@@ -14,14 +14,14 @@ import {
 
 /** 后端啥都支持、存档也都有的情况。 */
 const full: CommandContext = {
-  features: ["plan", "replan", "resume", "resume_plan", "session",
+  features: ["plan_mode", "skills", "session",
     "sessions", "compact", "memory", "undo", "rewind"],
   hasContinuable: true,
-  hasResumablePlan: true,
+  skills: [],
 }
 
 /** 刚连上、什么存档都没有。 */
-const fresh: CommandContext = { ...full, hasContinuable: false, hasResumablePlan: false }
+const fresh: CommandContext = { ...full, hasContinuable: false }
 
 describe("看起来是不是命令", () => {
   test("/ 开头的单个词算", () => {
@@ -47,7 +47,6 @@ describe("边打边筛", () => {
       "/help",
       "/continue",
       "/resume",
-      "/resume-plan",
       "/compact",
       "/undo",
       "/rewind",
@@ -68,7 +67,7 @@ describe("边打边筛", () => {
     expect(filterCommands("/co", full).map((c) => c.name)).toEqual(["/continue", "/compact"])
     expect(filterCommands("/com", full).map((c) => c.name)).toEqual(["/compact"])
     expect(filterCommands("/cl", full).map((c) => c.name)).toEqual(["/clear"])
-    expect(filterCommands("/re", full).map((c) => c.name)).toEqual(["/resume", "/resume-plan", "/rewind"])
+    expect(filterCommands("/re", full).map((c) => c.name)).toEqual(["/resume", "/rewind"])
     expect(filterCommands("/rew", full).map((c) => c.name)).toEqual(["/rewind"])
   })
 
@@ -128,7 +127,7 @@ describe("按回车怎么处置", () => {
     expect(resolve("/繼續", full).kind).toBe("prompt")
   })
 
-  test("/resume 精确匹配自己，不会被前缀规则变成「续跑计划」", () => {
+  test("/resume 精确匹配自己", () => {
     const r = resolve("/resume", full)
     expect(r.kind).toBe("command")
     if (r.kind === "command") {
@@ -140,8 +139,8 @@ describe("按回车怎么处置", () => {
     expect(resolve("/resume", fresh).kind).toBe("command")
   })
 
-  test("/res 前缀不唯一，不替用户在挑会话和续计划之间猜", () => {
-    expect(matchCommand("/res", full)).toBeNull()
+  test("/re 前缀不唯一，不替用户在挑会话和回检查点之间猜", () => {
+    expect(matchCommand("/re", full)).toBeNull()
   })
 
   // 「要参数却没给」这条分支暂时测不了：/plan 和 /team 改成模式（Shift+Tab）之后，
@@ -162,16 +161,15 @@ describe("按回车怎么处置", () => {
     expect(r.kind).toBe("unavailable")
   })
 
-  test("老后端只宣告 resume（没有 resume_plan）也照样能用", () => {
-    const old: CommandContext = { ...full, features: ["plan", "resume", "session"] }
-    expect(resolve("/resume-plan", old).kind).toBe("command")
+  test("/resume-plan 没了：DAG 计划下线之后它是个不存在的命令，不能当提示词发出去", () => {
+    expect(resolve("/resume-plan", full)).toEqual({ kind: "unknown", typed: "/resume-plan" })
   })
 })
 
 describe("列表和帮助", () => {
   test("用不了的命令也列出来，灰着比消失好懂", () => {
     const entries = listCommands(fresh)
-    expect(entries).toHaveLength(12)
+    expect(entries).toHaveLength(11)
     const cont = entries.find((e) => e.id === "continue")!
     expect(cont.available).toBe(false)
     expect(cont.reason).toBeTruthy()
@@ -179,7 +177,7 @@ describe("列表和帮助", () => {
 
   test("/help 每条都带一句说明，用不了的写明原因", () => {
     const lines = helpLines(fresh)
-    expect(lines).toHaveLength(12)
+    expect(lines).toHaveLength(11)
     expect(lines.some((l) => l.includes("/compact"))).toBe(true)
     expect(lines.every((l) => !l.includes("/plan ") && !l.includes("/team")),
     ).toBe(true)
@@ -262,5 +260,52 @@ describe("/status", () => {
     const lines = statusLines({ model: "m", hasApiKey: true })
     expect(lines[1]).toContain("后端没发")
     expect(lines[2]).toContain("后端没发")
+  })
+})
+
+describe("技能（/名字 点一份技能）", () => {
+  const withSkills: CommandContext = {
+    ...full,
+    skills: [
+      { id: "baguwen", description: "记八股文" },
+      { id: "mg-video", description: "做成带配音的视频" },
+      // 和内置命令撞名：内置的赢，技能不再列一遍
+      { id: "help", description: "别的 help" },
+    ],
+  }
+
+  test("技能排在内置命令后面，撞名的不列", () => {
+    const names = listCommands(withSkills).map((c) => c.name)
+    expect(names.slice(-2)).toEqual(["/baguwen", "/mg-video"])
+    expect(names.filter((n) => n === "/help")).toHaveLength(1)
+  })
+
+  test("边打边筛照样认技能", () => {
+    expect(filterCommands("/mg", withSkills).map((c) => c.name)).toEqual(["/mg-video"])
+    expect(filterCommands("/b", withSkills).map((c) => c.name)).toEqual(["/baguwen"])
+  })
+
+  test("回车：认成一条 skill 命令，参数原样带上，由界面整句发给后端", () => {
+    const r = resolve("/baguwen 加一道 HashMap 扩容", withSkills)
+    expect(r.kind).toBe("command")
+    if (r.kind === "command") {
+      expect(r.entry.id).toBe("skill")
+      expect(r.entry.name).toBe("/baguwen")
+      expect(r.args).toBe("加一道 HashMap 扩容")
+    }
+  })
+
+  test("唯一前缀也认，发出去的用全名", () => {
+    const r = resolve("/bag", withSkills)
+    expect(r.kind === "command" && r.entry.name).toBe("/baguwen")
+  })
+
+  test("菜单里高亮一份技能按回车：run，参数取用户实际敲的", () => {
+    const entries = filterCommands("/mg 这篇", withSkills)
+    expect(acceptSelected(entries, 0, "/mg 这篇")).toMatchObject({ kind: "run", entry: { id: "skill" }, args: "这篇" })
+  })
+
+  test("没装技能时 / 菜单还是那几条内置命令", () => {
+    expect(listCommands(full).every((c) => c.id !== "skill")).toBe(true)
   })
 })

@@ -27,26 +27,11 @@ export type RoleInfo = {
   tools: string[]
 }
 
-/** 计划里的一个任务，线上形态。status/parentId 在 plan_created 里分别是 PENDING/null。 */
-export type PlanTaskWire = {
-  id: string
-  type: string
-  /**
-   * 派给这一步的角色 id（`explorer` / `coder` / …）。老后端没有这个字段。
-   *
-   * 和 `type` 不是一回事：同一个 `FILE_READ` 底下既可能是 `explorer`（去查清楚）
-   * 也可能是 `reviewer`（去挑毛病）——只画 type 的话这两件事长得一模一样。
-   */
-  role?: string
-  /** 角色的中文名，后端给。界面**不要自己按 id 映射**——两边措辞会漂。 */
-  roleTitle?: string
-  description: string
-  /** 做到什么算这一步完成。老计划里可能是 null。 */
-  acceptance?: string | null
-  status: string
-  parentId: string | null
-  dependsOn: string[]
-}
+/** 用户能用 `/名字` 点的一份技能（`ready.skills`）。斜杠菜单拿它补全。 */
+export type SkillInfo = { id: string; description: string }
+
+/** 会话模式。plan 模式是后端持有的权限模式：只许调研，计划批了才退出（协议见 Protocol.java）。 */
+export type ModeWire = 'normal' | 'plan'
 
 /**
  * 一条长期记忆在列表里的样子。
@@ -125,18 +110,15 @@ export type ServerEvent =
        * 状态栏却写 git:(myagent)。那不是简写，是错的。
        */
       branch?: string | null
-      /**
-       * 这个工作区上次没跑完的计划。没有就没这个字段。
-       *
-       * 放在首帧而不是让界面再问一次——画第一屏的时候就得知道要不要摆出「接着跑」。
-       */
-      resumable?: { goal: string; remaining: number; total: number; savedAt: number }
+      /** 会话眼下的模式。老后端没有这个字段，按 normal 算。和 planMode（只读启动）不是一回事 */
+      mode?: ModeWire
+      /** 用户能用 `/名字` 点的技能。老后端没有 */
+      skills?: SkillInfo[]
       /** 眼前这段对话断在了半路。晚连上来的界面靠它补上「继续」的提示（协议 3.1）。 */
       interrupted?: Interrupted
       /**
        * 这个工作区上次没聊完的对话。没有就没这个字段。
        *
-       * 和 resumable 是两件事：那个续的是**计划**，这个续的是**对话**。
        */
       continuable?: {
         id: string
@@ -307,47 +289,18 @@ export type ServerEvent =
   | { t: 'pong' }
   /** 重连补发时留底装不下、有一段补不回来（协议 1.2）。from–to 是缺的号段。 */
   | { t: 'replay_gap'; from: number; to: number }
-  // ---- 先规划后执行（feature: 'plan'），时序见 docs/protocol.md 第 5 节 ----
-  /** 规划产出。layers 是服务端算好的拓扑分层——界面直接照着画，别自己按 dependsOn 再推一遍。 */
-  | { t: 'plan_created'; goal: string; tasks: PlanTaskWire[]; layers: string[][] }
-  /** 等界面确认。必须回 plan_confirm_reply，900 秒不回按否决。 */
-  | { t: 'plan_confirm_request'; id: number }
-  | {
-      t: 'plan_task_started'
-      taskId: string
-      taskType: string
-      role?: string
-      roleTitle?: string
-      description: string
-    }
-  | {
-      t: 'plan_task_finished'
-      taskId: string
-      status: string
-      durationMs: number
-      result: string | null
-      error: string | null
-    }
-  /** PLANNING 任务拆出了子任务，图长大了。就地插到父任务下面，别重画整张图。 */
-  | { t: 'plan_tasks_added'; parentId: string; tasks: PlanTaskWire[] }
+  // ---- plan 模式（feature: 'plan_mode'）----
+  /** 模式变了（界面切的，或模型提议、用户同意的）。广播给所有界面，发 set_mode 的那个也收得到 */
+  | { t: 'mode'; mode: ModeWire }
   /**
-   * 某一步失败后，后端补出了一批救场任务。这是**改道**，
-   * 和 plan_tasks_added 的「计划照常长大」不是一回事，面板上该看得出区别。
+   * 等用户回话。`enter`：模型提议先进 plan 模式；`exit`：模型交了计划（`plan` 是 Markdown 全文）要批。
+   * 必须回 plan_confirm_reply，900 秒不回按否决。
    */
-  | { t: 'plan_revised'; failedTaskId: string; tasks: PlanTaskWire[] }
+  | { t: 'plan_confirm_request'; id: number; kind?: 'enter' | 'exit'; plan?: string }
+  /** UserPromptSubmit hook 的动静。blocked 时那句话没发给模型，message 是 hook 给的理由 */
+  | { t: 'hook'; blocked: boolean; message: string }
   /** 后端让模型给这段会话起好了短标题，界面拿它当终端标签页标题。 */
   | { t: 'session_title'; title: string }
-  /** 用户否决时只有 status（CANCELLED），没有那三个计数。 */
-  | {
-      t: 'plan_finished'
-      status: string
-      succeeded?: number
-      failed?: number
-      skipped?: number
-      durationMs?: number
-      /** 中途重规划了几次。COMPLETED 且大于 0，说明绕过弯但目标达成了。 */
-      replans?: number
-    }
 
 // ------------------------------------------------------------ 客户端 → 服务端
 
@@ -357,19 +310,12 @@ export type ClientCommand =
   /** `cid` 是本连接的 id，用来在收到回显时认出「这是我自己刚说的」（协议 3.15）。 */
   /** images：用户贴的截图，顺序对应 text 里的 `[图片 #n]`（见 PromptImages.java）。没图就不带这个字段 */
   | { t: 'prompt'; text: string; cid?: string; images?: { mime: string; data: string }[] }
-  | { t: 'plan'; goal: string; cid?: string }
-  /**
-   * 接着跑上次没跑完的计划。没有存档时后端回 error。
-   *
-   * 老名字是 `resume`（那会儿只有计划能续）。后端两个都认，界面发新的这个——
-   * `/resume` 在终端里指的是「挑一段会话」，协议再叫 resume 就是两头对不上。
-   */
-  | { t: 'resume_plan' }
-  /** `resume_plan` 的老名字。留着只是为了描述协议全貌，界面不再发它。 */
-  | { t: 'resume' }
+  /** 切模式（Shift+Tab）。后端回一条 mode，并广播给别的界面 */
+  | { t: 'set_mode'; mode: ModeWire }
   /** 接着聊上次没聊完的对话。没有存档、或当前已经有对话时后端回 error。 */
   | { t: 'continue' }
-  | { t: 'plan_confirm_reply'; id: number; approved: boolean }
+  /** feedback：否决时附的话，原样交给模型（「别动数据库那层」） */
+  | { t: 'plan_confirm_reply'; id: number; approved: boolean; feedback?: string }
   | { t: 'cancel' }
   /**
    * 回应 `approval_request`。

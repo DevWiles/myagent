@@ -90,7 +90,7 @@ export function EntryView(props: EntryViewProps) {
         {(entry) => <MemoryEntryView rows={entry().rows} />}
       </Match>
       <Match when={props.entry.kind === "plan" ? props.entry : null}>
-        {(entry) => <PlanEntry goal={entry().plan.goal} status={entry().plan.status} />}
+        {(entry) => <PlanEntry text={entry().text} />}
       </Match>
     </Switch>
   )
@@ -710,14 +710,15 @@ function CompactedEntry(props: { before: number; after: number; summarized: bool
   )
 }
 
-function PlanEntry(props: { goal: string; status: string }) {
+/** 模型交上来等批的计划。左边一道竖线和普通回复区分开，正文照常按 Markdown 画 */
+function PlanEntry(props: { text: string }) {
   const theme = useTheme()
   return (
     <box flexDirection="column" paddingTop={1} border={["left"]} borderColor={theme.border} paddingLeft={1}>
       <text fg={theme.heading} attributes={TextAttributes.BOLD}>
-        计划：{props.goal}
+        计划
       </text>
-      <text fg={theme.subtle}>状态 {props.status}（计划面板是后面的步骤）</text>
+      <AssistantEntry text={props.text} streaming={false} />
     </box>
   )
 }

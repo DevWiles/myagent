@@ -97,13 +97,34 @@ export function diffLineKind(line: string): DiffLineKind {
   return "context"
 }
 
+/** plan 模式确认框问的是哪件事：模型提议先进 plan 模式（enter），还是交了计划要批（exit）。 */
+export type PlanAsk = "enter" | "exit"
+
+/** 计划确认框的一个选项。`feedback` 不直接发出去，先进「补一句话」那一步。 */
+export type PlanChoice = { key: "approve" | "feedback" | "reject"; label: string }
+
 /**
- * 计划确认框的两个选项。
+ * 计划确认框有哪几个选项。
  *
  * <p>刻意**没有「以后都同意」**：每份计划都不一样，一次性授权掉后面所有计划
  * 是危险的。审批框有这一项、这里没有，是有意的差别（见 docs/protocol.md）。
+ *
+ * <p>批计划时多一项「我说说要改什么」：不批的理由才是模型改计划的依据，
+ * 光说一个「不」它只能瞎猜。提议进 plan 模式就不用了——那是个是非题。
  */
-export const PLAN_CHOICES: readonly string[] = ["执行这份计划", "放弃"]
+export function planChoices(ask: PlanAsk): PlanChoice[] {
+  if (ask === "enter") {
+    return [
+      { key: "approve", label: "好，先调研、出计划" },
+      { key: "reject", label: "不用，直接做" },
+    ]
+  }
+  return [
+    { key: "approve", label: "批准，照计划动手" },
+    { key: "feedback", label: "不批准，我说说要改什么" },
+    { key: "reject", label: "不批准" },
+  ]
+}
 
 /**
  * 光标在一列选项里挪一格。表态和挑松紧两步共用。

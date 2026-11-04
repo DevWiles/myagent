@@ -466,251 +466,101 @@ describe('其它', () => {
   })
 })
 
-// ------------------------------------------------------------ 先规划后执行
+// ------------------------------------------------------------ plan 模式（照 Claude Code）
 
-import type { PlanTaskWire } from './protocol.ts'
-
-function wireTask(id: string, deps: string[] = [], parentId: string | null = null): PlanTaskWire {
-  return { id, type: 'FILE_READ', description: `任务 ${id}`, status: 'PENDING', parentId, dependsOn: deps }
+function confirmExit(id = 1, plan = '## 计划\n1. 改 a.ts\n2. 跑测试'): ServerEvent {
+  return { t: 'plan_confirm_request', id, kind: 'exit', plan }
 }
 
-function planCreated(): ServerEvent {
-  return {
-    t: 'plan_created',
-    goal: '给 Task 加上重试能力',
-    tasks: [wireTask('t1'), wireTask('t2'), wireTask('t3', ['t1', 't2'])],
-    layers: [['t1', 't2'], ['t3']],
-  }
-}
-
-function planOf(store: SessionStore) {
-  const entry = store.getSnapshot().entries.find(e => e.kind === 'plan')
-  if (!entry || entry.kind !== 'plan') throw new Error('没有计划面板')
-  return entry.plan
-}
-
-describe('计划面板', () => {
-  test('角色跟着任务一起进来——面板要靠它区分「去查」和「去挑毛病」', () => {
+describe('plan 模式的确认', () => {
+  test('交计划：确认框挂起，计划全文同时进转录（框里放不下长计划）', () => {
     const store = new SessionStore()
-    feed(store, {
-      t: 'plan_created',
-      goal: '审一遍再改',
-      tasks: [
-        { ...wireTask('t1'), role: 'reviewer', roleTitle: '审查' },
-        { ...wireTask('t2', ['t1']), type: 'FILE_WRITE', role: 'coder', roleTitle: '编码' },
-      ],
-      layers: [['t1'], ['t2']],
+    feed(store, confirmExit())
+
+    expect(store.getSnapshot().planConfirm).toEqual({
+      id: 1, ask: 'exit', plan: '## 计划\n1. 改 a.ts\n2. 跑测试', choice: 0, feedback: null,
     })
-
-    const plan = planOf(store)
-    expect(plan.tasks[0].role).toBe('reviewer')
-    expect(plan.tasks[0].roleTitle).toBe('审查')
-    expect(plan.tasks[1].roleTitle).toBe('编码')
+    const entry = store.getSnapshot().entries.at(-1)
+    expect(entry).toMatchObject({ kind: 'plan', text: '## 计划\n1. 改 a.ts\n2. 跑测试' })
   })
 
-  test('老后端不发角色：字段就是 undefined，不能编一个出来', () => {
+  test('提议进 plan 模式：只挂确认框，转录里不多东西', () => {
     const store = new SessionStore()
-    feed(store, planCreated())
+    feed(store, { t: 'plan_confirm_request', id: 2, kind: 'enter' })
 
-    expect(planOf(store).tasks[0].role).toBeUndefined()
-    expect(planOf(store).tasks[0].roleTitle).toBeUndefined()
+    expect(store.getSnapshot().planConfirm).toMatchObject({ id: 2, ask: 'enter', choice: 0 })
+    expect(store.getSnapshot().entries).toEqual([])
   })
 
-  test('plan_created 落成一条 plan entry，goal 和分层原样保留', () => {
+  test('老后端不带 kind：按「交计划」处理', () => {
     const store = new SessionStore()
-    feed(store, planCreated())
-
-    const plan = planOf(store)
-    expect(plan.goal).toBe('给 Task 加上重试能力')
-    expect(plan.status).toBe('CREATED')
-    expect(plan.tasks.map(t => t.id)).toEqual(['t1', 't2', 't3'])
-    expect(plan.layers).toEqual([['t1', 't2'], ['t3']])
+    feed(store, { t: 'plan_confirm_request', id: 3 })
+    expect(store.getSnapshot().planConfirm?.ask).toBe('exit')
   })
 
-  test('plan_created 指向底部面板，用户说下一句时让位', () => {
+  test('光标按问法的选项数走，不绕回去', () => {
     const store = new SessionStore()
-    feed(store, planCreated())
+    feed(store, confirmExit())
+    store.movePlanChoice(5)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(2)   // exit 三项
 
-    const key = store.getSnapshot().activePlanKey
-    expect(key).not.toBeNull()
-    expect(store.getSnapshot().entries.find(e => e.key === key)?.kind).toBe('plan')
-
-    // 跑完了也还留着——刚看完就消失，用户连结果都来不及看
-    feed(store, { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 100 })
-    expect(store.getSnapshot().activePlanKey).toBe(key)
-
-    // 说下一句才让位
-    store.submitPrompt('接着干别的')
-    expect(store.getSnapshot().activePlanKey).toBeNull()
-  })
-
-  test('面板取的是 transcript 里那一份，不另存一份状态', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(), { t: 'plan_task_started', taskId: 't1', taskType: 'FILE_READ', description: '任务 t1' })
-
-    const key = store.getSnapshot().activePlanKey
-    const entry = store.getSnapshot().entries.find(e => e.key === key)
-    if (entry?.kind !== 'plan') throw new Error('没找到计划')
-
-    // 面板要显示的东西，和滚上去看到的是同一份对象
-    expect(entry.plan).toBe(planOf(store))
-    expect(entry.plan.tasks.find(t => t.id === 't1')?.status).toBe('RUNNING')
-  })
-
-  test('改道：补救任务接在失败那一步后面，并标出来是救场的', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(),
-      { t: 'plan_task_finished', taskId: 't1', status: 'FAILED', durationMs: 5, result: null, error: '炸了' },
-      { t: 'plan_revised', failedTaskId: 't1', tasks: [wireTask('r1'), wireTask('r2', ['r1'])] })
-
-    const plan = planOf(store)
-    // 甩到末尾的话，用户得自己在一堆步骤里找「这几个是来救谁的」
-    expect(plan.tasks.map(t => t.id)).toEqual(['t1', 'r1', 'r2', 't2', 't3'])
-    expect(plan.tasks.find(t => t.id === 'r1')?.recovery).toBe(true)
-    expect(plan.tasks.find(t => t.id === 't2')?.recovery).toBeUndefined()
-  })
-
-  test('认不出 failedTaskId 时补在末尾，也不能把任务弄丢', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(),
-      { t: 'plan_revised', failedTaskId: '不存在', tasks: [wireTask('r1')] })
-
-    expect(planOf(store).tasks.map(t => t.id)).toEqual(['t1', 't2', 't3', 'r1'])
-  })
-
-  test('acceptance 透传，没有就是 undefined', () => {
-    const store = new SessionStore()
-    feed(store, {
-      t: 'plan_created',
-      goal: '目标',
-      tasks: [
-        { ...wireTask('t1'), acceptance: '说清 Java 版本' },
-        wireTask('t2'),
-      ],
-      layers: [['t1', 't2']],
-    })
-
-    const plan = planOf(store)
-    expect(plan.tasks[0]?.acceptance).toBe('说清 Java 版本')
-    expect(plan.tasks[1]?.acceptance).toBeUndefined()
-  })
-
-  test('首帧带上次没跑完的计划，界面据此放出「接着跑」', () => {
-    const store = new SessionStore()
-    feed(store, {
-      ...(ready() as Extract<ServerEvent, { t: 'ready' }>),
-      features: ['plan', 'resume'],
-      resumable: { goal: '把 README 补全', remaining: 3, total: 7, savedAt: 1 },
-    })
-
-    expect(store.getSnapshot().ready?.resumable?.goal).toBe('把 README 补全')
-    expect(store.getSnapshot().ready?.resumable?.remaining).toBe(3)
-  })
-
-  test('新计划一出来，「接着跑」的提示就该收——存档已经被覆盖了', () => {
-    const store = new SessionStore()
-    feed(store, {
-      ...(ready() as Extract<ServerEvent, { t: 'ready' }>),
-      resumable: { goal: '旧的那份', remaining: 3, total: 7, savedAt: 1 },
-    })
-    expect(store.getSnapshot().ready?.resumable).toBeDefined()
-
-    feed(store, planCreated())
-
-    // 留着它会指向一份已经不存在的进度
-    expect(store.getSnapshot().ready?.resumable).toBeUndefined()
-    // 其余 ready 信息不能跟着一起丢
-    expect(store.getSnapshot().ready?.model).toBe('deepseek-chat')
-  })
-
-  test('确认请求像审批一样置起标志，回答后由界面清掉', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })
-
-    // 光标从「执行」起步，和审批框一样默认停在肯定的那一项
-    expect(store.getSnapshot().planConfirm).toEqual({ id: 1, choice: 0 })
-    store.clearPlanConfirm()
-    expect(store.getSnapshot().planConfirm).toBeNull()
-  })
-
-  test('计划确认的光标只有两格，同样不绕回去', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(), { t: 'plan_confirm_request', id: 1 })
-
-    store.movePlanChoice(1)
-    expect(store.getSnapshot().planConfirm?.choice).toBe(1)
-    store.movePlanChoice(1)
-    expect(store.getSnapshot().planConfirm?.choice).toBe(1)
-    store.movePlanChoice(-1)
+    feed(store, { t: 'plan_confirm_request', id: 2, kind: 'enter' })
+    store.movePlanChoice(5)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(1)   // enter 两项
+    store.movePlanChoice(-9)
     expect(store.getSnapshot().planConfirm?.choice).toBe(0)
   })
 
-  test('任务开始/结束原地点亮，哪怕计划面板后面已经堆了流式输出', () => {
+  test('「我说说要改什么」：进补话那一步，敲的字攒进 feedback，这时光标不动', () => {
     const store = new SessionStore()
-    feed(store,
-      planCreated(),
-      { t: 'plan_task_started', taskId: 't1', taskType: 'FILE_READ', description: '任务 t1' },
-      // 执行期间的 ReAct 事件照常进 transcript，把 plan entry 挤离队尾——
-      // 这正是 updatePlan 按 key 找而不用 replaceTail 的原因
-      { t: 'text_delta', text: '我先读一下' },
-      { t: 'plan_task_finished', taskId: 't1', status: 'SUCCEEDED', durationMs: 7000, result: '读完了', error: null })
+    feed(store, confirmExit())
+    store.beginPlanFeedback()
+    expect(store.getSnapshot().planConfirm?.feedback).toBe('')
 
-    const plan = planOf(store)
-    expect(plan.status).toBe('RUNNING')
-    expect(plan.tasks[0]).toMatchObject({ id: 't1', status: 'SUCCEEDED', durationMs: 7000 })
-    expect(plan.tasks[1]?.status).toBe('PENDING')
-    expect(kinds(store.getSnapshot().entries)).toEqual(['plan', 'assistant'])
+    for (const ch of '别动db') store.typePlanFeedback({ sequence: ch })
+    store.typePlanFeedback({ name: 'backspace' })
+    expect(store.getSnapshot().planConfirm?.feedback).toBe('别动d')
+    expect(store.typePlanFeedback({ name: 'return', sequence: '\r' })).toBe(false)
+
+    store.movePlanChoice(1)
+    expect(store.getSnapshot().planConfirm?.choice).toBe(0)
   })
 
-  test('跳过的任务把被谁连累记在 error 里', () => {
+  test('别的屏答掉了就收框；一轮结束也收', () => {
     const store = new SessionStore()
-    feed(store, planCreated(),
-      { t: 'plan_task_finished', taskId: 't3', status: 'SKIPPED', durationMs: 0, result: null, error: '上游 t1 失败' })
+    feed(store, confirmExit(7), { t: 'plan_confirm_resolved', id: 7 })
+    expect(store.getSnapshot().planConfirm).toBeNull()
 
-    expect(planOf(store).tasks[2]).toMatchObject({ status: 'SKIPPED', error: '上游 t1 失败' })
-  })
-
-  test('动态拆出的子任务插在父任务后面，不是甩到末尾', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(),
-      { t: 'plan_tasks_added', parentId: 't1', tasks: [wireTask('t1.1', [], 't1')] },
-      { t: 'plan_tasks_added', parentId: 't1', tasks: [wireTask('t1.2', ['t1.1'], 't1')] })
-
-    expect(planOf(store).tasks.map(t => t.id)).toEqual(['t1', 't1.1', 't1.2', 't2', 't3'])
-    expect(planOf(store).tasks[1]?.parentId).toBe('t1')
-  })
-
-  test('plan_finished 盖棺定论并带上收支，同时清掉可能悬着的确认框', () => {
-    const store = new SessionStore()
-    feed(store, planCreated(),
-      { t: 'plan_confirm_request', id: 1 },
-      { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 42000 })
-
-    const plan = planOf(store)
-    expect(plan.status).toBe('COMPLETED')
-    expect(plan.summary).toEqual({ succeeded: 3, failed: 0, skipped: 0, durationMs: 42000 })
+    feed(store, { t: 'busy', busy: true }, confirmExit(8), { t: 'busy', busy: false })
     expect(store.getSnapshot().planConfirm).toBeNull()
   })
+})
 
-  test('用户否决：只有 CANCELLED，没有收支——不能编造三个零', () => {
+describe('hook 的动静', () => {
+  test('被拦下：一条警告，说清这句话没发给模型', () => {
     const store = new SessionStore()
-    feed(store, planCreated(), { t: 'plan_finished', status: 'CANCELLED' })
-
-    const plan = planOf(store)
-    expect(plan.status).toBe('CANCELLED')
-    expect(plan.summary).toBeUndefined()
+    feed(store, { t: 'hook', blocked: true, message: '消息里有密钥' })
+    const entry = store.getSnapshot().entries.at(-1)
+    expect(entry).toMatchObject({ kind: 'notice', level: 'warn' })
+    expect(entry?.kind === 'notice' && entry.text).toContain('消息里有密钥')
+    expect(entry?.kind === 'notice' && entry.text).toContain('没有发给模型')
   })
 
-  test('第二份计划各自独立：更新只落在最新那份上', () => {
+  test('hook 自己出问题：一条普通提示，原话照登', () => {
     const store = new SessionStore()
-    feed(store, planCreated(), { t: 'plan_finished', status: 'COMPLETED', succeeded: 3, failed: 0, skipped: 0, durationMs: 1000 })
-    feed(store, planCreated(),
-      { t: 'plan_task_finished', taskId: 't1', status: 'FAILED', durationMs: 5, result: null, error: '炸了' })
+    feed(store, { t: 'hook', blocked: false, message: 'hook「x」退出码 1' })
+    expect(store.getSnapshot().entries.at(-1)).toMatchObject({ kind: 'notice', level: 'info', text: 'hook「x」退出码 1' })
+  })
+})
 
-    const plans = store.getSnapshot().entries.filter(e => e.kind === 'plan')
-    expect(plans).toHaveLength(2)
-    expect(plans[0]).toMatchObject({ plan: { status: 'COMPLETED' } })
-    expect(plans[1]).toMatchObject({ plan: { tasks: expect.arrayContaining([expect.objectContaining({ id: 't1', status: 'FAILED' })]) } })
+describe('首帧里的技能', () => {
+  test('skills 原样进 ready；老后端不发就是空数组', () => {
+    const store = new SessionStore()
+    feed(store, { ...(ready() as Extract<ServerEvent, { t: 'ready' }>), skills: [{ id: 'baguwen', description: '记八股文' }] })
+    expect(store.getSnapshot().ready?.skills).toEqual([{ id: 'baguwen', description: '记八股文' }])
+
+    feed(store, ready())
+    expect(store.getSnapshot().ready?.skills).toEqual([])
   })
 
   test('ready 没带 features 的老后端：features 是空数组，不是 undefined', () => {
@@ -725,7 +575,7 @@ describe('会话恢复', () => {
   const readyWithSession = () =>
     ({
       ...(ready() as Extract<ServerEvent, { t: 'ready' }>),
-      features: ['plan', 'resume', 'session'],
+      features: ['plan_mode', 'session'],
       continuable: {
         turns: 4,
         messages: 11,
@@ -740,17 +590,6 @@ describe('会话恢复', () => {
 
     expect(store.getSnapshot().ready?.continuable?.turns).toBe(4)
     expect(store.getSnapshot().ready?.continuable?.firstMessage).toBe('这个项目怎么跑测试')
-  })
-
-  test('续计划和续对话是两件独立的事，可以同时挂着', () => {
-    const store = new SessionStore()
-    feed(store, {
-      ...(readyWithSession() as Extract<ServerEvent, { t: 'ready' }>),
-      resumable: { goal: '把 README 补全', remaining: 3, total: 7, savedAt: 1 },
-    })
-
-    expect(store.getSnapshot().ready?.resumable).toBeDefined()
-    expect(store.getSnapshot().ready?.continuable).toBeDefined()
   })
 
   test('恢复成功后「接着聊」的入口就该收——存档已经用掉了', () => {
@@ -1094,11 +933,11 @@ describe("长期记忆清单", () => {
 // ------------------------------------------------------------ 模式（Shift+Tab）
 
 describe('模式切换', () => {
-  const withFeatures = (features: string[]) => {
+  const withFeatures = (features: string[], mode?: 'normal' | 'plan') => {
     const store = new SessionStore()
     feed(store, {
       t: 'ready', protocol: 1, version: '0.2.0', workspace: '/tmp/x', model: 'm',
-      planMode: false, hasApiKey: true, busy: false, features, tools: [],
+      planMode: false, hasApiKey: true, busy: false, features, tools: [], ...(mode ? { mode } : {}),
     } as ServerEvent)
     return store
   }
@@ -1107,34 +946,41 @@ describe('模式切换', () => {
     expect(new SessionStore().getSnapshot().mode).toBe('normal')
   })
 
-  test('normal → plan → normal，转一圈回到原地', () => {
-    const store = withFeatures(['plan'])
+  test('normal → plan → normal：本地先切，返回值告诉调用方该请后端切到哪', () => {
+    const store = withFeatures(['plan_mode'])
 
-    store.cycleMode()
+    expect(store.cycleMode()).toBe('plan')
     expect(store.getSnapshot().mode).toBe('plan')
-    store.cycleMode()
+    expect(store.cycleMode()).toBe('normal')
     expect(store.getSnapshot().mode).toBe('normal')
   })
 
-  test('老后端还宣告 team 也切不进去——界面已经没有这个模式了', () => {
+  test('老后端只宣告 plan（DAG 那一套）：切不进去——那个 plan 已经不是这个 plan 了', () => {
     const store = withFeatures(['plan', 'team'])
 
-    store.cycleMode()
-    expect(store.getSnapshot().mode).toBe('plan')
-    store.cycleMode()
+    expect(store.cycleMode()).toBeNull()
     expect(store.getSnapshot().mode).toBe('normal')
   })
 
-  test('没宣告 plan 时，按了等于没按，不会卡在跑不了的模式上', () => {
+  test('没宣告 plan_mode 时，按了等于没按，也不该发 set_mode', () => {
     const store = withFeatures([])
 
-    store.cycleMode()
-
+    expect(store.cycleMode()).toBeNull()
     expect(store.getSnapshot().mode).toBe('normal')
   })
 
-  test('模式跨轮保持——它是用户表过的态，不该跑完一轮就弹回去', () => {
-    const store = withFeatures(['plan'])
+  test('模式听后端的：首帧带着、mode 事件改它（模型提议进 plan、计划批了自动退出）', () => {
+    const store = withFeatures(['plan_mode'], 'plan')
+    expect(store.getSnapshot().mode).toBe('plan')
+
+    feed(store, { t: 'mode', mode: 'normal' })
+    expect(store.getSnapshot().mode).toBe('normal')
+    feed(store, { t: 'mode', mode: 'plan' })
+    expect(store.getSnapshot().mode).toBe('plan')
+  })
+
+  test('模式跨轮保持——跑完一轮不弹回去', () => {
+    const store = withFeatures(['plan_mode'])
     store.cycleMode()
 
     store.submitPrompt('干点活')
@@ -1146,8 +992,7 @@ describe('模式切换', () => {
   test('还没连上后端时不瞎切——能力清单是空的', () => {
     const store = new SessionStore()
 
-    store.cycleMode()
-
+    expect(store.cycleMode()).toBeNull()
     expect(store.getSnapshot().mode).toBe('normal')
   })
 })
@@ -1157,14 +1002,14 @@ describe('模式可用性（纯函数）', () => {
     expect(modeIsAvailable('normal', [])).toBe(true)
   })
 
-  test('plan 看自己的 feature', () => {
-    expect(modeIsAvailable('plan', ['team'])).toBe(false)
-    expect(modeIsAvailable('plan', ['plan'])).toBe(true)
+  test('plan 看 plan_mode 能力', () => {
+    expect(modeIsAvailable('plan', ['plan'])).toBe(false)
+    expect(modeIsAvailable('plan', ['plan_mode'])).toBe(true)
   })
 
   test('nextMode 是纯的，不碰 store', () => {
-    expect(nextMode('normal', ['plan'])).toBe('plan')
-    expect(nextMode('plan', ['plan'])).toBe('normal')
+    expect(nextMode('normal', ['plan_mode'])).toBe('plan')
+    expect(nextMode('plan', ['plan_mode'])).toBe('normal')
     expect(nextMode('plan', [])).toBe('normal')
   })
 })

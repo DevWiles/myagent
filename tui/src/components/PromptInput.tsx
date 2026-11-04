@@ -82,10 +82,15 @@ export type PromptInputProps = {
    */
   matched?: boolean
   /**
-   * 挂载时把控件的手交出去：`setValue` 给 Tab 补全，`pasteImage` 给贴图快捷键
+   * 挂载时把控件的手交出去：`setValue` 给 Tab 补全，`pasteImage` 给贴图快捷键，
+   * `submitText` 给菜单回车执行技能——换掉整行再走一遍正常提交，贴进来的长文和图都还跟着
    * （按键在 App 的全局 handler 里接，见 clipboard-image.ts）。
    */
-  controls?: (api: { setValue: (value: string) => void; pasteImage: () => void }) => void
+  controls?: (api: {
+    setValue: (value: string) => void
+    pasteImage: () => void
+    submitText: (value: string) => void
+  }) => void
   /** 这句话现在不能带图的原因（计划模式、后端太老）。有值时带图的提交会被拦下、输入框原样留着 */
   imagesBlocked?: string
   /** 贴图没成、带图被拦时说一声。不给就静默 */
@@ -202,6 +207,12 @@ export function PromptInput(props: PromptInputProps) {
             input = r
             props.controls?.({
               pasteImage,
+              submitText: (value: string) => {
+                // 和 setValue 相反：占位符的原文和图**不清**，value 里还带着它们的占位符，
+                // 交给 submit 照常收集（菜单回车选技能时，补全的是名字，参数和图是用户刚贴的）
+                r.setText(value)
+                submit()
+              },
               setValue: (value: string) => {
                 // 程序改写整行（Tab 补全、清空）：原来那几段粘贴的占位符都不在了
                 pastes.clear()

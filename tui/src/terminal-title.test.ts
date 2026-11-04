@@ -42,7 +42,7 @@ describe("该亮哪种", () => {
 
   test("卡在审批或计划确认上就是在等你，哪怕这一轮还算在跑", () => {
     expect(tabStatus({ ...base, busy: true, approval: {} as never })).toBe("waiting")
-    expect(tabStatus({ ...base, busy: true, planConfirm: { id: 1, choice: 0 } })).toBe("waiting")
+    expect(tabStatus({ ...base, busy: true, planConfirm: { id: 1, ask: "exit", plan: "", choice: 0, feedback: null } })).toBe("waiting")
   })
 
   test("断线、后端退了、上一轮失败：出错，而且压过等你", () => {

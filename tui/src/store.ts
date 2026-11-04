@@ -16,9 +16,9 @@
  * 历史还在。这是刻意的（和 vim 一样），想留档就用 `--no-fullscreen`。
  */
 
-import { ASK_STAGE, askChoices, editFeedback, moveSelection, PLAN_CHOICES } from './approval.ts'
-import type { ApprovalStage, ApprovalSuggestion } from './approval.ts'
-import type { Interrupted, MemoryRow, PlanTaskWire, RoleInfo, ServerEvent, ToolInfo, TranscriptItem } from './protocol.ts'
+import { ASK_STAGE, askChoices, editFeedback, moveSelection, planChoices } from './approval.ts'
+import type { ApprovalStage, ApprovalSuggestion, PlanAsk } from './approval.ts'
+import type { Interrupted, MemoryRow, ServerEvent, SkillInfo, ToolInfo, TranscriptItem } from './protocol.ts'
 import type { SessionRow } from './session-picker.ts'
 
 export type ToolCall = {
@@ -32,52 +32,6 @@ export type ToolCall = {
   diff?: string
 }
 
-/** 计划里的一个任务 + 它的执行进度。界面自己的形态，不直接用线上类型。 */
-export type PlanTask = {
-  id: string
-  type: string
-  /** 派给这一步的角色 id。老后端不发这个字段，那就只有 type 可显示。 */
-  role?: string
-  /** 角色的中文名，后端给的。界面不自己按 id 映射——两边措辞会漂。 */
-  roleTitle?: string
-  description: string
-  /** 做到什么算完。可能没有——老计划里没这个字段。 */
-  acceptance?: string
-  /** 这一步是失败后补出来的救场任务。面板上要和原计划的步骤区分开。 */
-  recovery?: boolean
-  /** PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED */
-  status: string
-  parentId: string | null
-  dependsOn: string[]
-  durationMs?: number
-  error?: string
-}
-
-export type PlanSummary = {
-  succeeded: number
-  failed: number
-  skipped: number
-  durationMs: number
-}
-
-/**
- * 一份计划的完整状态，作为一条 entry 活在 transcript 里。
- *
- * 为什么进 transcript 而不是钉在底部：计划面板要能往回滚、能和执行过程的
- * 流式输出交错着看，这正是「transcript 里全是活的 React 元素」这个渲染模型
- * 的用武之地。执行期间它被原地更新（✓/✗ 逐个点亮），滚上去随时能看进度。
- */
-export type PlanData = {
-  goal: string
-  /** 服务端顺序；plan_tasks_added 的子任务插在父任务（和先来的兄弟）后面。 */
-  tasks: PlanTask[]
-  /** 拓扑分层，服务端算好的。只含创建时的根任务。 */
-  layers: string[][]
-  /** CREATED | RUNNING | COMPLETED | FAILED | CANCELLED */
-  status: string
-  summary?: PlanSummary
-}
-
 export type Entry =
   /** `display` 在时画它（大段粘贴折成占位符，见 paste-fold.ts），`text` 是真正发出去的全文 */
   | { kind: 'user'; key: string; text: string; display?: string }
@@ -88,7 +42,8 @@ export type Entry =
   | { kind: 'compacting'; key: string; phase: 'map' | 'reduce'; done: number; total: number; percent: number }
   | { kind: 'compacted'; key: string; before: number; after: number; summarized: boolean }
   | { kind: 'memory'; key: string; rows: MemoryRow[] }
-  | { kind: 'plan'; key: string; plan: PlanData }
+  /** 模型在 plan 模式下交上来等批的计划（Markdown）。进转录是为了能往回滚着读、批完也还在 */
+  | { kind: 'plan'; key: string; text: string }
 
 /**
  * 把接回来的对话摊成 entry，长得和当时实时跑出来的一样：
@@ -142,12 +97,11 @@ export type Approval = {
 }
 
 /**
- * 下一句话按什么方式跑。
+ * 会话的模式（照 Claude Code，plan 模式是一种权限模式）。
  *
- * <p>这是原来 `/plan` 这类斜杠命令的替代品：**同一句话，模式决定它怎么被处理**，
- * 而不是让用户在每句话前面手打一个命令名。好处不只是少敲几个字——
- * 模式是**看得见的状态**（左下角常驻一行），敲命令是转瞬即逝的动作，
- * 用户不必记住「我刚才有没有加 /plan」。
+ * <p>**状态在后端**：模型也能提议进 plan 模式、计划批了后端自己退出，
+ * 所以界面只是跟着 `mode` 事件走，Shift+Tab 发 `set_mode` 请后端切。
+ * 模式是**看得见的状态**（左下角常驻一行），用户不必记住「我刚才有没有切过去」。
  */
 export type Mode = 'normal' | 'plan'
 
@@ -162,7 +116,7 @@ export const MODE_CYCLE: readonly Mode[] = ['normal', 'plan']
  */
 const MODE_FEATURE: Record<Mode, string | null> = {
   normal: null,
-  plan: 'plan',
+  plan: 'plan_mode',
 }
 
 export function modeIsAvailable(mode: Mode, features: readonly string[]): boolean {
@@ -196,8 +150,6 @@ export type ReadyInfo = {
   /** 打过码的 key（`sk-****abcd`），没配是 null，老后端不发是 undefined。 */
   apiKeyMasked?: string | null
   tools: ToolInfo[]
-  /** 后端的角色名册。老后端不发，那就是空数组。 */
-  roles: RoleInfo[]
   /** 后端宣告的可选能力。没宣告的模式 Shift+Tab 会跳过（见 {@link nextMode}）。 */
   features: string[]
   workspaceWarning?: string
@@ -205,9 +157,9 @@ export type ReadyInfo = {
   auditLog?: string
   /** 工作区真正的 git 分支（不在仓库里就是 null）。状态栏显示它，不再拿目录名冒充。 */
   branch?: string | null
-  /** 上次没跑完的计划。没有就是 undefined。 */
-  resumable?: { goal: string; remaining: number; total: number; savedAt: number }
-  /** 上次没聊完的对话（最近那一段）。和 resumable 是两件事：那个是计划，这个是对话。 */
+  /** 用户能用 `/名字` 点的技能。老后端不发，那就是空数组。 */
+  skills: SkillInfo[]
+  /** 上次没聊完的对话（最近那一段）。 */
   continuable?: {
     id: string
     branch?: string | null
@@ -233,6 +185,22 @@ export type LinkState =
       restarting: boolean
     }
 
+/**
+ * plan 模式的一道确认。
+ *
+ * <p>`choice` 是光标停在哪个选项上；`feedback` 非 null 表示选了「我说说要改什么」、
+ * 正在补那句话。和审批框那份状态一样放在 store 里：按键在 App 里处理，
+ * 而矮终端上框可能压根不渲染。
+ */
+export type PlanConfirm = {
+  id: number
+  ask: PlanAsk
+  /** exit 时是计划全文（Markdown），enter 时是空串 */
+  plan: string
+  choice: number
+  feedback: string | null
+}
+
 export type SessionState = {
   ready: ReadyInfo | null
   /** 全部对话记录。渲染层负责视口裁剪，这里不关心屏幕。 */
@@ -250,29 +218,12 @@ export type SessionState = {
    * 状态跟着组件走的话，那种终端上挪光标会没有任何反应——后端还等着，用户不知道为什么。
    */
   approvalStage: ApprovalStage
+  /** 待回答的 plan 模式确认。和 approval 一样：后端此刻阻塞在等回答上。 */
+  planConfirm: PlanConfirm | null
   /**
-   * 待回答的计划确认。和 approval 一样：后端此刻阻塞在等回答上。
-   *
-   * <p>`choice` 是光标停在哪个选项上（0 执行 / 1 放弃）。和审批框那份状态
-   * 放在一起、也放在 store 里，理由一模一样。
-   */
-  planConfirm: { id: number; choice: number } | null
-  /**
-   * 底部那块计划面板该显示哪份计划，指向 entries 里的某条 plan。
-   *
-   * **存 key 而不是存一份 PlanData**：计划在 transcript 里已经有一份了，
-   * 再复制一份到 state 上，两处各更新各的，迟早对不上——而这种不一致的表现是
-   * 「面板上还是 PENDING，往上滚那份已经打勾了」，看着像 bug 其实是设计错了。
-   *
-   * 生命周期：plan_created 时指上，**用户发下一句话时清掉**。
-   * 所以跑完的计划会一直留在屏幕底下，不会刚看完就消失。
-   */
-  /**
-   * 下一句话按什么方式跑。**跨轮保持**——模式是用户表过的态，
-   * 不该因为跑完一轮就自己弹回去；那样他每说一句话都得重按一次。
+   * 会话眼下的模式。**跨轮保持**，由后端说了算（见 {@link Mode}）。
    */
   mode: Mode
-  activePlanKey: string | null
   tokens: number
   /** 累计真正发出去的提示词。只增不减，压缩不会让它变小。 */
   sentTokens: number
@@ -331,8 +282,7 @@ const EMPTY_STATE: SessionState = {
   approvalStage: ASK_STAGE,
   planConfirm: null,
   mode: 'normal',
-  activePlanKey: null,
-    tokens: 0,
+  tokens: 0,
   sentTokens: 0,
   contextLimit: 0,
   lastDurationMs: null,
@@ -438,39 +388,21 @@ export class SessionStore {
     this.set({ entries: this.state.entries.filter(entry => entry.key !== key) })
   }
 
-  /** 当前计划面板的 key。执行期间流式输出会排在它后面，所以不能用 replaceTail。 */
-  private planKey: string | null = null
-
-  /** 原地改当前计划面板。计划面板多半不在队尾——按 key 找，不管它滚到哪儿了。 */
-  private updatePlan(update: (plan: PlanData) => PlanData): void {
-    const key = this.planKey
-    if (!key) return
-    this.set({
-      entries: this.state.entries.map(entry =>
-        entry.kind === 'plan' && entry.key === key
-          ? { ...entry, plan: update(entry.plan) }
-          : entry,
-      ),
-    })
-  }
-
-  private patchTask(taskId: string, patch: Partial<PlanTask>): void {
-    this.updatePlan(plan => ({
-      ...plan,
-      tasks: plan.tasks.map(task => (task.id === taskId ? { ...task, ...patch } : task)),
-    }))
-  }
-
   // ------------------------------------------------------------ 用户动作
 
   /**
-   * 切到下一个模式（Shift+Tab）。
+   * 切到下一个模式（Shift+Tab）。先在本地切过去（乐观更新），由调用方发 `set_mode`，
+   * 后端回的 `mode` 事件是最终结果。
    *
-   * <p><b>正忙时也允许切</b>：模式在<b>提交那一刻</b>才起作用，提前切好是很自然的用法
-   * ——这一轮还在跑，我已经想好下一句要走规划。拦住它只会让人以为按键失灵。
+   * <p><b>正忙时也允许切</b>：后端在下一步请求时就换菜单，和 Claude Code 一样。
+   *
+   * @returns 切到的模式；没有别的可用模式时返回 null（什么也不用发）
    */
-  cycleMode(): void {
-    this.set({ mode: nextMode(this.state.mode, this.state.ready?.features ?? []) })
+  cycleMode(): Mode | null {
+    const next = nextMode(this.state.mode, this.state.ready?.features ?? [])
+    if (next === this.state.mode) return null
+    this.set({ mode: next })
+    return next
   }
 
   submitPrompt(text: string, display?: string): void {
@@ -479,17 +411,7 @@ export class SessionStore {
       entries: [...this.state.entries, { kind: 'user', key: this.nextKey('user'), text, ...shown }],
       step: 0,
       startedAt: Date.now(),
-      // 说下一句了，底部那块面板该让位——上一份的痕迹在 transcript 里还留着
-      activePlanKey: null,
-          })
-  }
-
-  /** 去掉「上次有计划没跑完」那条，其余 ready 信息原样保留。 */
-  private clearResumable(): ReadyInfo | null {
-    const ready = this.state.ready
-    if (!ready?.resumable) return ready
-    const { resumable, ...rest } = ready
-    return rest
+    })
   }
 
   /**
@@ -528,13 +450,41 @@ export class SessionStore {
     this.set({ planConfirm: null })
   }
 
-  /** 计划确认框里挪光标。只有两项，同样不循环。 */
+  /** 计划确认框里挪光标。同样不循环。补话那一步不动。 */
   movePlanChoice(delta: number): void {
     const confirm = this.state.planConfirm
-    if (!confirm) return
+    if (!confirm || confirm.feedback !== null) return
     this.set({
-      planConfirm: { ...confirm, choice: moveSelection(confirm.choice, delta, PLAN_CHOICES.length) },
+      planConfirm: {
+        ...confirm,
+        choice: moveSelection(confirm.choice, delta, planChoices(confirm.ask).length),
+      },
     })
+  }
+
+  /** 计划确认框里光标直接跳到第 n 个（数字键直选）。越界不动。 */
+  pickPlanChoice(index: number): void {
+    const confirm = this.state.planConfirm
+    if (!confirm || confirm.feedback !== null) return
+    if (index < 0 || index >= planChoices(confirm.ask).length) return
+    this.set({ planConfirm: { ...confirm, choice: index } })
+  }
+
+  /** 选了「不批准，我说说要改什么」：进补话那一步。 */
+  beginPlanFeedback(): void {
+    const confirm = this.state.planConfirm
+    if (!confirm) return
+    this.set({ planConfirm: { ...confirm, feedback: '' } })
+  }
+
+  /** 在计划确认的补话那一步敲了个键。返回 false 表示这个键不归它（回车、Esc、方向键） */
+  typePlanFeedback(key: { name?: string; sequence?: string }): boolean {
+    const confirm = this.state.planConfirm
+    if (!confirm || confirm.feedback === null) return false
+    const next = editFeedback(confirm.feedback, key)
+    if (next === null) return false
+    this.set({ planConfirm: { ...confirm, feedback: next } })
+    return true
   }
 
   /**
@@ -667,14 +617,14 @@ export class SessionStore {
             baseUrl: event.baseUrl,
             apiKeyMasked: event.apiKeyMasked,
             tools: event.tools,
-            roles: event.roles ?? [],
             features: event.features ?? [],
             workspaceWarning: event.workspaceWarning,
             auditLog: event.auditLog,
             branch: event.branch,
-            resumable: event.resumable,
+            skills: event.skills ?? [],
             continuable: event.continuable,
           },
+          mode: event.mode ?? 'normal',
           busy: event.busy,
           interrupted: event.interrupted ?? null,
           sessionTitle: event.sessionTitle ?? null,
@@ -1004,110 +954,29 @@ export class SessionStore {
         return
       }
 
-      case 'plan_created': {
-        const key = this.nextKey('plan')
-        this.planKey = key
-        // 提示该收了：存档要么刚被续上，要么正被这份新计划覆盖，
-        // 留着它会指向一份已经不存在的进度
-        this.set({ activePlanKey: key, ready: this.clearResumable() })
-        this.append({
-          kind: 'plan',
-          key,
-          plan: {
-            goal: event.goal,
-            tasks: event.tasks.map(task => fromWire(task)),
-            layers: event.layers,
-            status: 'CREATED',
-          },
-        })
+      case 'mode':
+        this.set({ mode: event.mode })
+        return
+
+      case 'plan_confirm_request': {
+        const ask: PlanAsk = event.kind ?? 'exit'
+        const plan = event.plan ?? ''
+        // 计划进转录：框里放不下长计划，往回滚着读、批完以后回头对账都靠这一份
+        if (ask === 'exit' && plan.trim()) {
+          this.append({ kind: 'plan', key: this.nextKey('plan'), text: plan })
+        }
+        this.set({ planConfirm: { id: event.id, ask, plan, choice: 0, feedback: null } })
         return
       }
 
-      case 'plan_confirm_request':
-        this.set({ planConfirm: { id: event.id, choice: 0 } })
+      case 'hook':
+        this.notice(event.blocked ? 'warn' : 'info',
+          event.blocked ? `这句话被 hook 拦下了，没有发给模型：${event.message}` : event.message)
         return
-
-      case 'plan_task_started':
-        this.updatePlan(plan => ({ ...plan, status: 'RUNNING' }))
-        this.patchTask(event.taskId, { status: 'RUNNING' })
-        return
-
-      case 'plan_task_finished':
-        this.patchTask(event.taskId, {
-          status: event.status,
-          durationMs: event.durationMs,
-          error: event.error ?? undefined,
-        })
-        return
-
-      case 'plan_tasks_added': {
-        // 就地插到父任务（和先到的兄弟）后面，别 push 到末尾——
-        // 面板按数组顺序渲染，子任务排到别人家底下会看不懂
-        this.updatePlan(plan => {
-          const tasks = [...plan.tasks]
-          let at = tasks.findIndex(task => task.id === event.parentId)
-          if (at < 0) return { ...plan, tasks: [...tasks, ...event.tasks.map(task => fromWire(task))] }
-          while (at + 1 < tasks.length && tasks[at + 1]?.parentId === event.parentId) at++
-          tasks.splice(at + 1, 0, ...event.tasks.map(task => fromWire(task)))
-          return { ...plan, tasks }
-        })
-        return
-      }
-
-      case 'plan_revised': {
-        // 改道：补救任务接在**失败的那一步**后面，而不是甩到末尾。
-        // 甩到末尾的话，用户得自己在一堆步骤里找「这几个是来救谁的」
-        this.updatePlan(plan => {
-          const tasks = [...plan.tasks]
-          const at = tasks.findIndex(task => task.id === event.failedTaskId)
-          const recovered = event.tasks.map(task => fromWire(task, true))
-          if (at < 0) return { ...plan, tasks: [...tasks, ...recovered] }
-          tasks.splice(at + 1, 0, ...recovered)
-          return { ...plan, tasks }
-        })
-        return
-      }
-
-      case 'plan_finished': {
-        const summary =
-          event.succeeded !== undefined
-            ? {
-                succeeded: event.succeeded,
-                failed: event.failed ?? 0,
-                skipped: event.skipped ?? 0,
-                durationMs: event.durationMs ?? 0,
-              }
-            : undefined
-        this.updatePlan(plan => ({ ...plan, status: event.status, summary }))
-        this.set({ planConfirm: null })
-        return
-      }
 
       case 'pong':
         return
     }
-  }
-}
-
-/**
- * ⚠️ **调用时不要写 `map(fromWire)`**，要写 `map(task => fromWire(task))`。
- *
- * Array.map 会把 (元素, 下标, 数组) 三个参数全传进来，于是下标就成了第二个参数 recovery——
- * 第 0 个任务侥幸没事（0 是 falsy），第 1 个开始全被标成救场任务。
- * 这种错不会报错，只会让面板上凭空多出一堆「改道」标记。
- */
-function fromWire(task: PlanTaskWire, recovery = false): PlanTask {
-  return {
-    id: task.id,
-    type: task.type,
-    role: task.role,
-    roleTitle: task.roleTitle,
-    description: task.description,
-    acceptance: task.acceptance ?? undefined,
-    status: task.status,
-    parentId: task.parentId ?? null,
-    dependsOn: task.dependsOn ?? [],
-    ...(recovery ? { recovery: true } : {}),
   }
 }
 
